@@ -209,14 +209,18 @@ def test_an_old_row_is_still_readable_through_the_fallback():
         assert "上游报告输出撞上单次输出上限" in legacy[0]["error"]
 
 
-def test_a_new_row_does_not_fall_back_when_the_column_is_empty():
-    """新行的这一列**是空串**（上游报了、就是空）→ **不许**回落去 `error` 里翻。
+def test_a_row_whose_column_is_present_never_falls_back_to_error():
+    """这一列**在**（哪怕是空）就不许回落去 `error` 里翻。
 
-    「这一列是空」与「这一列没有」（老行的 NULL）是两件事：按真值判断（`if not value`）
-    就会把新行也送进回落，于是 `error` 里任何一个**碰巧长得像**的片段都会被当成结束方式。
+    ## 这条钉的是判据，不是一条真实数据
 
-    这条用例的行是**故意造成那种形状的**（`error` 就是老格式、能切出 `stop`）：不这么造，
-    「不回落」与「回落了但没切到」在断言上分不开，那条闸门也就没被证明。
+    写入侧把空串归一成 NULL（`or None`），所以「这一列是空串」这一档**平台自己写不出来**
+    —— 它只对外部直写的行可达。但判据本身要成立：回落只认「这一列没有」（NULL），
+    按真值判断（`if not value`）就会把「列在、值是空」也送进回落，于是 `error` 里任何
+    一个**碰巧长得像**的片段都会被当成结束方式。
+
+    所以这里的行是**故意造成那种形状的**（`error` 就是老格式、能切出 `stop`）：不这么造，
+    「不回落」与「回落了但没切到」在断言上分不开 —— 那样这条用例就什么都没证明。
 
     变异：`if value is not None` 改成 `if value` → 读出来是 `stop` → 红。
     """
@@ -237,7 +241,7 @@ def test_a_new_row_does_not_fall_back_when_the_column_is_empty():
         rounds = {row["round_index"]: row for row in run_usage(run_id)["rounds"]}
 
         assert rounds[98]["finish_reason"] == "", (
-            "新行的空值被回落成了 error 里那段字样 —— 那一列是权威的，空就是空"
+            "这一列在（值是空）却被回落成了 error 里那段字样 —— 列是权威的，空就是空"
         )
         # 前提守卫：那一行**确实**切得出来（不然这条用例什么也没证明）。
         assert _legacy_value(rounds[98]["error"]) == "stop"
@@ -272,3 +276,30 @@ def test_the_runs_own_payload_is_untouched_by_this_change():
         assert "finish_reason" not in payload, (
             "结束方式是**逐轮明细**，不该混进这次运行的结论里"
         )
+
+
+def test_the_live_view_and_the_column_use_the_same_width():
+    """跑动中那一份的截断上限与这一列的宽度**是同一个数**。
+
+    两处都写着 32，但它们在两个模块里（`trace_evidence` 是纯层，刻意不 import `models`）
+    —— 所以只能靠这条断言把两份钉在一起。不一致的后果正是本次改动在修的那件事：
+    「跑动中看到的」与「落库后看到的」不是同一个串（而在 MySQL 上，超过列宽的那一段
+    还会直接写失败）。
+
+    变异：`_clip(..., 32)` 改回 40，或把 `FINISH_REASON_MAX_CHARS` 改成别的数 → 红。
+    """
+    from models.ai_analysis.trace import FINISH_REASON_MAX_CHARS
+
+    long_value = "x" * 80
+    record = RoundRecord(index=1, status="final", finish_reason=long_value)
+
+    with app.app_context():
+        run_id = _run_with_rounds([record])
+
+        live = live_round_entry(record)["finish_reason"]
+        stored = _trace_rows(run_id)[0].finish_reason
+
+        assert len(live) == FINISH_REASON_MAX_CHARS, (
+            f"跑动中那一份的截断上限（{len(live)}）与列宽（{FINISH_REASON_MAX_CHARS}）不一致"
+        )
+        assert live == stored, "同一个超长值，跑动中看到的与落库后看到的不是同一个串"

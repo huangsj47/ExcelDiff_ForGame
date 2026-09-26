@@ -401,7 +401,11 @@ def live_round_entry(record: Any) -> dict:
             str(note) for note in (getattr(record, "budget_notes", ()) or ()) if str(note).strip()
         )[:LIVE_RESPONSE_MAX_CHARS],
         "correction_hint": _clip(getattr(record, "correction_hint", "")),
-        "finish_reason": _clip(getattr(record, "finish_reason", ""), 40),
+        # 上限与那一列的宽度一致（`models/ai_analysis/trace.py` 的
+        # `FINISH_REASON_MAX_CHARS`）。**这里不去 import 那个常量** —— 本模块是纯层、
+        # 刻意不碰 `models`（见模块抬头），所以那个数字在这里是第二份；
+        # `tests/test_ai_trace_finish_reason.py` 里有一条断言把两份钉成同一个数。
+        "finish_reason": _clip(getattr(record, "finish_reason", ""), 32),
     }
 
 

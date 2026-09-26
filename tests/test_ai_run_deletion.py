@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+import inspect
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -268,7 +270,9 @@ def test_deleting_an_unrelated_conclusion_leaves_a_valid_pointer_alone():
         assert state.last_concluded_run_id == lagging.id, (
             "一次无关的删除把基线指针搬到了别处 —— 那是没人要求的基线变更"
         )
-        assert db.session.get(AiAnalysisRun, newer.id) is None or True  # newer 仍在（只是没被选中）
+        # 前提守卫：那个「更新但没被选作基线」的运行**确实还在**（不然上面那一条
+        # 「指针没动」也可能是因为它没得选）。
+        assert db.session.get(AiAnalysisRun, newer.id) is not None
 
 
 def test_a_dangling_pointer_is_repaired_by_any_deletion():
@@ -746,3 +750,145 @@ def test_the_delete_route_is_a_write_route():
     methods = rules["/ai-analysis/runs/<int:run_id>/delete"]
     assert "POST" in methods
     assert "GET" not in methods
+
+
+# ==========================================================================
+# 七、护栏：**任何一张带 run_id 的表，两条删除路径都要点到名**
+# ==========================================================================
+#
+# 「删一条分析记录」在仓库里有**两条**路：按 id 删（`remove_analysis_runs`，用户删一条
+# 与保留期清理都走它）与删光全部（`usage_statistics.purge_usage_statistics`）。两条路
+# 各自手写要删哪几张表，于是「加第四张子表时只加一处」这件事**真的发生过**：
+# `ai_analysis_round_event` 在 purge 那条路上漏了一整个版本（2026-09-26 复核发现）。
+#
+# 所以护栏不能只查一条路，也不能靠外键 —— 那张最容易漏的表**根本没有外键**
+# （见 `models/ai_analysis/round_event.py`：加非空外键会打红项目删除那条护栏）。
+
+#: 跟着那次运行一起死的表（有 `run_id`，行本身就是那次运行的一部分）。
+_RUN_CHILD_MODELS = ("AiAnalysisTrace", "AiAnalysisAnomaly", "AiAnalysisRoundEvent")
+
+#: 也有 `run_id`、但那是**引用**：job 指向它跑出来的那次运行，删 run 不许把 job 也删了
+#: （那是「当时平台把这次分析记成什么」的账）。
+_RUN_REFERENCE_MODELS = ("AiAnalysisJob",)
+
+
+def _models_with_run_id() -> set:
+    """所有带 `run_id` 这一列的模型的类名（**派生自 metadata**，不是手抄清单）。
+
+    真机踩过这个坑的代价：漏删那张表的症状不是「多了几行垃圾」而是**错数据** ——
+    `ai_analysis_run.id` 是裸 `Integer` 主键，表清空/删行之后 id 会被复用，而下一次运行的
+    逐轮视图只按 `run_id` 过滤（`round_events.events_for_run`）。
+    """
+    found = set()
+    for mapper in db.Model.registry.mappers:
+        table = mapper.local_table
+        if table is not None and "run_id" in table.columns:
+            found.add(mapper.class_.__name__)
+    return found
+
+
+def _strip_comments(source: str) -> str:
+    """静态断言前先剥注释。
+
+    这个仓库的注释里会**原样引用**要提到的类名（本文件这几段注释就是），不剥就会假通过。
+    """
+    source = re.sub(r'"""(?:.|\n)*?"""', "", source)
+    source = re.sub(r"'''(?:.|\n)*?'''", "", source)
+    return re.sub(r"(?m)#.*$", "", source)
+
+
+def test_the_run_child_list_is_still_complete():
+    """新加一张带 `run_id` 的表时**先红**，逼人做一次判断（子行 / 只是引用）。"""
+    found = _models_with_run_id()
+    known = set(_RUN_CHILD_MODELS) | set(_RUN_REFERENCE_MODELS)
+    assert found == known, (
+        f"`run_id` 那一族变了：多出来 {sorted(found - known)}，少了 {sorted(known - found)}。"
+        f"新表要么加进 `_RUN_CHILD_MODELS`（跟着 run 一起删）并在两条删除路径里点到名，"
+        f"要么加进 `_RUN_REFERENCE_MODELS`（不删）。"
+    )
+
+
+@pytest.mark.parametrize("func_name", ["remove_analysis_runs", "purge_usage_statistics"])
+def test_every_run_child_table_is_deleted_by_both_paths(func_name):
+    """两条删除路径都要把**每一张**子表点到名（护栏查源码，剥注释后再查）。
+
+    `purge_usage_statistics` 这条在 2026-09-26 是真红的 —— 它漏了
+    `ai_analysis_round_event` 一整个版本。
+    """
+    from services.ai import usage_statistics
+
+    func = (
+        run_cache.remove_analysis_runs
+        if func_name == "remove_analysis_runs"
+        else usage_statistics.purge_usage_statistics
+    )
+    body = _strip_comments(inspect.getsource(func))
+    missing = [name for name in _RUN_CHILD_MODELS if name not in body]
+    assert not missing, (
+        f"{func_name} 没有删这几张子表：{missing}。漏删的症状不是「留点垃圾」而是**错数据**"
+        f"（run id 复用之后，下一次运行的逐轮视图会读到已经删掉的那一批）"
+    )
+
+
+def test_purging_takes_the_round_events_with_it():
+    """**真跑一遍**（护栏只查源码，改错了名字它照样绿）。
+
+    全量重置是**全表**动作，而且有一条「在途运行存在时拒绝」的前置闸门 —— 别的用例
+    留在库里的 `running` 行会让它直接拒绝（测试库是会话级共用的，没有逐用例重置）。
+    所以这里先把运行清空（与 `tests/test_ai_usage_statistics.py::_clear_runs` 同一套
+    办法，子表必须先删：批量 delete 不走 ORM 级联）。
+    """
+    from services.ai.usage_statistics import purge_usage_statistics
+
+    with app.app_context():
+        AiAnalysisRoundEvent.query.delete()
+        AiAnalysisTrace.query.delete()
+        AiAnalysisAnomaly.query.delete()
+        AiAnalysisRun.query.delete()
+        db.session.commit()
+
+        project, _repo, cfg = _setup_config()
+        run = _mk(project.id, cfg, events=2)
+        assert AiAnalysisRoundEvent.query.filter_by(run_id=run.id).count() == 2, "前提不成立"
+
+        ok, message, deleted = purge_usage_statistics(updated_by="tester")
+
+        assert ok, message
+        assert deleted["events"] == 2, deleted
+        assert AiAnalysisRoundEvent.query.count() == 0, (
+            "全量重置之后逐轮事件行还在 —— 下一次运行的 id 一复用，思考过程里就会混进"
+            "上一批早已删掉的轮次"
+        )
+
+
+def test_a_pending_child_row_does_not_break_the_delete():
+    """session 里挂着一行**还没提交**的子表行时，删除照样要成功、且那行不会被剩下。
+
+    ## 这条用例证明的**只有**这一件事
+
+    它不证明「`expunge` 扫了 `session.new`」—— 那个循环现在**只扫 `identity_map`**，
+    而这条用例照样绿，原因是自动 flush：删除函数进门先查「要删哪几行」，那次查询会把
+    这一行未提交的明细先 INSERT 进去（那时父行还在），紧接着的批量 DELETE 再把它一起
+    带走。所以 `session.new` 那一档在这个调用序列上根本走不到（`_forget_rows_...` 的
+    docstring 里写了完整的取舍）。
+
+    变异：`remove_analysis_runs` 里去掉 `AiAnalysisTrace` 那条 DELETE → 父行被外键顶回来
+    → 整笔回滚、返回 None → 红。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        key = _key(cfg)
+        run = _mk(project.id, cfg)
+
+        # 故意只 add、不 commit。
+        db.session.add(
+            AiAnalysisTrace(run_id=run.id, round_index=7, outcome="final", parsed_ok=True)
+        )
+
+        reason, message, extra = history.delete_target_run(run.id, expected_target_key=key)
+
+        assert reason == "", f"挂着一行未提交的子表行，删除就整笔失败了：{message}"
+        assert extra["runs"] == 1
+        assert AiAnalysisTrace.query.filter_by(run_id=run.id).count() == 0, (
+            "那一行未提交的明细留在了库里（父行已经没了 —— 幽灵行）"
+        )

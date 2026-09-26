@@ -32,6 +32,13 @@ TRACE_OUTCOMES = (
     "degraded_markdown",
 )
 
+# `finish_reason` 这一列的宽度上限。**三个地方必须用同一个数**：这一列、写库侧
+# （`ai_analysis_service._persist_outcome`）、以及跑动中那一份
+# （`trace_evidence.live_round_entry` 的 `_clip`）。各写各的后果是「跑动中看到的」与
+# 「落库后看到的」不是同一个串；而在 MySQL 上超长的那一列还会直接写失败。
+# 现实里的取值都很短（`stop` / `length` / `content_filter`），这里是防御性的。
+FINISH_REASON_MAX_CHARS = 32
+
 
 class AiAnalysisTrace(db.Model):
     __tablename__ = "ai_analysis_trace"
@@ -61,7 +68,10 @@ class AiAnalysisTrace(db.Model):
     correction_hint = db.Column(BigText)
 
     # 上游**这一轮是怎么停下来的**（provider 的 `finish_reason` 原值：`stop` / `length` /
-    # `content_filter` / 各家自己的扩展值）。空/NULL = 上游没报这个字段。
+    # `content_filter` / 各家自己的扩展值）。NULL = 上游没报这个字段。
+    #
+    # **空串在写入侧被归一成 NULL**（`_persist_outcome` 的 `or None`）：上游「报了空」
+    # 与「没报」在这个场景里是同一件事，而库里只留一种表示，读的人不必判两次。
     #
     # ## 为什么必须单独一列（原先它被拼进了 `error`）
     #
@@ -79,7 +89,7 @@ class AiAnalysisTrace(db.Model):
     #
     # 现在事实各归各列，界面把原值翻成人话（`static/js/ai_think_log.js` 的 `FINISH`），
     # **接口只给原始值**（措辞不锁进 API，与 `outcome` 那套一样）。
-    finish_reason = db.Column(db.String(32))
+    finish_reason = db.Column(db.String(FINISH_REASON_MAX_CHARS))
 
     # 模型索要的 / 实际执行的 / 被丢弃的，各自存 JSON 文本。
     requests_json = db.Column(BigText)

@@ -125,13 +125,19 @@ def remove_analysis_runs(run_ids) -> Optional[dict]:
     失败不返回全 0 的字典：那与「本来就没有可删的行」在读的人眼里是同一个形状
     （同 `cleanup_expired_analysis_runs` 的说明）。
 
-    ## 为什么是**唯一一处**删除实现
+    ## 为什么是**按 id 删的那条路上唯一一处**实现
 
-    「删一条分析记录」在仓库里有两个入口：**保留期清理**（`cleanup_expired_analysis_runs`）
-    与**用户删掉某一条历次结论**（`ai_report_history_service.delete_target_run`）。三张子表
+    「删一条分析记录」有两个入口：**保留期清理**（`cleanup_expired_analysis_runs`）与
+    **用户删掉某一条历次结论**（`ai_report_history_service.delete_target_run`）。三张子表
     的先子后父顺序、`AiAnalysisRoundEvent` 那张没有外键的表（漏删的症状是 run id 复用后
     下一次运行读到幽灵行，见 `cleanup_expired_analysis_runs` 的 docstring）、以及**指针
     修正**，两处各写一遍的话，加第四张子表时必然只加一处 —— 而漏掉的那一处不会报错。
+
+    **另一条路是「删光全部」（`usage_statistics.purge_usage_statistics`）**：它是全表
+    DELETE、没有 id 列表，所以走不到这里。那条路自己也是这样删三张子表的，
+    两条路都漏过一次第三张（2026-09-26 复核才发现 purge 那处）—— 这正是
+    `tests/test_ai_run_deletion.py` 里那条**跟着 schema 走的护栏**存在的原因：任何一张
+    带 `run_id` 的表，两条路都必须点到名。
 
     ## 指针修正在同一个事务里
 
@@ -219,9 +225,22 @@ def _forget_rows_deleted_outside_the_session(ids) -> None:
     会让 ORM 用父对象去回填子表的 `run_id`，而父行已经不在库里，于是子表被写成
     `run_id=NULL` → `NOT NULL constraint failed` —— **一次成功的删除以 500 收场**。
 
-    摘出去之后它们只是"脱离 session"的对象：库里那一行确实没了，这与事实相符。
-    `expunge` 对 pending（还没 insert 过）的对象等于取消这次插入 —— 那也是想要的
-    （它在 insert 之前父行就已经没了）。
+    ## 只扫 `identity_map` 就够 —— 但理由不是「pending 不会出事」
+
+    这里**只扫 persistent 对象**（`identity_map`），**不扫 `session.new`**。这是查证过
+    的取舍，不是漏写：
+
+    * 本函数进门前必然先跑过一次查询（读「要删哪几行」），那次查询的**自动 flush** 会把
+      调用方挂着的 pending 行先 INSERT 进去 —— 那时父行还在，插得进去；紧接着的批量
+      DELETE 再把它连同父行一起带走。所以 pending 那一档在这个调用序列里不会留下
+      `run_id` 悬空的行，扫它等于永远扫不到东西。
+    * 真去 `expunge(session.new)` 反而更糟：那等于**替调用方取消一次插入** —— 他 `add`
+      的那行会静默消失，而删除本来只该删「已经存在的那几行」。
+    * 要出事只有一种写法：关掉 autoflush（`with db.session.no_autoflush:`）之后先 `add`
+      子行、再删父行。本仓库没有这种调用点；真出现了，`tests/test_ai_run_deletion.py`
+      里那条「挂一行未提交的子表行也能删掉」会先红。
+
+    摘出去之后它们只是「脱离 session」的对象：库里那一行确实没了，这与事实相符。
     """
     keep = set(int(value) for value in ids)
     for obj in list(db.session.identity_map.values()):

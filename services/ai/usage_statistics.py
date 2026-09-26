@@ -36,6 +36,7 @@ from models.ai_analysis import (
     IN_FLIGHT_STATUSES,
     SINGLETON_ID,
     AiAnalysisAnomaly,
+    AiAnalysisRoundEvent,
     AiAnalysisRun,
     AiAnalysisTrace,
     AiUsageStatistics,
@@ -207,8 +208,20 @@ def purge_usage_statistics(*, updated_by: str = "") -> tuple[bool, str, dict]:
 
     返回 `(成功, 一句话, 计数)`；拒绝时计数为空字典。
 
-    先子后父地删（`trace` / `anomaly` 再 `run`），不依赖 SQLite 的 `PRAGMA foreign_keys`
-    是开是关 —— 换后端（MySQL）时外键一定生效，那时候靠顺序才删得掉。
+    先子后父地删（`trace` / `anomaly` / **`round_event`** 再 `run`），不依赖 SQLite 的
+    `PRAGMA foreign_keys` 是开是关 —— 换后端（MySQL）时外键一定生效，那时候靠顺序才删得掉。
+
+    ## 这三张子表**一张都不能漏**（2026-09-26 复核补的第三张）
+
+    它原先只删前两张，`ai_analysis_round_event` 一行都不删。那张表是本族里**唯一没有外键**
+    的（见模型 docstring），所以删父行既不报错也不带走它 —— 而 `ai_analysis_run.id` 是裸
+    `Integer` 主键、**表清空之后新 run 从 1 重新编号**，于是下一次运行的逐轮视图
+    （`round_events.events_for_run` 只按 `run_id` 过滤）会把上一批早已删掉的事件行整批
+    读进来。症状不是「多了几行垃圾」，是**错数据**：新运行的「思考过程」混入别人的轮次。
+
+    它与 `run_cache_source.remove_analysis_runs`（按 id 删的那条路）是**两条**删除路径，
+    所以 `tests/test_ai_run_deletion.py` 里有一条跟着 schema 走的护栏：任何一张带 `run_id`
+    的表，两条路都必须点到名。
     """
     pending = in_flight_runs()
     if pending:
@@ -223,6 +236,9 @@ def purge_usage_statistics(*, updated_by: str = "") -> tuple[bool, str, dict]:
     try:
         traces = db.session.query(AiAnalysisTrace).delete(synchronize_session=False)
         anomalies = db.session.query(AiAnalysisAnomaly).delete(synchronize_session=False)
+        # **第三张子表**：它没有外键，删父行既不报错也不带走它，而 run id 会被复用
+        # （理由见 docstring）。这一行原先漏了。
+        events = db.session.query(AiAnalysisRoundEvent).delete(synchronize_session=False)
         runs = db.session.query(AiAnalysisRun).delete(synchronize_session=False)
         # 周版本状态里那两个指针：删掉运行之后它们都是脏的。
         #
@@ -255,7 +271,7 @@ def purge_usage_statistics(*, updated_by: str = "") -> tuple[bool, str, dict]:
 
     log_print(
         f"🧹 AI 消耗统计已全量重置：运行 {runs} 条、分轮轨迹 {traces} 条、"
-        f"异常清单 {anomalies} 条（操作人：{updated_by or '未知'}）",
+        f"异常清单 {anomalies} 条、逐轮事件 {events} 条（操作人：{updated_by or '未知'}）",
         "AI",
         force=True,
     )
@@ -263,6 +279,9 @@ def purge_usage_statistics(*, updated_by: str = "") -> tuple[bool, str, dict]:
         "runs": int(runs or 0),
         "traces": int(traces or 0),
         "anomalies": int(anomalies or 0),
+        # 第三张子表也报出来：界面与日志都按这个字典说「删了什么」，
+        # 少一个键就等于少说一件事（而它恰恰是最容易被漏的那张）。
+        "events": int(events or 0),
     }
 
 

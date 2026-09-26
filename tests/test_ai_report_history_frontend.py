@@ -1236,12 +1236,24 @@ def test_the_confirm_sentence_depends_on_whether_it_is_the_baseline(run):
     assert "2026-09-12 19:13:04" in baseline, "确认框里要写清删的是哪一次"
 
 
-def test_the_delete_url_is_the_route_that_exists(run):
-    pure = _pure(run)
-    for name, item in pure.items():
-        if item["deleteUrl"]:
-            assert item["deleteUrl"] == f"/ai-analysis/runs/{item['deleteUrl'].split('/')[3]}/delete"
-    assert pure["提交的历史地址"]["deleteUrl"] == "/ai-analysis/runs/42/delete"
+def test_the_delete_url_is_the_route_that_really_exists(run):
+    """前端拼出来的删除地址，必须是**后端真的注册了那条路由**。
+
+    这条挡的是「前端 POST 到一个不存在的路径」：那种错在浏览器里表现为一句
+    「删除失败」（前端把 404 的 HTML 当成服务端的 message），而后端日志里什么都没有 ——
+    查起来要来回好几轮。
+
+    判据直接取 `app.url_map`（**不是**再拼一个字符串跟自己比：那种断言恒真，
+    它只证明了「split 之后还能拼回去」）。
+    """
+    from app import app
+
+    rule = "/ai-analysis/runs/<int:run_id>/delete"
+    assert rule in {str(r.rule) for r in app.url_map.iter_rules()}, (
+        f"前端拼的地址在后端没有对应的路由：{rule}"
+    )
+    # 前端那一份模板字符串也要与它对得上（唯一的产地是 `deleteUrl`）。
+    assert _pure(run)["提交的历史地址"]["deleteUrl"] == "/ai-analysis/runs/42/delete"
 
 
 def test_the_baseline_row_says_so_in_words(run):

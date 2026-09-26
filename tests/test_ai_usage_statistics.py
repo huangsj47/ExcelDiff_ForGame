@@ -41,6 +41,7 @@ from app import create_tables, db
 from models import Project
 from models.ai_analysis import (
     AiAnalysisAnomaly,
+    AiAnalysisRoundEvent,
     AiAnalysisRun,
     AiAnalysisTrace,
     AiPlatformBudget,
@@ -143,15 +144,29 @@ def _anomaly(run_id: int, project_id: int) -> AiAnalysisAnomaly:
     return anomaly
 
 
+def _event(run_id: int, project_id: int, *, round_index: int = 1) -> AiAnalysisRoundEvent:
+    event = AiAnalysisRoundEvent(
+        run_id=run_id, project_id=project_id, member="", round=round_index, status="ok"
+    )
+    db.session.add(event)
+    db.session.flush()
+    return event
+
+
 def _clear_runs() -> None:
     """清空运行记录（连同子表）。
 
     **子表必须先删**：批量 delete 不走 ORM 级联，别的用例留下的 trace/anomaly 行会让
     这条 DELETE 撞上外键约束，而且**只在全量跑时炸**（同
     `tests/test_ai_platform_budget.py::_clear_runs` 记的那个坑）。
+
+    **逐轮事件表也要清**（它没有外键，删父行带不走它）：`ai_analysis_run.id` 是裸整型
+    主键，清空之后新 run 从 1 重新编号，上一批事件行会被下一次运行的逐轮视图整批读进来
+    —— 症状是**错数据**，不是几行垃圾（见 `models/ai_analysis/round_event.py`）。
     """
     AiAnalysisTrace.query.delete()
     AiAnalysisAnomaly.query.delete()
+    AiAnalysisRoundEvent.query.delete()
     AiAnalysisRun.query.delete()
     db.session.commit()
 
@@ -597,14 +612,20 @@ class TestTheFullReset:
             _trace(first.id)
             _trace(second.id)
             _anomaly(first.id, project_id)
+            # 逐轮事件：**拿一个非零的数**来钉「这张没有外键的表也在清理范围内」。
+            # 全 0 的计数证明不了它被点过名（缺失与「本来就没有」是同一个形状）。
+            _event(first.id, project_id, round_index=1)
+            _event(first.id, project_id, round_index=2)
+            _event(second.id, project_id, round_index=1)
 
             ok, message, deleted = purge_usage_statistics(updated_by="tester")
 
             assert ok, message
-            assert deleted == {"runs": 2, "traces": 2, "anomalies": 1}, deleted
+            assert deleted == {"runs": 2, "traces": 2, "anomalies": 1, "events": 3}, deleted
             assert AiAnalysisRun.query.count() == 0
             assert AiAnalysisTrace.query.count() == 0
             assert AiAnalysisAnomaly.query.count() == 0
+            assert AiAnalysisRoundEvent.query.count() == 0
             assert "2" in message
             # 起点没有意义了（一条运行都不剩），留着只会在界面上显示一个不存在的「此前」。
             assert usage_baseline() is None
@@ -837,7 +858,7 @@ class TestTheEndpoints:
         assert resp.status_code == 200, resp.get_data(as_text=True)
         body = resp.get_json()
         assert body["success"] is True
-        assert body["deleted"] == {"runs": 1, "traces": 0, "anomalies": 0}
+        assert body["deleted"] == {"runs": 1, "traces": 0, "anomalies": 0, "events": 0}
         assert body["statistics"]["reset_at"] is not None
         with flask_app.app_context():
             assert AiAnalysisRun.query.count() == 0

@@ -35,6 +35,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_MAX_FILES_PER_RUN,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
 )
+from models.ai_analysis.trace import FINISH_REASON_MAX_CHARS
 from services.ai import project_gate
 from services.ai.analysis_budget import budget_gate_reason, early_stop_guard
 
@@ -907,8 +908,9 @@ def _persist_outcome(
                 # `finish_reason=stop`，而跑动中那份（只有 note）不长这样 ——
                 # 同一张卡刷新之后才冒出那行字。
                 error=record.note or None,
-                # 「这一轮是怎么停下来的」原值。空 = 上游没报（不是 stop）。
-                finish_reason=record.finish_reason or None,
+                # 「这一轮是怎么停下来的」原值。空 = 上游没报（不是 stop），
+                # 归一成 NULL；超长的按列宽截掉（三处上限同源，见那个常量）。
+                finish_reason=(record.finish_reason or "")[:FINISH_REASON_MAX_CHARS] or None,
                 # 逐轮用量。这几列同样一直是 NULL：没有它们，「钱花在第几轮」答不上来，
                 # 而提示词每轮都把上一轮的上下文重发一遍，后几轮才是贵的那些。
                 tokens_input=record.prompt_tokens,
