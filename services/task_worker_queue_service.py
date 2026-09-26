@@ -1775,8 +1775,8 @@ def describe_waiting_analysis(config_id, group_key):
             "waiting": True,
             "run_id": None,
             "message": (
-                f"这次分析已经登记（登记号 #{intent.id}）：同步一跑完就会自动开始，"
-                "不需要再点「重新分析」。本次没有发起分析，也没有产生任何消耗。"
+                f"这次分析已经登记（登记号 #{intent.id}）：版本同步一跑完就会自动开始，"
+                "不需要再点「重新分析」。当前等待过程不会产生消耗。"
             ),
         }
     handed = _handed_off_analysis_task(group_key)
