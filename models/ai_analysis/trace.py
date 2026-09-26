@@ -60,6 +60,27 @@ class AiAnalysisTrace(db.Model):
     error = db.Column(BigText)
     correction_hint = db.Column(BigText)
 
+    # 上游**这一轮是怎么停下来的**（provider 的 `finish_reason` 原值：`stop` / `length` /
+    # `content_filter` / 各家自己的扩展值）。空/NULL = 上游没报这个字段。
+    #
+    # ## 为什么必须单独一列（原先它被拼进了 `error`）
+    #
+    # 这一列此前**没有**：写入侧把 `finish_reason=stop` 拼进上面那个 `error` 列的字符串里
+    # （`"；".join([note, f"finish_reason={...}"])`），读侧再用 `split("；")` + 前缀匹配把
+    # 它抠出来。三件事同时坏掉：
+    #
+    # 1. **语义错位**：`error` 是「这一轮出了什么错」，而 `stop` 是**正常结束**。于是每一次
+    #    正常跑完的分析，界面上都挂着一行红字的 `finish_reason=stop` —— 用户报的原话是
+    #    「正常分析完后不要用 stop，否则以为是异常退出」。
+    # 2. **两条读路径不一致**：跑动中那份来自内存（`trace_evidence`，只有 note），落库后
+    #    那份来自这一列（note + finish_reason）。同一张卡**刷新之后才冒出那行红字**。
+    # 3. **解析方式脆弱**：读侧按分隔符切一个给人看的字符串 —— note 里出现同样的字样就
+    #    会串味。
+    #
+    # 现在事实各归各列，界面把原值翻成人话（`static/js/ai_think_log.js` 的 `FINISH`），
+    # **接口只给原始值**（措辞不锁进 API，与 `outcome` 那套一样）。
+    finish_reason = db.Column(db.String(32))
+
     # 模型索要的 / 实际执行的 / 被丢弃的，各自存 JSON 文本。
     requests_json = db.Column(BigText)
     executed_json = db.Column(BigText)

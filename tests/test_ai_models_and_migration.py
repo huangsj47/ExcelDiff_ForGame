@@ -218,6 +218,9 @@ RUN_NEW_COLUMNS = (
 TRACE_NEW_COLUMNS = (
     "cache_read_tokens",
     "cache_write_tokens",
+    # 上游这一轮是怎么停下来的。2026-09-26 之前它被拼在 `error` 里，所以老库上这一列
+    # 必须补出来 —— 否则就是「写入侧写 trace.finish_reason、库里没有这一列」。
+    "finish_reason",
 )
 
 

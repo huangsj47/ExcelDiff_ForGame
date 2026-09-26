@@ -901,17 +901,14 @@ def _persist_outcome(
                 # `trace_evidence` 一处（写库侧与读库侧共用），这里不拼 JSON：
                 # 原先只写计数，于是「取数失败」与「真的读了一份 diff」在面板上长得一样。
                 **encode_evidence(record),
-                error=(
-                    "；".join(
-                        item
-                        for item in (
-                            record.note,
-                            f"finish_reason={record.finish_reason}" if record.finish_reason else "",
-                        )
-                        if item
-                    )
-                    or None
-                ),
+                # `error` 只放**这一轮出了什么事**（`record.note`）。原先这里把上游的
+                # `finish_reason` 也拼进来，后果见模型 `AiAnalysisTrace.finish_reason`
+                # 的 docstring：正常跑完的每一次，界面上都挂着一行红字的
+                # `finish_reason=stop`，而跑动中那份（只有 note）不长这样 ——
+                # 同一张卡刷新之后才冒出那行字。
+                error=record.note or None,
+                # 「这一轮是怎么停下来的」原值。空 = 上游没报（不是 stop）。
+                finish_reason=record.finish_reason or None,
                 # 逐轮用量。这几列同样一直是 NULL：没有它们，「钱花在第几轮」答不上来，
                 # 而提示词每轮都把上一轮的上下文重发一遍，后几轮才是贵的那些。
                 tokens_input=record.prompt_tokens,

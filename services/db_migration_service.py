@@ -447,6 +447,10 @@ def _migrate_ai_analysis_columns(db, log_print):
             # NULL/空 = 主代理自己的轮次，也是所有老行的情形 —— 不需要回填。
             "agent": "agent VARCHAR(20)",
             "agent_round": "agent_round INTEGER",
+            # 上游这一轮是怎么停下来的（`stop` / `length` / …）。2026-09-26 之前它被拼在
+            # `error` 那一列的字符串里，所以**老行这里是 NULL** —— 读侧会回落到按老办法
+            # 切一次（见 `ai_usage_service._finish_reason`），不回填。
+            "finish_reason": "finish_reason VARCHAR(32)",
         },
         log_print,
     )

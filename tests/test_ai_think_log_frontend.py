@@ -171,6 +171,7 @@ var OP = {
     // 这条只验「过了期限就改口」，不验期限具体是多少。
     runLong: function () { advance(3600000); },
     roundsStored: function () { api.applyRounds(ROUNDS.stored, {}); },
+    roundsEndings: function () { api.applyRounds(ROUNDS.endings, {}); },
     roundsMainFinal: function () { api.applyRounds(ROUNDS.mainFinal, {}); },
     roundsSame: function () { api.applyRounds(ROUNDS.sameAsLive, {}); },
     roundsEmpty: function () { api.applyRounds([], {}); },
@@ -495,6 +496,8 @@ def _rounds() -> dict:
                 "response_text": '{"status": "need_more_context", "reason": "先看战斗逻辑"}',
                 "budget_notes": "有 1 个上下文请求因超出本次索取额度而未执行。",
                 "correction_hint": "",
+                # 上游这一轮是怎么停下来的（真机上的绝大多数是 `stop`）。
+                "finish_reason": "stop",
             },
             {
                 "round_index": 2, "agent": "S1", "agent_round": 1, "outcome": "final",
@@ -503,6 +506,44 @@ def _rounds() -> dict:
                 "request_chars": 20000, "context_chars": 12000, "duration_ms": 9000,
                 "error": "", "requests": [], "executed": [], "dropped": [],
                 "response_text": "# 变更理解\n\n整份报告正文",
+                "budget_notes": "", "correction_hint": "",
+                # 空串 = 上游报了、但报的是空（与「这一列没有」是两件事）。
+                "finish_reason": "",
+            },
+        ],
+        # 结束方式的几种形态：截断（上游明说 length）/ 我们不认识的值 / 没上报。
+        # 单独一组而不是塞进 `stored`：`stored` 的轮数被别的用例按 2 断言过。
+        "endings": [
+            {
+                "round_index": 1, "agent": "", "agent_round": 1, "outcome": "unparsable",
+                "parsed_ok": False, "tokens_input": 5000, "tokens_output": 900,
+                "cache_read_tokens": None, "cache_write_tokens": None,
+                "request_chars": 1000, "context_chars": 1000, "duration_ms": 3000,
+                "error": "上游报告输出撞上单次输出上限",
+                "requests": [], "executed": [], "dropped": [],
+                "response_text": '{"status":"final","report_markdown":"半截',
+                "budget_notes": "", "correction_hint": "",
+                "finish_reason": "length",
+            },
+            {
+                "round_index": 2, "agent": "", "agent_round": 2, "outcome": "final",
+                "parsed_ok": True, "tokens_input": 6000, "tokens_output": 700,
+                "cache_read_tokens": None, "cache_write_tokens": None,
+                "request_chars": 1000, "context_chars": 1000, "duration_ms": 2000,
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": '{"status":"final"}',
+                "budget_notes": "", "correction_hint": "",
+                # 一个我们不认识的结束方式（端点自定义的取值）——**照原样说出来**。
+                "finish_reason": "tool_calls",
+            },
+            {
+                "round_index": 3, "agent": "", "agent_round": 3, "outcome": "requests",
+                "parsed_ok": True, "tokens_input": 6000, "tokens_output": 700,
+                "cache_read_tokens": None, "cache_write_tokens": None,
+                "request_chars": 1000, "context_chars": 1000, "duration_ms": 2000,
+                # **没有 `finish_reason` 这个键**（老行、或上游没上报就是这样的）。
+                "error": "", "requests": [], "executed": [], "dropped": [],
+                "response_text": '{"status":"need_more_context"}',
                 "budget_notes": "", "correction_hint": "",
             },
         ],
@@ -595,6 +636,8 @@ def run() -> dict:
         {"name": "别处在跑", "ops": ["setRun", "markExternalRun"]},
         # 7. 落库那一份（跑完之后切到「思考过程」）。
         {"name": "落库的逐轮", "ops": ["setRun", "roundsStored"]},
+        # 9b. 结束方式的几种形态（截断 / 不认识的值 / 没上报）各说各的话。
+        {"name": "结束方式那几种", "ops": ["setRun", "roundsEndings"]},
         # 8. 换了运行号：上一次的列表要清掉（留着会被读成这一次的过程）。
         {"name": "换运行清列表", "ops": ["watchWithRun", "progressTwo", "clearRun"]},
         # 9. 这次运行一条逐轮都没有（老数据）。
@@ -714,7 +757,8 @@ def _drive(cases: list, rounds: dict, same: list) -> dict:
         .replace("__PROGRESS__", json.dumps(progress, ensure_ascii=False))
         .replace("__ROUNDS__", json.dumps(
             {"stored": rounds["stored"], "sameAsLive": same,
-             "mainFinal": rounds["mainFinal"]}, ensure_ascii=False))
+             "mainFinal": rounds["mainFinal"], "endings": rounds["endings"]},
+            ensure_ascii=False))
     )
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "driver.js"
@@ -1460,4 +1504,62 @@ def test_changing_the_run_does_not_inherit_the_expanded_state(run):
     assert _model_box(snaps[2])["open"] is True, "点开那一帧应当是展开的"
     assert _model_box(snaps[5])["open"] is False, (
         "换了运行之后仍然是展开的 —— 展开状态跨运行漏了过来（键在两个运行里重名）"
+    )
+
+
+# --------------------------------------------------------------------------
+#  结束方式：折进轮次标题那一行，说的是人话
+# --------------------------------------------------------------------------
+def test_a_normal_stop_is_not_dressed_up_as_an_error(run):
+    """`finish_reason=stop` 是**正常结束**，不许再被画成一行错误。
+
+    用户报的原话是「正常分析完后，思考过程的 finish_reason 不要用 stop，否则以为是
+    异常退出」—— 它此前被拼进 trace 的 `error` 列、又用错误红画出来。现在它折进轮次
+    标题那一行，说的是人话。
+
+    变异：把 `finishText` 从标题里去掉 → 红；改回拼进 `error` → 红。
+    """
+    texts = _flat(_by_name(run)["落库的逐轮"]["snaps"][-1])
+
+    heads = [text for text in texts if text.startswith("第 1 轮")]
+    assert heads, f"没有找到轮次标题：{texts}"
+    assert "正常结束" in heads[0], heads[0]
+    # 原始枚举**一个字都不许露出来**（那正是用户看到的那行字）。
+    assert not any("finish_reason" in text for text in texts), (
+        f"界面上还露着上游那个原始枚举：{[t for t in texts if 'finish_reason' in t]}"
+    )
+
+
+def test_every_kind_of_ending_gets_its_own_words(run):
+    """三种形态各说各的话，而且**认不出来的值不丢**。
+
+    * `length` → 明说「被截断」（平台本来就有这条判据，只是从来没说给用户听）；
+    * 不认识的值 → 照原样说出来（可能是一个我们还没见过的结束方式，丢掉等于把事实抹了）；
+    * 没上报（键不在）→ **显式说一句**，不能默不作声 —— 沉默读起来就是「正常结束」。
+    """
+    texts = _flat(_by_name(run)["结束方式那几种"]["snaps"][-1])
+
+    def head(prefix):
+        found = [text for text in texts if text.startswith(prefix)]
+        assert found, f"没有找到 {prefix} 那一轮的标题：{texts}"
+        return found[0]
+
+    assert "输出到上限（被截断）" in head("第 1 轮")
+    assert "上游报告：tool_calls" in head("第 2 轮"), (
+        "认不出来的结束方式被吞掉了 —— 「不知道」也要说出来"
+    )
+    assert "结束方式未上报" in head("第 3 轮"), (
+        "没上报的那一轮什么都没说 —— 沉默会被读成「正常结束」"
+    )
+
+
+def test_the_error_line_still_carries_the_note(run):
+    """`error` 那一行照画 —— 它是**失败说明**，那一轮确实出了事。
+
+    这次的改动只是把「结束方式」从这一列里搬走，不是把这一列关掉。
+    """
+    texts = _flat(_by_name(run)["结束方式那几种"]["snaps"][-1])
+
+    assert any("上游报告输出撞上单次输出上限" in text for text in texts), (
+        "把结束方式搬走时顺手把真正的错误说明也搬走了"
     )

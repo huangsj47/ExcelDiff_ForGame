@@ -108,6 +108,30 @@
         transport_error: '调用失败'
     };
 
+    // 上游**这一轮是怎么停下来的**（provider 给的 `finish_reason` 原值）。
+    //
+    // ## 为什么要有这一张表
+    //
+    // 用户报的原话是「正常分析完后 finish_reason 不要用 stop，否则以为是异常退出」——
+    // `stop` 是**正常结束**，而它此前被拼进 trace 的 `error` 列、又用错误红画出来，
+    // 于是每一次正常跑完的分析都挂着一行看着像失败的字。
+    //
+    // 翻译放在**界面**：接口只给上游那个原始值（措辞不锁进 API，与 `OUTCOME` 同一套）。
+    // 认不出来的值**不丢**（照原样说出来，可能是一个我们没见过的结束方式）；
+    // 空的那一档更要显式说 —— 「上游没报」不等于「正常结束」。
+    var FINISH = {
+        stop: '正常结束',
+        length: '输出到上限（被截断）',
+        content_filter: '被端点内容过滤打断'
+    };
+
+    /** 结束方式那句话。**纯函数**（node 下真跑）。 */
+    function finishText(raw) {
+        var value = raw === null || raw === undefined ? '' : String(raw).trim();
+        if (!value) return '结束方式未上报';
+        return FINISH[value] || ('上游报告：' + value);
+    }
+
     var mode = 'empty';
     var runId = null;
     var watching = false;
@@ -339,6 +363,9 @@
             if (tokens) head += ' · 输入 ' + tokens + ' tokens';
             var cost = fmtDuration(entry.duration_ms);
             if (cost) head += ' · ' + cost;
+            // 结束方式**折进这一行**（用户选的形态）：它是「这一轮怎么停下来的」，
+            // 与轮次/索取/用量/耗时一样是这一轮的事实，不该单独占一行红字。
+            head += ' · ' + finishText(entry.finish_reason);
 
             var missing = [];
             var empty = [];

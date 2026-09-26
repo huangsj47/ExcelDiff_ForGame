@@ -1814,6 +1814,35 @@ def project_usage(
     }
 
 
+def _finish_reason(row) -> str:
+    """这一轮**上游是怎么停下来的**（`stop` / `length` / …）。没读到就是空串。
+
+    ## 为什么要回落到 `error` 里解析一次
+
+    2026-09-26 之前，这个值是被**拼进** `ai_analysis_trace.error` 的
+    （`"；".join([note, f"finish_reason=…"])`），读侧再切出来。加列之后新行写在
+    `finish_reason` 上，**老行不改写**（那是一条已经交付过的记录），所以这里两处都读：
+
+    * 有那一列 → 用它（**空串也算读到了**：空 = 上游当时没报这个字段，与「没读到这一列」
+      是两件事，不能因为它是空就去老字段里翻）；
+    * 那一列整个是 NULL（老行）→ 回落去 `error` 里按老办法切一次，切不到就是空串。
+
+    只回落不迁移：那批行是一次性的历史，为它们写一段改写脚本不划算，而读侧的这段
+    回落只要还在读它们就得在（保留窗口一过就自然没有意义了）。
+    """
+    value = getattr(row, "finish_reason", None)
+    if value is not None:
+        return str(value or "")
+    return next(
+        (
+            part.removeprefix("finish_reason=")
+            for part in str(row.error or "").split("；")
+            if part.startswith("finish_reason=")
+        ),
+        "",
+    )
+
+
 def _int_or_zero(value: Any) -> int:
     """脏值读成 0（**绝不抛**）。`int("很多")` 会让整页 500，而这里只是几个计数。"""
     if value is None or isinstance(value, bool):
@@ -1952,14 +1981,7 @@ def run_usage(run_id: int) -> Optional[dict[str, Any]]:
                 "context_chars": row.context_chars,
                 "duration_ms": row.duration_ms,
                 "error": row.error or "",
-                "finish_reason": next(
-                    (
-                        part.removeprefix("finish_reason=")
-                        for part in str(row.error or "").split("；")
-                        if part.startswith("finish_reason=")
-                    ),
-                    "",
-                ),
+                "finish_reason": _finish_reason(row),
                 **decode_evidence(row),
             }
             for row in rounds

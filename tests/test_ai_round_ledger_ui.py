@@ -206,7 +206,11 @@ def _run_driver(members_live: list[dict], old_payload: dict, one_member: list[di
         "rounds": [
             {"round_index": 1, "agent": "S1", "agent_round": 1, "agent_index": 1,
              "agent_total": 3, "outcome": "requests", "tokens_input": 100,
-             "duration_ms": 1000, "requests": [], "executed": [], "dropped": []},
+             "duration_ms": 1000, "requests": [], "executed": [], "dropped": [],
+             # 事件账本里那个 `entry_json` 就是 `live_round_entry` 的产物，**带这一键**
+             # （见 `services/ai/trace_evidence.py`）—— 手写的替身也要带，否则面板上
+             # 那一轮会写成「结束方式未上报」，与真机不符。
+             "finish_reason": "stop"},
         ],
     }
     script = DRIVER.replace("__USAGE_LINE__", json.dumps(str(USAGE_LINE)))
@@ -354,7 +358,7 @@ def test_an_interrupted_run_says_it_did_not_finish_and_keeps_its_rounds(run):
     assert "没有跑完" in interrupted["note"], interrupted["note"]
     assert "没有重跑" in interrupted["note"], interrupted["note"]
     assert interrupted["rounds"] == [
-        "分片 S1 (1/3) · 第 1 轮 · 索取上下文 · 输入 100 tokens · 1.0 s"
+        "分片 S1 (1/3) · 第 1 轮 · 索取上下文 · 输入 100 tokens · 1.0 s · 正常结束"
     ]
     # 逐成员那一块照样在（账就是从这里来的）
     assert interrupted["box"] is not None and len(interrupted["box"]) == 1
