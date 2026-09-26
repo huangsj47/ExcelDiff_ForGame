@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from services.ai.auto_sizing import single_run_guard
+from services.ai.auto_sizing import single_run_guard, single_run_lookahead
 
 __all__ = ["SingleRunBudget"]
 
@@ -95,6 +95,29 @@ class SingleRunBudget:
     def affordable(self) -> bool:
         """还付得起下一轮吗。没有配上限时恒真。"""
         return not self.check()["blocked"]
+
+    def next_round_affordable(self, last_round_tokens: int | None = None) -> bool:
+        """**这一轮之后**还付得起下一轮吗（`False` = 本轮就该让模型收尾了）。
+
+        **名字里带得清极性**：返回的是「付得起」，不是「该收尾」—— 调用点写
+        `not budget.next_round_affordable(...)`。写成 `lookahead()` 那种中性名字，
+        读的人（和写的人）迟早会把极性搞反，而搞反的表现是「每一轮都在喊收尾」。
+
+        判据是**同一条公式**（`auto_sizing.single_run_lookahead`，它内部调
+        `single_run_guard`），只是把闸门里那个未知的「本轮结束后已花多少」按
+        `max(round_reserve_tokens, 上一轮实花)` 估出来 —— 上一轮真的花了多少通常比平台
+        的预留更准（run 3：单轮实测 202,283，预留约 140,000）。
+
+        `None` / 0 = 没有上一轮的实测（首轮），退回本轮预留。**这一条是估算，不是事实**：
+        单次调用实际花多少只有事后才知道，所以调用方拿它去说话时不许断言「这是最后一轮」
+        （轮次与索取额度那两条是硬事实，见 `round_hints` 里四份收敛指令的分别）。
+        """
+        return not single_run_lookahead(
+            self,
+            spent_tokens=self.spent_tokens,
+            last_round_tokens=int(last_round_tokens or 0),
+            spent_estimated=self.spent_estimated,
+        )["blocked"]
 
     def stop_note(self) -> str:
         """停下来的理由（可以直接写进轮次备注与报告的信息缺口）。"""

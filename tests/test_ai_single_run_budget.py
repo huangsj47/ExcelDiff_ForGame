@@ -138,6 +138,59 @@ def test_a_round_it_can_still_afford_runs_normally():
     assert outcome.degradation == DEGRADE_NONE
 
 
+def test_the_lookahead_is_the_same_gate_pushed_one_round_ahead():
+    """前瞻**不许**写成第二个算式：它是同一道闸门作用在「本轮结束后的预计花费」上。
+
+    比较对象的算式只写一遍（`spent + max(本轮预留, 上一轮实花)`），四个档位逐档同判 ——
+    没有这条，「前瞻」和「闸门」迟早会各自漂移，而那种漂移不报错，只表现为
+    「模型有时被告知、有时不被告知」。
+    """
+    budget = _budget()
+
+    for spent, last in ((0, None), (400, 400), (700, 60), (900, 1000)):
+        budget.spent_tokens = spent
+        expected = single_run_guard(
+            budget, spent_tokens=spent + max(ROUND_RESERVE, last or 0)
+        )
+        assert budget.next_round_affordable(last) == (not expected["blocked"]), (spent, last)
+
+
+def test_the_last_affordable_round_is_told_the_money_is_running_out():
+    """**钱这条也要提前说一声**（2026-09-26 真机 run 3 的直接教训）。
+
+    闸门只在**钱已经花掉之后**才说话，而轮次与索取额度各自都有提前的收敛指令 ——
+    钱这条原先一句话都没有。run 3 因此跑了 9 轮、9 轮全在索取上下文、**一次结论都没写**，
+    第 10 轮开头被拦下，整次运行以「没有拿到可用的结论」收场。
+
+    判据落在**提示词正文**上（这一条要验的就是「模型有没有被告知」）：
+    * 第 1 轮不许说 —— 那时按同一道闸门还付得起下一轮，说了就是过早收敛；
+    * 第 2 轮必须说 —— 它的下一轮已经付不起了（`400 + max(200, 400) + 200 + 100 > 1000`）。
+
+    数字：每轮花 400（prompt 200 + completion 200）、本轮预留 200、收尾预留 100、上限 1000。
+    """
+    client = CountingClient(
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+        _final(),
+        prompt_tokens=200,
+        completion_tokens=200,
+    )
+
+    outcome = _run(client, _budget())
+
+    first = "\n".join(item["content"] for item in client.calls[0])
+    second = "\n".join(item["content"] for item in client.calls[1])
+    # 判据取这段指令**自己**的一句话（「token 预算」四个字在内置协议里本来就有，
+    # 拿它当针会指到别的段落上去）。
+    needle = "再索取一轮很可能就没有下一轮"
+    assert needle not in first, "第 1 轮还付得起下一轮，却让模型提前收敛"
+    assert needle in second, "钱只够这一轮了，模型却没被告知 —— 它会一路索取到被拦"
+    # 钱是**估算**，不许说成轮次那条硬事实的措辞（同一句话会被模型抄进报告的信息缺口）。
+    assert "最后一条消息" not in second, "钱这条按「最后一轮」说话 —— 那是一句估算，不是事实"
+    # 停下来的理由仍然是钱（闸门在下一轮开头拦下），不是「轮次用尽」。
+    assert outcome.degradation == DEGRADE_BUDGET
+
+
 def test_an_unreported_usage_is_estimated_instead_of_treated_as_zero():
     """上游不报用量时**仍然要拦得住** —— 把「未知」当 0 等于无限放行。
 

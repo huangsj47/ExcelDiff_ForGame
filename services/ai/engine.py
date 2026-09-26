@@ -931,6 +931,9 @@ def run_analysis(
     # 那一片的结论就整份丢掉 —— 实测就是这么丢的（一个分片 8 轮的最后一条是 markdown，
     # 它负责的三个维度一条结构化结论都没交回来）。
     format_retry_granted = False
+    # 上一轮**开始时**的账（用来量「上一轮真的花了多少」，见下面那个前瞻）。`None` =
+    # 还没有跑过任何一轮。
+    round_start_spent: int | None = None
     for round_index in range(1, limits.max_rounds + 2):
         if round_index > limits.max_rounds and not format_retry_granted:
             # 没借到那一轮 —— 与 `for ... else`（轮次跑完都没 break）同一件事，只是现在
@@ -964,6 +967,30 @@ def run_analysis(
         # 这一轮要写进 trace 的补充说明：压过历史、被上游拒过、走了收尾 —— 都是「这次分析
         # 不是正常跑完的」的证据，只留在日志里等于没说。
         round_notes: list[str] = []
+        # **钱这条额度也要提前说一声**（2026-09-26 真机 run 3）。
+        #
+        # 上面那道闸判的是「这一轮付得起吗」—— 它只在**钱已经花掉之后**才说话，而在那之前
+        # 模型收不到任何信号：轮次有 `build_final_round_hint`、索取额度有
+        # `build_budget_exhausted_hint`，钱这条原先一句话都没有。run 3 因此跑了 9 轮、
+        # 9 轮全在索取上下文、**一次结论都没写**，第 10 轮开头被拦下，整次运行以
+        # 「没有拿到可用的结论」收场。这里把**同一道闸门向前推一轮**：按「上一轮真的花了
+        # 多少」估出这一轮结束后的账，付不起下一轮就在**这一轮**把话说给模型听。
+        #
+        # 判据在 `SingleRunBudget.lookahead`（与 `affordable()` 同一条公式，算术在
+        # `auto_sizing.single_run_lookahead`）；这里只负责把「上一轮花了多少」量出来 ——
+        # 两次轮首的账相减，不去回读 `RoundRecord`（那会多出一条读法）。
+        token_budget_low = False
+        if single_run_budget is not None:
+            last_round_tokens = (
+                None
+                if round_start_spent is None
+                else max(0, single_run_budget.spent_tokens - round_start_spent)
+            )
+            token_budget_low = not single_run_budget.next_round_affordable(last_round_tokens)
+            round_start_spent = single_run_budget.spent_tokens
+            if token_budget_low:
+                # 只留在日志里等于没说：事后要能回答「模型为什么这一轮突然收尾」。
+                round_notes.append("预算将尽：本轮已提示模型收尾（不再索取上下文）")
         # 必读清单进度（P1b）：**每轮都重报一次**，因为它每轮都在变（模型正在读）。
         # 走 `budget_notes` 这条路是刻意的 —— 它是**每轮都发给模型**的（任务书只发一次），
         # 而这一段随成员/轮次变化，本来就只该出现在成员私有消息里（共享前缀逐字节相同
@@ -981,6 +1008,7 @@ def run_analysis(
             baseline_digest=baseline_digest,
             correction_hint=correction_hint,
             budget_exhausted=exhausted,
+            token_budget_low=token_budget_low,
             budget_notes=(
                 (*budget_notes, mandatory_note) if mandatory_note else tuple(budget_notes)
             ),
@@ -1822,6 +1850,13 @@ class _RoundBrief:
     # （见 `prompt._first_round_hint`）。默认是平台出厂那一份 —— 与这段改动之前
     # 逐字相同（`run_analysis` 每次都会按 `loaded.dimensions` 传真的那份进来）。
     dimension_ids: tuple[str, ...] = DIMENSION_IDS
+    # 「钱只够这一轮了」——`SingleRunBudget.lookahead` 的估算结果（见 `round_hints
+    # .build_token_budget_final_hint`）。与 `budget_exhausted`（索取**次数**额度）是两条
+    # 不同的额度：那一条是硬事实，这一条是估算，所以 `prompt.build_user_message` 里把它
+    # 排在最后 —— 硬事实成立时它不说话。
+    #
+    # 带默认值所以放在这一组（dataclass 的非默认字段必须排在前面）。
+    token_budget_low: bool = False
 
 
 def _mark_current(

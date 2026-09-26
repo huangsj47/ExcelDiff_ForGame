@@ -50,7 +50,11 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 from services.ai.baseline import CLOSURE_RULE
 from services.ai.budget import ContextItem
-from services.ai.protocol import build_budget_exhausted_hint, build_final_round_hint
+from services.ai.protocol import (
+    build_budget_exhausted_hint,
+    build_final_round_hint,
+    build_token_budget_final_hint,
+)
 from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.skill_loader import LoadedSkills
 
@@ -624,6 +628,7 @@ def build_user_message(
     requests_total: int | None = None,
     correction_hint: str = "",
     budget_exhausted: bool = False,
+    token_budget_low: bool = False,
     history_recap: str = "",
     dimension_ids: Iterable[str] = DIMENSION_IDS,
     budget_line_override: str = "",
@@ -700,8 +705,17 @@ def build_user_message(
         # **轮次也能先耗尽，而且比额度更隐蔽**：额度还剩着，模型就完全不知道自己只剩
         # 这一轮 —— 实测它会把这一轮写成一段 markdown 叙述（run 10 的 S3 就是这样：8 轮
         # 只用了 38/40 次索取，负责的三个维度一条结构化结论都没交回来）。
-        # 与上面那支互斥（同一轮只说一次），因为两句都在讲「这一轮别再要了」。
+        # 与下面那支互斥（同一轮只说一次「这一轮别再要了」）。
         blocks.append(build_final_round_hint(round_index=round_index, max_rounds=max_rounds))
+    elif token_budget_low:
+        # **第三条额度：钱**（2026-09-26）。轮次与索取额度各有上面两支，钱这条原先在
+        # 闸门之外一句话都没有 —— 真机 run 3 因此跑了 9 轮全在索取、一次结论都没写，
+        # 第 10 轮开头被闸门拦下，整次运行以「没有拿到可用的结论」收场。
+        #
+        # **必须排在最后**：上面两支是**硬事实**（这一轮根本没有下一轮 / 索取额度没了），
+        # 钱这条是**估算**（`SingleRunBudget.lookahead`）。硬事实成立时，这一支说的
+        # 「别再要了」已经被覆盖；只有它俩都不成立时，钱才是真正拦住下一步的那一条。
+        blocks.append(build_token_budget_final_hint())
 
     if correction_hint.strip():
         blocks.append("## 上一轮的问题\n\n" + correction_hint.strip())

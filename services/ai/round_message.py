@@ -106,6 +106,7 @@ def prepare_round(
         requests_total=brief.requests_total,
         correction_hint=brief.correction_hint,
         budget_exhausted=brief.budget_exhausted,
+        token_budget_low=brief.token_budget_low,
         history_recap=brief.recap,
         dimension_ids=brief.dimension_ids,
     )

@@ -66,6 +66,7 @@ from services.ai.round_hints import (  # noqa: F401
     build_budget_exhausted_hint,
     build_final_round_hint,
     build_markdown_reemit_hint,
+    build_token_budget_final_hint,
 )
 from services.ai.reference_search import MIN_QUERY_WEIGHT, normalize_query, query_weight
 from services.ai.scope import AnalysisScope, normalize_path

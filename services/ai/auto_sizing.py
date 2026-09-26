@@ -1541,6 +1541,47 @@ def single_run_guard(
     }
 
 
+def single_run_lookahead(
+    plan: AnalysisPlan,
+    *,
+    spent_tokens: int = 0,
+    last_round_tokens: int = 0,
+    spent_estimated: bool = False,
+) -> dict[str, Any]:
+    """「这一轮之后**还付得起下一轮**吗」—— 同一道闸门向前推一轮。
+
+    ## 为什么要有它
+
+    闸门（`single_run_guard`）在每一轮**开头**才判一次，付不起就 `break`（见
+    `services/ai/engine.py` 循环里那一道）。也就是说它只在**钱已经花掉之后**才说话：
+    2026-09-26 真机（项目 1 的 run 3）跑了 9 轮、**9 轮全在索取上下文、一次结论都没写**，
+    第 10 轮开头被拦下，整个运行以「没有拿到可用的结论」收场 —— 而模型那时还以为自己
+    有的是轮次。轮次与索取额度都各有提前的收敛指令（`round_hints.build_final_round_hint`
+    与 `build_budget_exhausted_hint`），**唯独钱这条没有**；这一条补的就是它。
+
+    ## 算式不另写一份
+
+    判的就是闸门那条不等式（`已花 + 预留 > 上限`），只是把里面**未知的「本轮结束后已花
+    多少」**代出来：闸门判 `spent_after + 预留 > cap`，这里用 `spent + 本轮预计` 当
+    `spent_after`。本轮预计取 `max(round_reserve_tokens, last_round_tokens)` ——
+    `round_reserve_tokens` 是平台对这一轮的估算（首轮没有实测可依据，只能用它），
+    而**上一轮真的花了多少**通常更准（run 3：单轮实测 202,283，预留只有约 140,000，
+    低估 45%）。取 `max()` 而不是「乘个系数」：这两项都有出处，系数没有。
+
+    返回值的形状与 `single_run_guard` 逐字相同，`reason` 里写的是**已经推过一轮**的口径
+    （「本轮预留」那一项是加上去的那一轮的）。
+    """
+    estimate = max(
+        max(0, int(getattr(plan, "round_reserve_tokens", 0) or 0)),
+        max(0, int(last_round_tokens or 0)),
+    )
+    return single_run_guard(
+        plan,
+        spent_tokens=max(0, int(spent_tokens)) + estimate,
+        spent_estimated=spent_estimated,
+    )
+
+
 def conservative_tokens_for(prompt_chars: int, output_tokens: int) -> int:
     """上游没报用量时的**保守估算**：请求字符 + 配置的输出上限。
 
