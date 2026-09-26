@@ -63,6 +63,8 @@ class TestCacheWriteRoutesAreNotGet:
     WRITE_PATHS = (
         "/api/excel-html-cache/clear",
         "/api/excel-html-cache/regenerate",
+        # 删一条 AI 历次结论（连带它的报告正文、逐轮轨迹与结论清单，不可逆）。
+        "/ai-analysis/runs/<int:run_id>/delete",
     )
 
     def test_paths_are_post_only(self, real_app):

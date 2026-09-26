@@ -613,10 +613,15 @@ class TestTheFullReset:
             assert stats["reset_at"] is not None
             assert stats["reset_by"] == "tester"
 
-    def test_it_clears_the_weekly_pointer(self):
-        """`ai_weekly_analysis_state.last_analysis_run_id` 指向被删掉的行时就是脏指针。
+    def test_it_clears_both_weekly_pointers(self):
+        """两个指针都要清：`last_analysis_run_id` **与** `last_concluded_run_id`。
 
-        这一列当前只写不读，但留着一个指向不存在记录的外键值，迟早有人当真。
+        `last_analysis_run_id` 只写不读，留着一个指向不存在记录的值迟早有人当真；
+        `last_concluded_run_id` 却是**读的** —— `_decide_effective_mode` 只看它是不是
+        NULL，留着它下一次「增量」就不会被升格成全量，那份报告会拿着一个已经被删掉的
+        基线跑出来（2026-09-26 补的就是这一条，原先只清了前一个）。
+
+        变异：update 的字典里去掉 `last_concluded_run_id` → 红。
         """
         with flask_app.app_context():
             create_tables()
@@ -627,6 +632,7 @@ class TestTheFullReset:
                 project_id=project_id,
                 group_key=_uid("g"),
                 last_analysis_run_id=run.id,
+                last_concluded_run_id=run.id,
             )
             db.session.add(state)
             db.session.commit()
@@ -635,7 +641,12 @@ class TestTheFullReset:
 
             assert ok, message
             db.session.expire_all()
-            assert AiWeeklyAnalysisState.query.filter_by(id=state.id).one().last_analysis_run_id is None
+            stored = AiWeeklyAnalysisState.query.filter_by(id=state.id).one()
+            assert stored.last_analysis_run_id is None
+            assert stored.last_concluded_run_id is None, (
+                "重置之后结论基线指针还指着一个已经被删掉的运行 —— 下一次「增量」不会"
+                "被升格成全量，报告会拿着一个不存在的基线跑"
+            )
 
     def test_it_clears_the_baseline_so_the_next_visit_is_not_confusing(self):
         """重置之后再显示「此前 N 次未计入」就是在说一件已经不存在的事。"""

@@ -107,6 +107,10 @@ function byClass(root, cls) {
     return walk(root, function (n) { return hasClass(n, cls) ? n : null; });
 }
 
+function byId(root, id) {
+    return walk(root, function (n) { return n.id === id ? n : null; });
+}
+
 function allByClass(root, cls) {
     var out = [];
     walk(root, function (n) { if (hasClass(n, cls)) out.push(n); return null; });
@@ -162,17 +166,32 @@ sandbox.AiThinkLog = {currentRunId: function () { return currentRunId; }};
 
 // 页面上的 `fetch`：**整行的点击处理函数走的就是它**（那里传不了自己的实现，
 // 与真页面一致）。读的是调用那一刻的 `fetchTable`（`reset` 会换掉它）。
-sandbox.fetch = function (url) { return makeFetch(fetchTable)(url); };
+sandbox.fetch = function (url, options) { return makeFetch(fetchTable)(url, options); };
+
+// 原生确认框。**默认同意**（用例要拒的那一档自己把它按下去）—— 与真浏览器不同，
+// 这里是可控的：`confirmLog` 记下每一次问的是什么，好断言「动手之前问过没有」。
+var confirmAnswer = true;
+var confirmLog = [];
+sandbox.confirm = function (text) {
+    confirmLog.push(String(text));
+    return confirmAnswer;
+};
 
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(__SCRIPT__, 'utf8'), sandbox);
 var api = sandbox.AiReportHistory;
 
 // 假 fetch：按 URL 返回预置的响应（`__FETCH__`）。
-var fetchLog = [];
+var fetchLog = [];   // 读请求（**只记 GET**，写请求进 `postLog` —— 两类问题的判据不同）
+var postLog = [];    // 写请求（删除）：地址、方法与 body
 function makeFetch(table) {
-    return function (url) {
-        fetchLog.push(url);
+    return function (url, options) {
+        var method = (options && options.method) || 'GET';
+        if (method === 'GET') {
+            fetchLog.push(url);
+        } else {
+            postLog.push({url: url, method: method, body: options.body || ''});
+        }
         var entry = table[url];
         if (entry === undefined) {
             return Promise.reject(new Error('没有预置这个地址：' + url));
@@ -209,6 +228,33 @@ var OP = {
         list._handlers.keydown({key: key, preventDefault: function () {}});
         return new Promise(function (done) { setTimeout(done, 0); });
     },
+    // 删除：**走真路径**（`confirmDelete` 里那个 `global.confirm` 与 `global.fetch`），
+    // 确认框按同意 / 拒绝两档分开。
+    confirmDelete: function (runId) {
+        confirmAnswer = true;
+        return api.confirmDelete(Number(runId));
+    },
+    declineDelete: function (runId) {
+        confirmAnswer = false;
+        return api.confirmDelete(Number(runId));
+    },
+    // 直接点那个按钮（而不是调 API）：按钮只在该出现的时候出现，这条走的是真触发器。
+    clickDelete: function () {
+        var button = byId(els[BODY_ID], 'aiHistoryDeleteButton');
+        if (!button) throw new Error('详情栏里没有删除按钮');
+        confirmAnswer = true;
+        button._handlers.click({});
+        return new Promise(function (done) { setTimeout(done, 0); })
+            .then(function () { return new Promise(function (done) { setTimeout(done, 0); }); });
+    },
+    // **连点两下**（不 await 第一下）：第二次必须一个请求都不发。
+    doubleDelete: function (runId) {
+        confirmAnswer = true;
+        return Promise.all([
+            api.confirmDelete(Number(runId)),
+            api.confirmDelete(Number(runId))
+        ]);
+    },
     setCurrent: function (runId) { currentRunId = runId; }
 };
 
@@ -235,6 +281,17 @@ function withRejects(table, item) {
     var next = JSON.parse(JSON.stringify(table));
     (item.rejectRuns || []).forEach(function (runId) {
         next['/ai-analysis/runs/' + runId + '/report'] = 'reject';
+    });
+    // 删除被服务端拒（在途 409 / 分组的版本对不上 400）：那句话必须由服务端给，
+    // 界面照原样显示 —— 前端按状态码自己编一句是另一套话术，迟早与后端分叉。
+    (item.deleteFail || []).forEach(function (runId) {
+        next['/ai-analysis/runs/' + runId + '/delete'] = {
+            ok: false, status: item.deleteFailStatus || 409,
+            body: {
+                success: false, reason: 'in_flight',
+                message: '这次分析还在进行中，不能删除 —— 等它跑完（或失败）再删。'
+            }
+        };
     });
     return next;
 }
@@ -284,6 +341,31 @@ function snap() {
             })(body);
             return found;
         })(),
+        // 删除按钮：**在不在**（不是管理员 / 不是周版本时它不该出现）、写着什么、禁没禁用
+        deleteButton: (function () {
+            var node = byId(body, 'aiHistoryDeleteButton');
+            if (!node) return null;
+            return {
+                text: (node.children || []).map(function (c) { return c.textContent; }).join(''),
+                disabled: !!node.disabled
+            };
+        })(),
+        // 删除的回执（成功 / 失败那一句），以及有没有被标成错误
+        deleteNote: (function () {
+            var node = byClass(body, 'ai-history-delete-note');
+            if (!node) return null;
+            return {text: node.textContent, isError: hasClass(node, 'is-error')};
+        })(),
+        // 「当前基线」标记：**逐行**给一遍（顺序与左列一致），好断言它落在哪一行上
+        baselineTags: allByClass(body, 'ai-history-item').map(function (item) {
+            return !!byClass(item, 'ai-history-baseline-tag');
+        }),
+        baselineTagText: (function () {
+            var node = byClass(body, 'ai-history-baseline-tag');
+            return node ? node.textContent : null;
+        })(),
+        confirms: confirmLog.slice(),
+        posts: postLog.slice(),
         fetchLog: fetchLog.slice()
     };
 }
@@ -292,6 +374,9 @@ function reset(item) {
     seedEls();
     uidSeq = 0;
     fetchLog = [];
+    postLog = [];
+    confirmLog = [];
+    confirmAnswer = true;
     currentRunId = item.currentRunId === undefined ? null : item.currentRunId;
     fetchTable = withRejects(tableFor(item), item);
     vm.runInContext(fs.readFileSync(__SCRIPT__, 'utf8'), sandbox);
@@ -340,6 +425,9 @@ var pure = __PURE__.map(function (item) {
         tone: api.statusTone(item.status),
         rowMeta: api.rowMeta(item.row || {}),
         current: api.isCurrentAt({run_id: item.runId}, item.currentRunId),
+        deleteUrl: api.deleteUrl(item.runId),
+        // 动手之前那句话：**基线那一档必须多一句**（它是这个功能的全部风险所在）。
+        deleteAsk: item.askRow ? api.deleteConfirmText(item.askRow) : '',
         // 五个键各落哪一个下标（`-1` = 这个键不管）—— 首尾**不环绕**是这一格的判据。
         nav: ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Tab'].map(function (key) {
             return api.nextIndex(key, at, item.count);
@@ -363,12 +451,16 @@ def _rows() -> list:
             "status_label": "已有结论", "risk_label": "高", "scope_label": "全量",
             "trigger_label": "手动", "focus_label": "", "summary": "把奖励发放改成先发后扣。",
             "anomaly_count": 2, "suppressed_count": 0, "exportable": True,
+            # 删除那两个标记由服务端算（`can_delete` + `is_baseline`）。42 是基线：
+            # 「删了它，下一轮增量就没有可比对的结论了」这句话要靠它才出得来。
+            "deletable": True, "is_baseline": True,
         },
         {
             "run_id": 41, "created_at_display": "2026-09-10 09:00:00", "status": "failed",
             "status_label": "分析失败", "risk_label": "", "scope_label": "全量",
             "trigger_label": "定时", "focus_label": "", "summary": "失败：额度用完了",
             "anomaly_count": 0, "suppressed_count": 0, "exportable": False,
+            "deletable": True, "is_baseline": False,
         },
         # 第三条：**降级**那一档（它不是成功也不是失败，报告正文是真的）。第三条也让
         # 「方向键撞到首尾」这件事测得出来 —— 两条的话「停在最后一条」与「只有一个方向
@@ -378,6 +470,7 @@ def _rows() -> list:
             "status_label": "降级完成", "risk_label": "中", "scope_label": "增量",
             "trigger_label": "手动", "focus_label": "", "summary": "降级（上下文压缩）：这一次只有两条结论。",
             "anomaly_count": 2, "suppressed_count": 1, "exportable": True,
+            "deletable": True, "is_baseline": False,
         },
     ]
 
@@ -403,6 +496,22 @@ def _fetch(rows=None) -> dict:
                 },
             }
         }
+    # 删除成功：服务端回**重新取过的那份列表**（被删的那条不在了，基线标记换了一行）。
+    # 前端必须用它重画 —— 自己从旧列表里摘一条的话，`is_baseline` 会留在被删掉的那行上。
+    table["/ai-analysis/runs/42/delete"] = {
+        "body": {
+            "success": True,
+            "message": "已删除 2026-09-12 19:13:04 那一次结论。",
+            "run_id": 42, "runs": 1, "traces": 1, "anomalies": 2, "events": 0,
+            "history": {
+                "success": True, "kind": "commit",
+                "runs": [row for row in rows if row["run_id"] != 42],
+                "total": max(0, len(rows) - 1), "truncated": False, "limit": 20,
+                "window_days": 90, "in_progress": False,
+                "can_delete": True, "target_key": "g-7",
+            },
+        }
+    }
     return table
 
 
@@ -469,6 +578,25 @@ def run() -> dict:
              "ops": ["track:/ai-analysis/commit/7/history", "open",
                      "key:ArrowDown", "key:ArrowDown", "key:ArrowDown",
                      "key:ArrowUp", "key:Home", "key:End", "key:Tab"]},
+            # 13. 删掉正在看的那一条：**先问再删**，删完用服务端回的列表重画，
+            #     选中退到还在的第一条，右栏读的是**那一条**的报告（不是一句
+            #     「这一次没有报告正文。」—— 那是把「还没取回来」画成了「里面是空的」）。
+            {"name": "删掉正在看的那一条", "currentRunId": 42,
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "clickDelete"]},
+            # 14. 用户在确认框里点了取消 → **一个请求都不发**，列表原样。
+            {"name": "确认框里点了取消", "currentRunId": 42,
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "declineDelete:42"]},
+            # 15. 连点两下 → 只发一次请求（第二次删的是一条已经不存在的记录）。
+            {"name": "连点两下只删一次", "currentRunId": 42,
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "doubleDelete:42"]},
+            # 16. 服务端拒绝（还在跑）→ 那句错误只落在详情区，**列表一行都不许少**。
+            {"name": "服务端拒绝删除", "currentRunId": 42, "deleteFail": [41],
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "confirmDelete:41"]},
+            # 17. 不是管理员：**详情栏里根本没有那个按钮**（服务端给的 `deletable` 说是
+            #     不能删），API 也不发请求。
+            {"name": "不能删的人看不到按钮", "currentRunId": 42,
+             "rows": [dict(row, deletable=False) for row in _rows()],
+             "ops": ["track:/ai-analysis/commit/7/history", "open", "confirmDelete:42"]},
         ],
         [
             {"name": "提交的历史地址", "kind": "commit", "id": 7, "runId": 42},
@@ -504,6 +632,14 @@ def run() -> dict:
             {"name": "落在第一条", "count": 3, "at": 0},
             {"name": "落在最后一条", "count": 3, "at": 2},
             {"name": "名单是空的", "count": 0, "at": 0},
+            # 删除前那句话：**基线那一档要多一句**（删了它，下一轮增量就没有可比对的
+            # 结论了），非基线那一档不许多说。
+            {"name": "要删的是基线那一条", "runId": 42,
+             "askRow": {"run_id": 42, "created_at_display": "2026-09-12 19:13:04",
+                        "is_baseline": True}},
+            {"name": "要删的不是基线", "runId": 41,
+             "askRow": {"run_id": 41, "created_at_display": "2026-09-10 09:00:00",
+                        "is_baseline": False}},
         ],
         _rows(),
     )
@@ -969,3 +1105,163 @@ def test_every_drawer_tracks_its_targets_history_url():
     merged = _template("templates/merged_project_view.html")
     assert "AiReportHistory.historyUrlFor('weekly', configId)" in merged
     assert merged.count("AiReportHistory.track(") >= 1
+
+
+# --------------------------------------------------------------------------
+#  删除一条历次结论
+# --------------------------------------------------------------------------
+def test_deleting_the_open_one_asks_first_then_redraws_from_the_server(run):
+    """删掉正在看的那一条：**先问、再发一次请求、用服务端回的列表重画**。
+
+    ## 为什么必须用服务端那份列表
+
+    被删的那一条可能正是**基线指针**（`is_baseline`）。删完之后新基线指向哪一条只有
+    服务端算得出来 —— 前端自己从旧列表里摘一条的话，那个标记会留在已经不再是指针的
+    记录上，而「基线退到哪」正是这个功能的全部意义。
+
+    ## 为什么右栏要重新读一次
+
+    被删的若是正在看的那一份，选中会退到最新那条，而它的报告**一次都没取过**。少了
+    那一步，右栏会写「这一次没有报告正文。」—— 把「还没取回来」画成了「取回来了、
+    里面是空的」（这个老缺陷在本文件 2026-09-25 那一节里修过一次）。
+    """
+    last = _by_name(run)["删掉正在看的那一条"]["snaps"][-1]
+
+    assert last["confirms"], "删除之前没有问过一句"
+    assert "删除这一份结论？" in last["confirms"][0]
+    assert "基线" in last["confirms"][0], (
+        "要删的这条是基线，确认框里必须说清「删了下一次增量会改用它上面那一条」—— "
+        "这是这个动作的全部风险"
+    )
+    assert len(last["posts"]) == 1, f"删除该只发一次请求：{last['posts']}"
+    assert last["posts"][0]["url"] == "/ai-analysis/runs/42/delete"
+    assert last["posts"][0]["method"] == "POST"
+    assert '"target_key"' in last["posts"][0]["body"], (
+        "请求里没带分组键 —— 弹层是同一个抽屉换目标，服务端就靠它判「你看的是不是这个版本」"
+    )
+    # 列表按**服务端回的那份**重画：42 不在了，只剩两条。
+    assert last["optionCount"] == 2
+    assert last["state"]["selectedRunId"] == 41, "删完该退到还在的第一条"
+    assert last["state"]["deleteNotice"], "删成功之后详情区没有任何回执"
+    # 退到的那一条是**失败**记录（41），所以右栏该说「这一次是失败的」并带上原因 ——
+    # 那句话只有取回报告才可能显示出来。**不能只断「有一份报告」**：没取的时候那里
+    # 写的是「这一次没有报告正文。」，与「取回来了、里面是空的」是同一种假话。
+    assert "这一次没有报告正文。" not in last["body"], (
+        "删完右栏没有去读新选中的那一份 —— 屏幕上会写着「这一次没有报告正文。」"
+    )
+    assert "额度用完了" in last["body"], "右栏显示的不是那一条自己的报告"
+    assert last["state"]["deleteError"] == ""
+
+
+def test_cancelling_the_confirm_sends_nothing(run):
+    """确认框里点了取消 → **一个写请求都不发**，列表与选中原样不动。"""
+    last = _by_name(run)["确认框里点了取消"]["snaps"][-1]
+
+    assert last["confirms"], "连问都没问"
+    assert last["posts"] == [], "用户点了取消，请求还是发出去了"
+    assert last["optionCount"] == 3
+    assert last["state"]["selectedRunId"] == 42
+    assert last["state"]["deleting"] is None
+    assert last["state"]["deleteNotice"] == ""
+    assert last["state"]["deleteError"] == ""
+
+
+def test_double_clicking_deletes_only_once(run):
+    """连点两下只发一次请求（第二次删的是一条已经不存在的记录）。
+
+    按钮在飞的时候是禁用的，但键盘与快速双击都可能赶在那一次重画之前进来 —— 所以
+    `state.deleting` 那道闸门不能只有按钮的 `disabled` 撑着。
+    """
+    last = _by_name(run)["连点两下只删一次"]["snaps"][-1]
+
+    assert len(last["posts"]) == 1, f"连点两下发了 {len(last['posts'])} 次请求"
+    assert last["optionCount"] == 2
+
+
+def test_a_refused_delete_keeps_the_list_intact(run):
+    """服务端拒绝（还在跑 / 版本对不上）→ 那句错误**只落在详情区**，列表一行都不许少。
+
+    这条与「报告读不到时整张列表被抹掉」是同一个老缺陷的另一面：一次失败的网络调用
+    不该把用户正在翻的历史清空。
+    """
+    last = _by_name(run)["服务端拒绝删除"]["snaps"][-1]
+
+    assert len(last["posts"]) == 1
+    assert last["optionCount"] == 3, "删除被拒之后列表少了一行"
+    assert last["state"]["selectedRunId"] == 42
+    assert last["state"]["deleteError"], "详情区没有把服务端那句话显示出来"
+    assert last["deleteNote"] and last["deleteNote"]["isError"] is True
+    assert "不能删除" in last["deleteNote"]["text"], last["deleteNote"]
+    assert last["state"]["deleting"] is None, "失败之后「正在删除」没有解除，按钮会一直禁用"
+
+
+def test_an_undeletable_row_has_no_button_and_sends_nothing(run):
+    """不能删的人（不是项目管理员）**根本看不到那个按钮**，API 也不发请求。
+
+    判据来自服务端的 `deletable`（与后端的拒绝分支同源）—— 界面上「摆了按钮再拒绝」
+    比「不摆」更糟：用户点下去会以为是自己没权限，而不是这条记录本来就不给删。
+    """
+    last = _by_name(run)["不能删的人看不到按钮"]["snaps"][-1]
+
+    assert last["deleteButton"] is None, "不能删的人却看到了删除按钮"
+    assert last["posts"] == [], "`deletable` 是假，请求还是发出去了"
+    assert last["confirms"] == [], "不该问就问了"
+    assert last["optionCount"] == 3
+
+
+def test_the_delete_button_reports_its_own_state(run):
+    """能删的那一档：按钮在场、写着「删除这一份」、**没有** disabled（在飞才禁用）。"""
+    last = _by_name(run)["删掉正在看的那一条"]["snaps"][-1]
+
+    # 删完之后 42 没了、选中退到 41，41 也是能删的 —— 按钮跟着那一行重新长出来。
+    assert last["deleteButton"] is not None
+    assert last["deleteButton"]["text"] == "删除这一份"
+    assert last["deleteButton"]["disabled"] is False
+
+
+def test_the_confirm_sentence_depends_on_whether_it_is_the_baseline(run):
+    """确认框那句话是**纯函数**：基线那一档多一句，其余不多说。
+
+    `deleteConfirmText` 进的是**两个不同**的 row，所以这两条必须给出不同的结果 ——
+    只测「有一句话」是测不出这个分叉的。
+    """
+    pure = _pure(run)
+    baseline = pure["要删的是基线那一条"]["deleteAsk"]
+    plain = pure["要删的不是基线"]["deleteAsk"]
+
+    assert baseline != plain
+    assert "下一轮增量分析的基线" in baseline
+    assert "下一轮增量分析的基线" not in plain
+    assert "不能恢复" in baseline and "不能恢复" in plain, "两档都要说清这件事不可逆"
+    assert "2026-09-12 19:13:04" in baseline, "确认框里要写清删的是哪一次"
+
+
+def test_the_delete_url_is_the_route_that_exists(run):
+    pure = _pure(run)
+    for name, item in pure.items():
+        if item["deleteUrl"]:
+            assert item["deleteUrl"] == f"/ai-analysis/runs/{item['deleteUrl'].split('/')[3]}/delete"
+    assert pure["提交的历史地址"]["deleteUrl"] == "/ai-analysis/runs/42/delete"
+
+
+def test_the_baseline_row_says_so_in_words(run):
+    """「当前基线」是一个**词**，不是一条颜色（与「当前显示」同一条口径）。
+
+    删除这个功能靠它才读得懂：「删了下一次增量会改用上一条」这句话，只有在用户已经
+    知道「它本来就是基线」时才成立。所以标记必须**落在基线那一行**上。
+
+    「当前显示」与「当前基线」是**两件事**，默认打开时恰好落在同一行（42 既是基线
+    又是屏幕上正显示的那次）—— 换一条选中之后，基线标记**留在原地**。
+    """
+    last = _by_name(run)["默认选中当前这次"]["snaps"][-1]
+    assert last["baselineTags"] == [True, False, False], (
+        f"「当前基线」没落在基线那一行上：{last['baselineTags']}"
+    )
+    assert last["baselineTagText"] == "当前基线"
+
+    # 换到不是基线的那一条：基线标记留着（它是那一行的属性，不是选中态的另一个说法）。
+    moved = _by_name(run)["翻到历史那一条"]["snaps"][-1]
+    assert moved["baselineTags"] == [True, False, False], (
+        "翻到别的行之后基线标记跟着跑了"
+    )
+    assert moved["state"]["selectedRunId"] == 41

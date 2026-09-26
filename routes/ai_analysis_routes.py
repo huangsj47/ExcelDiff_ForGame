@@ -1218,6 +1218,8 @@ def ai_weekly_history(config_id):
         kind="weekly",
         target_key=build_weekly_group_key(config),
         limit=_history_limit(),
+        # 能不能删由这里判（服务层不 import flask）：只有项目管理员，且只有周版本。
+        can_delete=_has_project_admin_access(config.project_id),
     )
     return jsonify(payload), 200
 
@@ -1249,6 +1251,70 @@ def ai_run_report(run_id):
     if payload is None:
         return jsonify({"success": False, "message": "Not found."}), 404
     return jsonify({"success": True, "result": payload, "run_id": payload.get("run_id")}), 200
+
+
+@ai_analysis_bp.route("/ai-analysis/runs/<int:run_id>/delete", methods=["POST"])
+def ai_run_delete(run_id):
+    """删掉**一条**历次结论（周版本）。
+
+    ## 为什么要这个入口
+
+    历次结论里那一条「上一次报过的问题」不只给人看：它同时是**下一轮增量的基线**
+    （指针 `ai_weekly_analysis_state.last_concluded_run_id`）。用户重跑过一次、结论是错的、
+    或者只想让平台按更早那份再比一遍 —— 没有删除入口时他只能去改库。
+
+    ## 权限：项目管理员
+
+    与配置、api-key、触发分析那几个端点同档。删的是一条**结论**（连同它的报告正文与
+    逐轮轨迹，不可逆），不是「分诊一条异常」那种日常动作。
+
+    ## 方法用 POST 而不是 DELETE
+
+    全仓的写路由都是 POST + `read_json_object`（DELETE 只有知识包清单那一处，且不带
+    body）。这里要带 `target_key` 回执，用 DELETE 得把参数塞进 query string —— 一条会
+    改数据的请求不该长得像幂等的取数请求。
+
+    ## 回执里带**重新取一遍**的列表
+
+    删完之后界面上那份列表已经过期了（被删的那条还在、基线标记也可能换了行）。让服务端
+    把新列表一并给回来，界面直接用 —— 前端自己从旧列表里摘掉一条的话，`is_baseline`
+    会留在已经不再是指针的那一行上，而那条时间线正是删除这件事的全部意义。
+    """
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return jsonify({"success": False, "message": "Not found."}), 404
+    if not _has_project_admin_access(run.project_id):
+        return jsonify(
+            {"success": False, "message": "Admin permission required."}
+        ), 403
+    body, error = read_json_object()
+    if error is not None:
+        return error
+    # **先把分组键读出来**：删除成功之后那条 run 会被摘出 session，`commit` 又会让它的
+    # 属性过期 —— 那时再读 `run.target_key` 会抛 `DetachedInstanceError`。
+    group_key = str(body.get("target_key") or getattr(run, "target_key", "") or "")
+    # 弹层是「同一个抽屉换目标」：带上「我看到的是哪个分组」，服务端一比就知道要不要拒。
+    reason, message, extra = report_history_service.delete_target_run(
+        run_id, expected_target_key=body.get("target_key"), actor=_actor_name()
+    )
+    if reason:
+        # 状态码按**原因**给，不按异常类型：404 这条已经不存在了、400 请求本身不成立、
+        # 409 请求没毛病只是要等一下（与 `ProjectBusyError` 那条既有论证同源）、
+        # 500 是平台自己没删成。
+        status = {
+            "not_found": 404,
+            "not_weekly": 400,
+            "target_mismatch": 400,
+            "in_flight": 409,
+        }.get(reason, 500)
+        return jsonify({"success": False, "reason": reason, "message": message, **extra}), status
+    history = report_history_service.list_target_runs(
+        kind="weekly",
+        target_key=group_key,
+        limit=_history_limit(),
+        can_delete=True,
+    )
+    return jsonify({"success": True, "message": message, **extra, "history": history}), 200
 
 
 # ---------------------------------------------------------------------------

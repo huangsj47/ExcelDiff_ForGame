@@ -2236,6 +2236,19 @@ main:focus {
     white-space: nowrap;
 }
 
+/* 「当前基线」= 下一轮增量会继承这一条的结论（`ai_weekly_analysis_state` 上那个指针）。
+   与「当前显示」**分开一档色**：一个是「你在看它」，一个是「平台下次会拿它做基线」——
+   两件事落在同一行上时（默认打开就是这样）必须都读得出来。删掉它，基线就换人。 */
+.ai-history-baseline-tag {
+    padding: 0 6px;
+    border: 1px dashed currentColor;
+    border-radius: 999px;
+    font-size: var(--font-size-sm, 12px);
+    line-height: 1.5;
+    color: var(--color-text-muted, #656d76);
+    white-space: nowrap;
+}
+
 /* 一行摘要：**整句换行，不裁剪**。服务端已按 80 字截过一道，这里再挤成定高就等于
    把一句话砍成碎句 —— 而它是「一眼认出是哪一次」的唯一线索。 */
 .ai-history-summary {
@@ -2296,6 +2309,21 @@ main:focus {
    前者写成那样，读的人会以为那一次根本没留下报告。 */
 .ai-history-detail-pane[aria-busy="true"] .ai-analysis-output {
     color: var(--color-text-muted, #656d76);
+}
+
+/* 删除那一条的回执（成功或失败）。**留在详情区，不动列表** —— 一次网络抖动不该把
+   用户正在翻的历史清空。失败用危险色 + 一句说得清的话（服务端给的那句）。 */
+.ai-history-delete-note {
+    margin: 0;
+    padding: 8px 12px;
+    font-size: var(--font-size-sm, 12px);
+    color: var(--color-text-muted, #656d76);
+    border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+
+.ai-history-delete-note.is-error {
+    color: var(--color-danger-text, #b3261e);
+    background: var(--color-danger-bg, #ffebe9);
 }
 
 @media (max-width: 991.98px) {

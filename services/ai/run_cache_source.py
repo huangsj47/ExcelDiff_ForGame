@@ -118,6 +118,126 @@ def _stream_cached_run(run: AiAnalysisRun) -> Iterable[str]:
     if payload:
         yield _sse_event("result", payload)
 
+def remove_analysis_runs(run_ids) -> Optional[dict]:
+    """删除这些运行**及其全部子表行**，并把受影响分组的结论基线指针修正一遍。
+
+    返回 `{"runs", "traces", "anomalies", "events"}` 四个计数；**失败返回 None**。
+    失败不返回全 0 的字典：那与「本来就没有可删的行」在读的人眼里是同一个形状
+    （同 `cleanup_expired_analysis_runs` 的说明）。
+
+    ## 为什么是**唯一一处**删除实现
+
+    「删一条分析记录」在仓库里有两个入口：**保留期清理**（`cleanup_expired_analysis_runs`）
+    与**用户删掉某一条历次结论**（`ai_report_history_service.delete_target_run`）。三张子表
+    的先子后父顺序、`AiAnalysisRoundEvent` 那张没有外键的表（漏删的症状是 run id 复用后
+    下一次运行读到幽灵行，见 `cleanup_expired_analysis_runs` 的 docstring）、以及**指针
+    修正**，两处各写一遍的话，加第四张子表时必然只加一处 —— 而漏掉的那一处不会报错。
+
+    ## 指针修正在同一个事务里
+
+    删完行、写指针、`commit` —— 中间任何一步抛异常都整笔回滚（调用方看到 `None`，
+    run 还在）。所以 `refresh_concluded_pointers_for_removed_runs` **自己不许 commit**
+    （它确实没有）。
+
+    ## 为什么在删除**之前**把 run 行读出来
+
+    指针要按分组键重算，而删完就查不到「这几条属于哪个分组」了。读出来的那一批也跟着
+    交给修正函数（它只取 `target_type` / `target_key` / `id`）。
+    """
+    ids = []
+    for value in run_ids or ():
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    ids = sorted(set(ids))
+    if not ids:
+        # **不是失败**：没有要删的行，本来就是 0。
+        return {"runs": 0, "traces": 0, "anomalies": 0, "events": 0}
+    try:
+        # 先读出来（分组键要在删之前拿到）—— 这一批也是下面修正函数的输入。
+        #
+        # **只取三列，不取实体对象**：把 `AiAnalysisRun` 的实体读进 session 会让下面那次
+        # flush 去同步 run ↔ trace/anomaly 的关系（两个模型上都有 `backref`），而父行已经
+        # 被批量 DELETE 掉了 —— 于是子表的 `run_id` 被回填成 NULL：
+        # `NOT NULL constraint failed: ai_analysis_anomaly.run_id`，**一次成功的删除以 500
+        # 收场**。列查询不进 identity map，这条关系同步根本不发生。
+        rows = (
+            db.session.query(
+                AiAnalysisRun.id, AiAnalysisRun.target_type, AiAnalysisRun.target_key
+            )
+            .filter(AiAnalysisRun.id.in_(ids))
+            .all()
+        )
+        # 三张子表：前两张不删会被 FK 顶回来（整条 DELETE 回滚，一条都删不掉），
+        # 第三张没有外键、不删不报错但会留下幽灵行。
+        children = (
+            AiAnalysisTrace.query.filter(AiAnalysisTrace.run_id.in_(ids)).delete(
+                synchronize_session=False
+            ),
+            AiAnalysisAnomaly.query.filter(AiAnalysisAnomaly.run_id.in_(ids)).delete(
+                synchronize_session=False
+            ),
+            AiAnalysisRoundEvent.query.filter(AiAnalysisRoundEvent.run_id.in_(ids)).delete(
+                synchronize_session=False
+            ),
+        )
+        deleted = AiAnalysisRun.query.filter(AiAnalysisRun.id.in_(ids)).delete(
+            synchronize_session=False
+        )
+        _forget_rows_deleted_outside_the_session(ids)
+        # **函数内 import**：`baseline_blocks` 在模块级 import 本模块（`_json_dumps`），
+        # 模块级反向 import 会成环。
+        from services.ai import baseline_blocks
+
+        baseline_blocks.refresh_concluded_pointers_for_removed_runs(rows)
+        db.session.commit()
+    except Exception as exc:
+        db.session.rollback()
+        log_print(f"删除AI分析记录失败: {exc}", "AI", force=True)
+        return None
+    if any(children):
+        log_print(
+            f"🧹 随删掉的分析记录一并清理: {children[0] or 0} 条轮次明细，"
+            f"{children[1] or 0} 条异常，{children[2] or 0} 条轮次事件",
+            "AI",
+        )
+    return {
+        "runs": int(deleted or 0),
+        "traces": int(children[0] or 0),
+        "anomalies": int(children[1] or 0),
+        "events": int(children[2] or 0),
+    }
+
+
+def _forget_rows_deleted_outside_the_session(ids) -> None:
+    """把已经被批量 DELETE 掉的行**从 session 里摘出去**（`expunge`）。
+
+    `Query.delete(synchronize_session=False)` 只发 SQL，不告诉 ORM 哪几行没了。而这些
+    对象可能仍在 session 里 —— 调用方 `db.session.get` 过、测试里刚造过、路由刚刚读过。
+    下一次 flush 时，`AiAnalysisAnomaly.run` / `AiAnalysisTrace.run` 这两个 `backref`
+    会让 ORM 用父对象去回填子表的 `run_id`，而父行已经不在库里，于是子表被写成
+    `run_id=NULL` → `NOT NULL constraint failed` —— **一次成功的删除以 500 收场**。
+
+    摘出去之后它们只是"脱离 session"的对象：库里那一行确实没了，这与事实相符。
+    `expunge` 对 pending（还没 insert 过）的对象等于取消这次插入 —— 那也是想要的
+    （它在 insert 之前父行就已经没了）。
+    """
+    keep = set(int(value) for value in ids)
+    for obj in list(db.session.identity_map.values()):
+        if not isinstance(
+            obj, (AiAnalysisRun, AiAnalysisTrace, AiAnalysisAnomaly, AiAnalysisRoundEvent)
+        ):
+            continue
+        own_run_id = obj.id if isinstance(obj, AiAnalysisRun) else obj.run_id
+        try:
+            key = int(own_run_id)
+        except (TypeError, ValueError):
+            continue
+        if key in keep:
+            db.session.expunge(obj)
+
+
 def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
     """清理过期的 AI 分析记录。
 
@@ -137,62 +257,34 @@ def cleanup_expired_analysis_runs(retention_days: int = ANALYSIS_CACHE_DAYS):
     并打印「清理AI分析缓存失败: (sqlite3.IntegrityError) FOREIGN KEY constraint failed」，
     过期 run / trace / anomaly 一行都没少。
 
-    **先子后父**，同一个事务里做完。**三张**子表都要删：
+    **先子后父，三张子表都要删** —— 具体做法与理由都在 `remove_analysis_runs` 里
+    （那是唯一一处实现），本函数只负责「哪些算过期」。
 
-    * `AiAnalysisTrace` 是逐轮明细，`AiAnalysisAnomaly` 是异常条目（含人工处置状态）
-      —— 它们都只挂在 run 上，run 一删就再也读不到（`AiAnalysisAnomaly.queue` 只按
-      run_id 查），留着就是谁都取不到的死行；
-    * `AiAnalysisRoundEvent` 是本表**唯一没有外键**的那张子表（见模型 docstring：加了指向
-      run/project 的非空外键会打红 `test_delete_project_cleans_every_project_scoped_table`
-      那条静态护栏）。所以它比上面两张**更危险** —— 漏掉它的后果不是「留下死行」，
-      而是**错数据**：删父行既不报错也不带走它，而 run 的 id 会被后面新建的 run
-      **复用**（SQLite 取「现存最大 + 1」），于是**下一次**运行的逐轮视图会把上一批
-      早已被清理掉的事件行混进来（`round_events.events_for_run` 按 run_id 读，再按
-      `member_index/round/id` 排序）。症状是幽灵行：2026-09-25 的全量测试红过一次，
-      机制正是它（读到了别的运行留下的 `reasoning_tokens=None`）。
+    ## 指针：保留期清理也要修（2026-09-26 补）
 
-    **为什么在这里内联删、而不是逐条调 `round_events.forget_run`**：那个入口自己
-    `db.session.commit()` 并且吞掉异常返回 0，逐条调就等于把「先子后父、同一个事务」这条
-    性质拆散（上一段正是它存在的理由）。它仍然是**测试与工具**用的入口，生产清理路径走
-    的是下面那一句批量 DELETE。
+    原先这里删完就走，`ai_weekly_analysis_state.last_concluded_run_id` 留着**指向一行
+    已经不存在的 run**。后果不是「界面上多了个坏 id」，而是：`_decide_effective_mode`
+    只看「指针是不是 NULL」，于是下一次「增量」**不被升成全量**、也没有升级原因，
+    而快照不会被清 —— 用户点增量、看到的是一份来路不明的报告。现在与用户删除走
+    同一条路（`remove_analysis_runs` 里的指针修正）。
     """
     cutoff = _utcnow() - timedelta(days=retention_days)
-    try:
-        expired_run_ids = AiAnalysisRun.query.with_entities(AiAnalysisRun.id).filter(
-            AiAnalysisRun.created_at.isnot(None)
-        ).filter(AiAnalysisRun.created_at < cutoff)
-
-        # 三张子表都在这里删（顺序上先子后父，且与父行同处这一个事务）。
-        # 前两张有外键、不删会被 FK 顶回来；第三张**没有**外键、不删则不报错 ——
-        # 后果见 docstring（run id 复用会让下一次运行读到这一批的幽灵事件行）。
-        children = (
-            AiAnalysisTrace.query.filter(
-                AiAnalysisTrace.run_id.in_(expired_run_ids)
-            ).delete(synchronize_session=False),
-            AiAnalysisAnomaly.query.filter(
-                AiAnalysisAnomaly.run_id.in_(expired_run_ids)
-            ).delete(synchronize_session=False),
-            AiAnalysisRoundEvent.query.filter(
-                AiAnalysisRoundEvent.run_id.in_(expired_run_ids)
-            ).delete(synchronize_session=False),
-        )
-        deleted = (
-            AiAnalysisRun.query.filter(AiAnalysisRun.created_at.isnot(None))
-            .filter(AiAnalysisRun.created_at < cutoff)
-            .delete(synchronize_session=False)
-        )
-        db.session.commit()
-        if any(children):
-            log_print(
-                f"🧹 随过期分析记录一并清理: {children[0] or 0} 条轮次明细，"
-                f"{children[1] or 0} 条异常，{children[2] or 0} 条轮次事件",
-                "AI",
-            )
-        return int(deleted or 0)
-    except Exception as exc:
-        db.session.rollback()
-        log_print(f"清理AI分析缓存失败: {exc}", "AI", force=True)
+    expired_run_ids = [
+        row.id
+        for row in AiAnalysisRun.query.with_entities(AiAnalysisRun.id)
+        .filter(AiAnalysisRun.created_at.isnot(None))
+        .filter(AiAnalysisRun.created_at < cutoff)
+        .all()
+    ]
+    if not expired_run_ids:
+        return 0
+    deleted = remove_analysis_runs(expired_run_ids)
+    if deleted is None:
+        # 失败的那一句日志由 `remove_analysis_runs` 打（它带着真正的异常），这里只把
+        # 「谁在清」补上 —— 两处都打会在日志里出现两条看起来不相干的失败。
+        log_print(f"清理AI分析缓存失败（保留 {retention_days} 天）", "AI", force=True)
         return None
+    return int(deleted["runs"])
 
 def fail_orphaned_analysis_runs() -> int:
     """把平台重启后遗留的 `running` 记录判为失败，返回处理条数。

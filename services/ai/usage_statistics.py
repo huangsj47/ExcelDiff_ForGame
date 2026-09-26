@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 from models import db
 from models.ai_analysis import (
+    IN_FLIGHT_STATUSES,
     SINGLETON_ID,
     AiAnalysisAnomaly,
     AiAnalysisRun,
@@ -48,10 +49,13 @@ from utils.timezone_utils import (
     utc_naive_to_beijing_wallclock,
 )
 
-# 在途（还没结束）的运行状态。与 `AiAnalysisRun.effective_status` 的判定同源，
-# 但这里刻意只看**库里的原值**：`effective_status` 会把超时的 running 显示成 failed，
-# 而重置要防的是「这条记录还会被回写」，超时但进程仍活着的那条照样会写。
-IN_FLIGHT_STATUSES = ("pending", "running")
+# 在途（还没结束）的运行状态。**定义搬到了模型层**（挨着 `RUN_STATUSES`，两个调用点
+# 共用同一个枚举）；这里按旧名字回导一份，免得既有 import 点集体改一次。
+#
+# 这一处**只看库里的原值**这个口径没有变：`effective_status` 会把超时的 running 显示成
+# failed，而重置要防的是「这条记录还会被回写」，超时但进程仍活着的那条照样会写。
+# 与之相反的取法见删除那条路（`models/ai_analysis/analysis_run.py::IN_FLIGHT_STATUSES`
+# 的注释写了两者为什么不同）。
 
 # 全量重置的确认词。**不是**安全边界（权限才是，见路由的 `@require_admin`），
 # 它防的是误触：这个动作删的是报告历史，点错了没有撤销。
@@ -220,10 +224,17 @@ def purge_usage_statistics(*, updated_by: str = "") -> tuple[bool, str, dict]:
         traces = db.session.query(AiAnalysisTrace).delete(synchronize_session=False)
         anomalies = db.session.query(AiAnalysisAnomaly).delete(synchronize_session=False)
         runs = db.session.query(AiAnalysisRun).delete(synchronize_session=False)
-        # 周版本状态里那个「上一次运行」的指针：删掉运行之后它就是脏的
-        # （这一列只写不读，但留着一个指向已删行的 id 迟早会有人当真）。
+        # 周版本状态里那两个指针：删掉运行之后它们都是脏的。
+        #
+        # `last_concluded_run_id` 原先**漏了**（只清了 `last_analysis_run_id`）。它的后果
+        # 不是「界面上多一个坏 id」，而是与保留期清理同一个坑：`_decide_effective_mode`
+        # 只看「指针是不是 NULL」，于是下一次「增量」**不被升格成全量**、也没有升级原因，
+        # 而那份报告是拿着一个已经被删掉的基线跑出来的。
         db.session.query(AiWeeklyAnalysisState).update(
-            {AiWeeklyAnalysisState.last_analysis_run_id: None},
+            {
+                AiWeeklyAnalysisState.last_analysis_run_id: None,
+                AiWeeklyAnalysisState.last_concluded_run_id: None,
+            },
             synchronize_session=False,
         )
         # 起点也一起清掉：一条运行都不剩了，起点没有意义，留着只会在界面上显示

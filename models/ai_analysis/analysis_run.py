@@ -20,6 +20,22 @@ from ..big_text import BigText
 # 都看不见它，只能去解析整份 payload 大文本。
 RUN_STATUSES = ("pending", "running", "succeeded", "degraded", "failed")
 
+# 在途（还没结束）的状态。它与 `effective_status` 是**两把尺子**，谁用哪一把要看问的是
+# 什么问题（两个调用点今天刻意不同，别「统一」掉）：
+#
+# * **全量重置**（`services/ai/usage_statistics.purge_usage_statistics`）问的是「这条记录
+#   还会不会被回写」—— 所以它对的是**库里的原值**（`AiAnalysisRun.status`）。超时但进程
+#   仍活着的那条照样会写，放它过去就是「结果回写到已被删掉的行」。
+# * **删除一条历次结论**（`ai_report_history_service.delete_target_run`）问的是「用户看到的
+#   这条是不是失败」—— 所以它对的是 `effective_status`（僵尸 running 在界面上就是失败，
+#   见 `is_stale_running`）。按原值拒的话，用户会对着一条写着「分析失败」的记录点删除、
+#   被回绝说「它还在跑」：同一条记录，列表 / `/latest` / `/progress` 三处说失败，这里说
+#   在跑。
+#
+# 放在模型层（而不是 `services/ai/usage_statistics.py`）：它是**运行状态**的划分，两个
+# 调用点分属服务层两个不同的模块，谁都不该向对方去借这个枚举。
+IN_FLIGHT_STATUSES = ("pending", "running")
+
 # 超过这个时长仍是 running 的记录，视为僵尸（进程被杀 / 容器重启留下的）。
 # 判定放在读取侧而不是靠定时清理：定时任务本身也会被杀，而读取侧判断是幂等的、
 # 不依赖任何后台组件。

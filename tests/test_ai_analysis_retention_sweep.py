@@ -57,6 +57,7 @@ from models.ai_analysis import (
     AiAnalysisRoundEvent,
     AiAnalysisRun,
     AiAnalysisTrace,
+    AiWeeklyAnalysisState,
 )
 from services.ai_analysis_service import cleanup_expired_analysis_runs
 
@@ -235,6 +236,61 @@ def test_an_expired_run_without_children_is_one_transaction():
 
         assert cleanup_expired_analysis_runs(retention_days=_FAR_DAYS) is not None
         assert _survivors(bare_run)["runs"] == 0
+
+
+def test_the_sweep_also_fixes_the_baseline_pointer():
+    """保留期清理**也要修结论基线指针**（2026-09-26 补的洞）。
+
+    原先这里删完就走，`ai_weekly_analysis_state.last_concluded_run_id` 指向一行已经不存在
+    的 run。后果不是「界面上多一个坏 id」而是：`job_service._decide_effective_mode`
+    只看「指针是不是 NULL」，于是下一次「增量」**不被升格成全量**、也没有升级原因 ——
+    用户点增量，拿到一份拿着不存在的基线跑出来的报告，而没有任何地方说得出为什么。
+
+    变异：把 `cleanup_expired_analysis_runs` 里那次 `remove_analysis_runs` 换回「只批量
+    删行、不碰指针」→ 指针还停在过期那条上 → 红。
+    """
+    with app.app_context():
+        create_tables()
+        project = _project()
+        key = _uid("group")
+
+        def _weekly(age_days: int) -> AiAnalysisRun:
+            created = datetime.now(timezone.utc) - timedelta(days=age_days)
+            row = AiAnalysisRun(
+                project_id=project.id,
+                target_type="weekly",
+                target_id=1,
+                target_key=key,
+                status="succeeded",
+                scope="full",
+                trigger_source="manual",
+                conclusion_structured=True,
+                created_at=created,
+                started_at=created,
+                finished_at=created,
+            )
+            db.session.add(row)
+            db.session.flush()
+            return row
+
+        expired = _weekly(_OLD_AGE_DAYS)
+        fresh = _weekly(1)
+        state = AiWeeklyAnalysisState(
+            project_id=project.id, group_key=key, last_concluded_run_id=expired.id
+        )
+        db.session.add(state)
+        db.session.commit()
+        expired_id, fresh_id = expired.id, fresh.id
+
+        assert cleanup_expired_analysis_runs(retention_days=_FAR_DAYS) is not None
+
+        db.session.expire_all()
+        stored = AiWeeklyAnalysisState.query.filter_by(id=state.id).one()
+        assert stored.last_concluded_run_id == fresh_id, (
+            "清理之后结论基线指针还指着一个已经被删掉的运行 —— 下一次「增量」不会被"
+            "升格成全量，报告会拿着一个不存在的基线跑"
+        )
+        assert db.session.get(AiAnalysisRun, expired_id) is None, "过期那条没被清掉"
 
 
 def test_foreign_keys_are_enforced_here():

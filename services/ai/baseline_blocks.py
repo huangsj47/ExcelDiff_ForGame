@@ -334,3 +334,111 @@ def _advance_on_success(
             )
     row.updated_at = _utcnow()
     db.session.commit()
+
+
+# ==========================================================================
+# 指针的**修正**：有运行被删掉之后，`last_concluded_run_id` 还成立吗
+# ==========================================================================
+#
+# 上面 `advance_weekly_state` 是**推进**（跑完一次就把指针推到这一次），这里是**回退**。
+# 两件事必须在同一个文件里：改判据的人要同时看到「什么算有结论」在两个方向上各是什么，
+# 否则很容易把回退那侧写成另一把尺子（比如「最近一条 status 是成功的」），而那样写出来
+# 的指针与 `baseline_source.previous_run` 挑出来的**不是同一条运行** —— 症状是 job 的
+# 账上说基线是 A、注入给模型的历史结论却是 B，两边都不报错。
+#
+# 判据直接**复用 `previous_run`**（它已经卡了 `CONCLUDED_STATUSES` + `conclusion_structured`
+# + 时间倒序），所以「谁是基线」这件事全仓只有一份实现。
+#
+# 与 `advance_weekly_state` 的三个不同：
+# * 这里**只动 `last_concluded_run_id`**（外加 `updated_at`）。`last_analyzed_at` /
+#   `last_snapshot_digest` / `last_triggered_at` / `last_complete_snapshot_id` 回答的是
+#   另外几个问题（最近一次完整分析、这份输入分析过没有、调度节流、有没有完整检查过），
+#   删一条结论不改变它们的答案。顺手清掉 `last_snapshot_digest` 的后果是下一 tick 把同一份
+#   输入当新变化再分析一遍。
+# * 这里**不 commit** —— 调用方（删除那条路）要与删行同处一个事务，删不掉就一点都不该改。
+# * 这里**可能把指针改成 NULL**（删空了）。那不是「没有值」，是「首次全量」的既定语义：
+#   `job_service._decide_effective_mode` 见到 NULL 会把增量升成全量、`upgrade_reason`
+#   记成 `first_run`，预检会在开跑前把代价摆出来。
+
+
+def refresh_concluded_pointer(
+    state: Optional[AiWeeklyAnalysisState], removed_run_ids: set
+) -> bool:
+    """删掉 `removed_run_ids` 之后，把 `state` 的结论基线指针挪到**仍然成立**的那一条上。
+
+    返回「改动了没有」。**只在真受影响时才动**，四条判据按顺序：
+
+    1. 没有状态行、或分组键为空 → **一个字段都不动**。空 key 这一条是必需的：
+       `previous_run` 对空 target_key 直接返回 `None`，照直往下就把「我们不知道这个
+       分组是谁」写成了「它没有基线」。
+    2. 指针本来就是 NULL → 保持 NULL，**不反推**。NULL 是「首次全量」的既定语义，
+       往回填一条就等于把「这次是首跑」这件事悄悄改掉。
+    3. 指针**仍然有效**（不在被删集合里，且这一行真的还在库里）→ 原样不动。
+       **两条都要判**：只看「不在被删集合里」的话，「指针指向一行早已不存在的 run」
+       （保留期清理留下的历史脏指针）永远修不好；而**无条件重算**更糟 —— 指针与
+       `previous_run` 本来就有合法的分歧（比如用户显式点了全量、或那条结论没有被标记
+       结构化），一次无关的删除会把指针在这些分歧上搬一次家。
+    4. 其余 → 用 `previous_run` 取新值，写进去（可能是 NULL = 删空了）。
+    """
+    if state is None:
+        return False
+    key = str(getattr(state, "group_key", "") or "")
+    if not key:
+        return False
+    pointer = getattr(state, "last_concluded_run_id", None)
+    if pointer is None:
+        return False
+    # **存在性用一句列查询判，不用 `db.session.get`**：调用方刚用批量 DELETE 删掉了那批
+    # 行（`synchronize_session=False`），而被删的对象还在 session 的 identity map 里 ——
+    # `session.get` 先查 map，会把一行已经不在库里的 run 报成「还在」。列查询直接走 SQL。
+    still_there = (
+        db.session.query(AiAnalysisRun.id).filter(AiAnalysisRun.id == pointer).first()
+        is not None
+    )
+    if pointer not in removed_run_ids and still_there:
+        return False
+    # **函数内 import**：`baseline_source` 在模块级 import 了 `run_cache_source`，而
+    # `run_cache_source.remove_analysis_runs` 反过来要调本函数 —— 模块级会成环。
+    from services.ai.baseline_source import previous_run
+
+    replacement = previous_run("weekly", key)
+    new_id = getattr(replacement, "id", None)
+    if new_id == pointer:
+        return False
+    state.last_concluded_run_id = new_id
+    state.updated_at = _utcnow()
+    log_print(
+        f"AI 分析：分组 {key} 的结论基线指针 {pointer} → {new_id}"
+        f"（原运行已被删除）",
+        "AI",
+    )
+    return True
+
+
+def refresh_concluded_pointers_for_removed_runs(runs) -> int:
+    """一批运行被删掉之后，把它们各自分组的结论基线指针修正一遍，返回改动的分组数。
+
+    `runs` 是**删除之前**取到的运行对象（删完就查不到分组键了，所以由调用方在删之前
+    传进来）。只认 `target_type == "weekly"`：单提交的运行没有状态行，也没有「增量基线」
+    这回事。同一个分组只会被处理一次（一批里可能删掉同一分组的几条）。
+    """
+    seen = set()
+    changed = 0
+    for run in runs or ():
+        if str(getattr(run, "target_type", "") or "") != "weekly":
+            continue
+        key = str(getattr(run, "target_key", "") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        # 这个分组**这一批里**被删掉的全部运行号：判据是「指针在不在被删集合里」，
+        # 只传一个 id 的话，删掉同一分组的两条时会漏判（指针指向另一条被删的）。
+        removed = {
+            int(getattr(item, "id", 0) or 0)
+            for item in runs
+            if str(getattr(item, "target_key", "") or "") == key
+        }
+        state = AiWeeklyAnalysisState.query.filter_by(group_key=key).first()
+        if refresh_concluded_pointer(state, removed):
+            changed += 1
+    return changed

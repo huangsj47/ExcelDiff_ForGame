@@ -86,7 +86,19 @@
         detail_error: '读不到这一份的报告：',
         failed_mark: '这一次是失败的，没有结论。',
         no_target: '这个页面没有告诉它看哪个目标（入口少了一次 track）。',
-        error: '读不到历次结论：'
+        error: '读不到历次结论：',
+        // 删除。三句话各有各的场合，**不能合成一句**：
+        // * `delete_ask` 是**动手之前**问的（含「删了基线会退到哪」—— 那是这个功能的
+        //   全部风险所在，用户不被告知就点下去，等于平台替他改了下一次分析的基线）；
+        // * `delete_failed` 是失败后留在详情区的（列表不动）；
+        // * `delete_done` 是成功后的回执。
+        delete_ask: '删除这一份结论？',
+        delete_ask_baseline: '它同时是**下一轮增量分析的基线**，删掉之后平台会改用更早那一条'
+            + '（一条都不剩时，下一次增量分析会按全量跑）。',
+        delete_ask_tail: '这一份的报告正文、逐轮轨迹与结论清单会一起删掉，删了不能恢复。',
+        delete_failed: '删除失败：',
+        delete_label: '删除这一份',
+        deleting_label: '正在删除…'
     };
 
     var IDS = {
@@ -107,6 +119,16 @@
         // 屏幕上正显示的那一次（点开弹层那一刻从 `AiThinkLog` 现取）。
         currentRunId: null,
         selectedRunId: null,
+        // 这个分组当前的分组键。删除请求要把它带回去（服务端拿它比对「你看到的是不是
+        // 这个版本的历史」）—— 弹层是**同一个抽屉换目标**，列表没刷回来时点删除，
+        // 删掉的会是上一个版本的那一条。
+        targetKey: null,
+        // 正在删的那一条（null = 没有在删）。详情区的删除态只认它。
+        deleting: null,
+        // 删除失败 / 成功的那句话。**只影响详情区**：一次网络抖动不该把用户正在翻的
+        // 历史清空（同 `reports[].error` 那条既有口径）。
+        deleteError: '',
+        deleteNotice: '',
         // 已经取回来的那几份报告：runId → {payload} 或 {error}。
         // **一次运行的报告不会变**（它是存档），所以这个缓存只按目标清、不按时间清。
         reports: {},
@@ -137,6 +159,23 @@
 
     function reportUrl(runId) {
         return '/ai-analysis/runs/' + runId + '/report';
+    }
+
+    function deleteUrl(runId) {
+        return '/ai-analysis/runs/' + runId + '/delete';
+    }
+
+    /** 动手之前问的那句话。**把「基线会退到哪」写在里面** —— 那是这个功能的全部风险：
+     *  删掉的不只是一份存档，还是「下一轮增量拿谁做基线」那个指针的目标。
+     *
+     *  是**纯函数**（`row` 进、字符串出），所以两档措辞能直接断言，不必去跑一遍确认框。
+     */
+    function deleteConfirmText(row) {
+        var when = (row && row.created_at_display) || '这一次';
+        var parts = [NOTE.delete_ask + '（' + when + '）'];
+        if (row && row.is_baseline) parts.push(NOTE.delete_ask_baseline);
+        parts.push(NOTE.delete_ask_tail);
+        return parts.join('\n');
     }
 
     /** 列表顶上那句说明。`payload` 就是 `/history` 的响应。 */
@@ -284,6 +323,13 @@
         // 「当前显示的那一份」原来只有一条 3px 色条（**颜色单独承载语义**）。带文字的
         // 标签与色条同时在场：色条管扫视，标签管「说不说得出来」。
         if (isCurrent(row)) addTag(top, 'ai-history-current-tag', '当前显示');
+        // 「这一条是下一轮增量分析的基线」——**删掉它，基线就换人**。这件事在删除之前
+        // 就得看得见：确认框里那句「删了会改用上一条」只有在用户已经知道「它本来就是
+        // 基线」时才读得懂。同样是一个词，不是一条颜色（与「当前显示」同一条口径）。
+        if (row.is_baseline) {
+            var tag = addTag(top, 'ai-history-baseline-tag', '当前基线');
+            tag.title = '下一轮增量分析会继承这一条的结论';
+        }
         item.appendChild(top);
 
         // **摘要不裁剪**：服务端已经按 80 字截过一道，这里再挤成定高就等于把一句话
@@ -401,7 +447,41 @@
             link.appendChild(doc.createTextNode(' 导出这一份 md'));
             head.appendChild(link);
         }
+
+        // **删除按钮落在详情栏头部，不是列表行里**。行是 `role="option"` + 整行可点 +
+        // 方向键即选中：在小格里塞一个按钮会同时打坏 ARIA（option 里不该有可交互子元素）
+        // 与键盘（方向键走到哪就选中哪，按钮的 Tab 焦点与它在两条线上争）。
+        // 头部本来就写着「你看的是哪一份」，一个作用于**这一份**的动作放在这里语义最正。
+        if (row.deletable) {
+            var busy = state.deleting !== null
+                && Number(state.deleting) === Number(row.run_id);
+            var remove = doc.createElement('button');
+            remove.type = 'button';
+            remove.className = 'btn btn-sm btn-outline-danger';
+            // 固定 id（与导出那个链接一样）：node 下的假 DOM 按 id 找它，不必靠顺序猜。
+            remove.id = 'aiHistoryDeleteButton';
+            // **在飞的时候要禁用**（连点两次 = 第二次请求删一条已经被删掉的行，
+            // 用户看到的是「删除失败」而后台其实成功了）。
+            remove.disabled = state.deleting !== null;
+            remove.setAttribute('aria-busy', busy ? 'true' : 'false');
+            remove.appendChild(doc.createTextNode(busy ? NOTE.deleting_label : NOTE.delete_label));
+            remove.addEventListener('click', function () { confirmDelete(row.run_id); });
+            head.appendChild(remove);
+        }
         detail.appendChild(head);
+
+        // 上一次删除的结果（失败或成功）留在详情区顶端。**不落在列表上**：删除失败时
+        // 列表必须原地不动（同「报告取不到时整张列表被抹掉」那个老缺陷）。
+        if (state.deleteError || state.deleteNotice) {
+            var note2 = doc.createElement('p');
+            note2.className = state.deleteError
+                ? 'ai-history-delete-note is-error'
+                : 'ai-history-delete-note';
+            note2.textContent = state.deleteError
+                ? (NOTE.delete_failed + state.deleteError)
+                : state.deleteNotice;
+            detail.appendChild(note2);
+        }
 
         var pending = state.loadingRunId !== null
             && Number(state.loadingRunId) === Number(row.run_id);
@@ -472,6 +552,15 @@
             // 这里写死的话，`in_progress` 那句话就只活在本文件的常量表里 —— 一条
             // 看着在、实际永远不会出现在屏幕上的文案（单测还会因为它绿）。
             renderNote(listNote(payload));
+            // 删掉**最后一条**之后列表就是空的 —— 那时用户唯一能看到的反馈就是这一句。
+            // 少了它，删成功的表现与「这个目标本来就没跑过」逐字相同。
+            if (state.deleteNotice) {
+                var done = global.document.createElement('p');
+                done.className = 'ai-history-delete-note';
+                done.textContent = state.deleteNotice;
+                var noteBody = el(IDS.body);
+                if (noteBody) noteBody.appendChild(done);
+            }
             return;
         }
         var doc = global.document;
@@ -520,6 +609,120 @@
                 return payload;
             });
         });
+    }
+
+    /** 写请求。与 `fetchJson` 分开：这条**把服务端那句话原样带出来**（`err.payload`），
+     *  因为拒绝的每一档有自己的话（404 / 400 / 409），而界面要显示的是服务端那一句，
+     *  不是前端自己按状态码再编一句。 */
+    function postJson(fetchImpl, url, body) {
+        var doFetch = fetchImpl || global.fetch;
+        return doFetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {})
+        }).then(function (response) {
+            return response.json().then(function (payload) {
+                if (!response.ok || payload.success === false) {
+                    var error = new Error(payload.message || ('HTTP ' + response.status));
+                    error.payload = payload;
+                    throw error;
+                }
+                return payload;
+            });
+        });
+    }
+
+    function rowById(runId) {
+        var runs = (state.payload && state.payload.runs) || [];
+        for (var i = 0; i < runs.length; i += 1) {
+            if (Number(runs[i].run_id) === Number(runId)) return runs[i];
+        }
+        return null;
+    }
+
+    /**
+     * 删掉一条结论：先问一句，再发请求，成功之后**用服务端回来的那份列表重画**。
+     *
+     * ## 为什么要用服务端回来的列表，而不是自己从旧列表里摘掉一条
+     *
+     * 被删的那一条可能正是**基线指针**的目标（`is_baseline`）。删完之后新指针指向哪一条
+     * 只有服务端知道（那要看结论是否结构化、时间序）—— 前端猜的话，那个标记会留在
+     * 一行已经不再是指针的记录上，而「基线退到哪」恰恰是这个功能的全部意义。
+     *
+     * ## 连点
+     *
+     * `state.deleting` 一非空就直接返回：第二次点击不发请求。按钮同时在飞的时候是
+     * 禁用的，但键盘与快速双击都可能赶在那一次重画之前进来。
+     *
+     * ## 失败只落在详情区
+     *
+     * 409（还在跑）、400（版本对不上）、网络抖动 —— 列表一律原地不动。把整张列表换成
+     * 一句错误，用户正在翻的历史就没了（这个老缺陷的说明在模块抬头的 2026-09-25 那节）。
+     */
+    function confirmDelete(runId, fetchImpl) {
+        var row = rowById(runId);
+        // 服务端说不能删就不发请求（`deletable` 与服务端的拒绝分支同源）。这一句是
+        // 「按钮不该在」的兜底：按钮由同一个字段决定，两边不会各说各话。
+        if (!row || !row.deletable) return Promise.resolve(null);
+        if (state.deleting !== null) return Promise.resolve(null);
+        // 原生 `confirm`：这个动作不可逆、代价说清了，一个 OK/取消就够了 —— 不值得为它
+        // 再做一个弹层（本文件已经有一层弹层，套第二层会打乱焦点与 Esc 的处理）。
+        // **没有 `confirm` 时一律不发请求**（假 DOM / 极老的环境）：默认「不发」而不是
+        // 「照发」，因为这是不可逆的删除。
+        var ask = deleteConfirmText(row);
+        if (typeof global.confirm !== 'function' || !global.confirm(ask)) {
+            return Promise.resolve(null);
+        }
+        state.deleting = runId;
+        state.deleteError = '';
+        state.deleteNotice = '';
+        renderDetail();
+        return postJson(fetchImpl, deleteUrl(runId), {target_key: state.targetKey})
+            .then(function (payload) {
+                state.deleting = null;
+                state.deleteNotice = payload.message || '已删除。';
+                // 被删的那一份从报告缓存里去掉：留着的话，用户再点开同一行（不会发生，
+                // 它已经不在列表里了）或者运行号被复用时会取到别人的报告。
+                delete state.reports[runId];
+                applyHistory(payload.history);
+                render();
+                // 被删的那条若是**正在看的那一份**，选中会退到最新那条 —— 而它的报告
+                // 一次都没取过。不补这一句，右栏会写「这一次没有报告正文。」：
+                // 把「还没取回来」画成了「取回来了、里面是空的」（这条老缺陷在同文件
+                // 抬头的 2026-09-25 那节写过一次）。
+                if (state.selectedRunId !== null) {
+                    return select(state.selectedRunId, fetchImpl).then(function () {
+                        return payload;
+                    });
+                }
+                return payload;
+            })
+            .catch(function (error) {
+                state.deleting = null;
+                state.deleteError = (error && error.message) || '未知错误';
+                // **只重画详情区**：列表的成员没有变化（一条都没删成）。
+                renderDetail();
+                return null;
+            });
+    }
+
+    /** 把一份 `/history` 响应装进 state（`open()` 与「删完之后」共用）。
+     *
+     * 选中项：被删的那一条没了 → 退回列表第一条（最新那份），与 `open()` 的兜底一致。
+     * 剩下的照旧选中，免得删完下面一条就把用户的阅读位置弹回顶部。
+     */
+    function applyHistory(payload) {
+        state.payload = payload || null;
+        state.targetKey = (payload && payload.target_key) || state.targetKey;
+        var runs = (payload && payload.runs) || [];
+        var stillThere = false;
+        for (var i = 0; i < runs.length; i += 1) {
+            if (Number(runs[i].run_id) === Number(state.selectedRunId)) stillThere = true;
+        }
+        if (!stillThere) {
+            state.selectedRunId = runs.length ? runs[0].run_id : null;
+            state.loadingRunId = null;
+        }
     }
 
     /** 选中某一次：去取它的报告（与 `/latest` 同一个形状）。
@@ -587,12 +790,18 @@
             ? global.AiThinkLog.currentRunId() : null;
         renderNote(NOTE.loading);
         state.loading = true;
+        // 换目标 / 重开时把上一次的删除回执清掉：那句话说的是**上一个目标**的一次操作，
+        // 留在新的详情区里就是一句没头没尾的话。
+        state.deleteError = '';
+        state.deleteNotice = '';
+        state.deleting = null;
         return fetchJson(fetchImpl, state.historyUrl).then(function (payload) {
             state.loading = false;
             state.payload = payload;
             var runs = payload.runs || [];
             state.selectedRunId = null;
             state.loadingRunId = null;
+            state.targetKey = payload.target_key || state.targetKey;
             for (var i = 0; i < runs.length; i += 1) {
                 if (Number(runs[i].run_id) === Number(state.currentRunId)) {
                     state.selectedRunId = runs[i].run_id;
@@ -625,6 +834,13 @@
         state.reports = {};
         state.loadingRunId = null;
         state.dom = null;
+        // 分组键连同列表一起丢：它是**上一个目标**的分组键，留着会被当成这个目标的
+        // 带回去（服务端一比就拒，用户看到的是「这条结论不属于你正在查看的版本」——
+        // 一句对他来说莫名其妙的话）。
+        state.targetKey = null;
+        state.deleting = null;
+        state.deleteError = '';
+        state.deleteNotice = '';
     }
 
     function state_() {
@@ -634,6 +850,13 @@
             selectedRunId: state.selectedRunId,
             loading: state.loading,
             loadingRunId: state.loadingRunId,
+            // 删除那三样放在**顶层**，不放进 `rows`：`rows` 的形状被
+            // `tests/test_ai_report_history_frontend.py` 逐字比过
+            // （`{"run_id": …, "selected": …}`），往里加键等于改一份已经钉死的契约。
+            deleting: state.deleting,
+            deleteError: state.deleteError,
+            deleteNotice: state.deleteNotice,
+            targetKey: state.targetKey,
             cachedRuns: Object.keys(state.reports).map(Number),
             rows: ((state.payload && state.payload.runs) || []).map(function (row) {
                 return {
@@ -650,6 +873,8 @@
         historyUrlFor: historyUrlFor,
         exportHref: exportHref,
         reportUrl: reportUrl,
+        deleteUrl: deleteUrl,
+        deleteConfirmText: deleteConfirmText,
         listNote: listNote,
         markText: markText,
         statusTone: statusTone,
@@ -660,6 +885,7 @@
         track: track,
         open: open,
         select: select,
+        confirmDelete: confirmDelete,
         state: state_
     };
 })(typeof window !== 'undefined' ? window : this);

@@ -1,5 +1,10 @@
 from .project_api_key import AiProjectApiKey
-from .analysis_run import RUN_STATUSES, STALE_RUNNING_SECONDS, AiAnalysisRun
+from .analysis_run import (
+    IN_FLIGHT_STATUSES,
+    RUN_STATUSES,
+    STALE_RUNNING_SECONDS,
+    AiAnalysisRun,
+)
 from .weekly_state import AiWeeklyAnalysisState
 from .project_config import AiProjectAnalysisConfig
 from .platform_budget import PLATFORM_BUDGET_DEFAULTS, SINGLETON_ID, AiPlatformBudget
@@ -61,6 +66,7 @@ __all__ = [
     "DISPOSITIONS",
     "DISPOSITION_LABELS",
     "RUN_STATUSES",
+    "IN_FLIGHT_STATUSES",
     "STALE_RUNNING_SECONDS",
     "TRACE_OUTCOMES",
     "SNAPSHOT_STATUSES",
