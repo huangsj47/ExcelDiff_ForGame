@@ -2,7 +2,7 @@
 name: g119-project-facts
 description: G119 项目事实里**平台要读**的那一部分：导表产物的模块名前缀、关键路径的路径模式，以及（可选）本项目生效的检查维度清单。平台在做版本分析时按这里的声明配对「表 ↔ 产物」、判定关键路径、决定要过哪几个检查维度；没声明的键用平台默认值。
 generated_prefixes: Cfg
-critical_path_patterns: (?:^|/)ExportExcelTool/, (?:^|/)EditorCfgTool/
+critical_path_patterns: (?:^|/)ExportExcelTool/, (?:^|/)EditorCfgTool/, (?:^|/)lua/code/
 ---
 
 # G119 项目事实（机器可读的那一部分）
@@ -18,7 +18,7 @@ critical_path_patterns: (?:^|/)ExportExcelTool/, (?:^|/)EditorCfgTool/
 | 键 | 本项目当前 | 作用 |
 |---|---|---|
 | `generated_prefixes` | `Cfg` | 导表产物的模块名前缀。平台据此把「同一记号出现在表与产物两侧」的文件配成一组，在变更清单里提示「疑似同一次改动」。 |
-| `critical_path_patterns` | `ExportExcelTool/`、`EditorCfgTool/` | 关键路径的路径模式（命中就把本次分析升级为全量）。**声明了就以这里为准**，不再叠加平台默认清单。 |
+| `critical_path_patterns` | `ExportExcelTool/`、`EditorCfgTool/`、`lua/code/` | 关键路径的路径模式（命中就把本次分析升级为全量）。**声明了就以这里为准**，不再叠加平台默认清单。 |
 | `dimensions` | **没声明**（用平台默认那九个） | 本项目生效的**检查维度清单**（`id=中文名`，逗号分隔，顺序有意义）。声明了就**取代**平台出厂那一份：平台把它拼进提示词（模型据此写 `category`）、按它分工、按它把报告里的维度翻成中文名。写法见下一节。 |
 
 写法上的四条要点：
@@ -62,15 +62,22 @@ dimensions: performance=性能与耗时回归, protocol=协议兼容性, resourc
 
 ## 本项目的产物形态（改 `generated_prefixes` 之前先读这一段）
 
-- 规范上导表产物是 **`CfgXxx.lua`**（见 `config-table-spec.md`），所以 `Cfg` 是这里声明的
-  前缀。
-- 但线上真实改动里，产物还有一种形态：`code/qz_pub/cfg/<模块名>CfgMod.lua`
-  （`BagAttrCfgMod`、`DramaCfgMod`、`RoleAttrCfgMod` …）。`Cfg` 落在**名字中间**、后面拖着
-  全项目共有的 `Mod`，按「前缀必须落在名字分量的起点」这条判据它**不构成记号** ——
-  这是刻意的：那批 lua 之间没有配对关系，硬配出来的组是假的。
-- 结论：本项目的配对结果**长期会是 0 组**，而这是**如实**的结果（表名是中文、产物模块名
-  是英文，名字层面没有共同记号）。平台每次分析都会记一行「表↔产物配对：0 组（前缀=Cfg；
-  …）」—— 那是「本项目本来就没得配」，不是「平台不会配」。
+- 规范上导表产物是 **`CfgXxx.lua`**（见 `system-map.md` §11），所以 `Cfg` 是这里声明的
+  前缀。**产物位于配置仓库 `qz_config/lua/{client,server}/<分类>/`**。
+- ⚠️ **一处需要纠正的口径**：`code/qz_pub/cfg/<模块名>CfgMod.lua`
+  （`BagAttrCfgMod`、`RoleAttrCfgMod`、`RankCfgMod` …）**不在 `qz_config` 里，在另一个仓库
+  `qz_luaworkspace` 里**，而且它是**程序手写的「配置访问层」，不是导表产物**（每次导表不会
+  重写它，改它改的是读取逻辑与契约）。
+  `Cfg` 落在**名字中间**、后面拖着全项目共有的 `Mod`，按「前缀必须落在名字分量的起点」这条
+  判据它**不构成记号** —— 这是刻意的：那批 lua 之间没有配对关系，硬配出来的组是假的。
+- **这层「表 ↔ CfgMod」的关系有确定的补救规则**（平台的名字配对做不了，要靠规矩补）：
+  `{X}CfgMod.lua ←→ 配置表 {X}`（`{X}` 以 `Cfg` 结尾时即表名本身；否则是简写，必须看文件内容）。
+  **很多 `*CfgMod.lua` 开头有 `---@module` 文档块，直接写明配表路径、字段含义与代码契约。**
+  完整规则、实例与「反向用法（没有 CfgMod 的表＝程序没接）」见 **`repo-layout.md` §4**。
+- 结论：本项目的**名字层配对**结果**长期会是 0 组**，而这是**如实**的结果（表名是中文、产物
+  模块名是英文，名字层面没有共同记号）。平台每次分析都会记一行「表↔产物配对：0 组
+  （前缀=Cfg；…）」—— 那是「本项目本来就没得配」，不是「平台不会配」。
+  这层关系**由 `repo-layout.md` §4 那条规矩来补**，不要期望平台在变更清单里自动提示。
 
 ## 关键路径
 
@@ -82,6 +89,11 @@ dimensions: performance=性能与耗时回归, protocol=协议兼容性, resourc
 |---|---|
 | `(?:^|/)ExportExcelTool/` | 导表工具。改这里会改变**每一张表**的导出结果，影响面远超「这次改了哪几个文件」，正是增量分析看不出来的那类改动。 |
 | `(?:^|/)EditorCfgTool/` | 同上，编辑器侧的工具链，改一次影响全量产物。 |
+| `(?:^|/)lua/code/` | **配置工具链**（`ExportDiff.lua` = 配置**差异导出**核心，基于 `utils/TableDiff` 做逐表 `_diffData(id, cfgname, lastText, currentText)`；`checkClient.lua` / `checkClientInit.lua` / `checkServer.lua` / `check/` = 导表**校验**层；`convert/`、`weaponPropertyTemplate/` = 转换）。 **改这里会改变「diff 显示什么」与「导出报什么错」——对配表项目就是改判据本身**，影响面远超改动文件数。 |
+
+> ⚠️ `lua/code/` 这一条**只匹配配置仓库里的 `lua/code/`**（写成 `(?:^|/)lua/code/`）。
+> **不要简写成 `(?:^|/)code/`** —— 那会同时命中代码仓库 `qz_luaworkspace` 的 `code/qz_pub/...`、
+> `code/qz_server/...`，等于「每周都升级为全量」，这个判据就废了。
 
 **刻意不在清单里的两条**（改之前先读这段，它们看着像关键路径，其实会把这个判据废掉）：
 
@@ -89,9 +101,13 @@ dimensions: performance=性能与耗时回归, protocol=协议兼容性, resourc
   下 —— 把它算作关键路径等于「每周都升级为全量分析」，这条判据就失去了它唯一的用途
   （把「这次碰了要紧东西」从「和平时一样」里区分出来）。配表改动是本周版本的正常内容，
   交给常规（增量）分析即可。
-- **`lua/`（导表产物）**：每个导表产物文件都以 `--所在Excel文件:xxx.xlsx` 开头，是**生成物**，
-  而且每次导表都会重新生成。把它算作关键路径同样等于「每次都全量」。产物与表是否同步
-  由 `generated_prefixes` 那条配对机制负责，不该由关键路径承担。
+- **`lua/`（导表产物）—— 注意：这一条说的是 `lua/client/` 与 `lua/server/`，`lua/code/` 不在其中**：
+  每个导表产物文件都以 `--所在Excel文件:xxx.xlsx` 开头，是**生成物**，而且每次导表都会重新生成。
+  把它算作关键路径同样等于「每次都全量」。产物与表是否同步由 `generated_prefixes` 那条配对机制
+  负责，不该由关键路径承担。
+  而 **`lua/code/` 不是产物**（是人写的工具链，导表不会重写它），改动它会改变判据本身，
+  所以**它在清单里** —— 上面那条 `(?:^|/)lua/code/` 就是为它加的。两者的区别是
+  「生成物 vs 工具链」，不是「都在 `lua/` 下」。
 
 表名口径走的是**另一个入口**，与这里无关：仓库设置里那一栏**重点表名**
 （`Repository.important_tables`），管理员填的每一张表命中时都会把本次分析升级为全量。
