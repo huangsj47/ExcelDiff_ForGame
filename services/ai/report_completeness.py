@@ -16,14 +16,15 @@ def ensure_anomaly_cards(items, anomalies, *, dimension_labels=None):
         item = {
             "finding_fingerprint": fingerprint, "finding_ref": anomaly.finding_ref,
             "severity": anomaly.severity, "business_area": dimension_label(anomaly.category, dimension_labels),
-            "change_fact": anomaly.title, "change_fact_refs": [anomaly.file_path] if anomaly.file_path else [],
+            "title": anomaly.title, "change_fact": anomaly.title,
+            "change_fact_refs": [anomaly.file_path] if anomaly.file_path else [],
             "impact_hypothesis": anomaly.impact or "影响尚待验证",
             "evidence_status": "unverified", "decision_question": "",
             "test_actions": [{"conditions": "在对应变更与业务入口下复核",
                               "steps": [anomaly.suggestion or "按已有异常依据核对触发条件与实际结果"],
                               "expected": "先核对需求口径，再确认异常是否成立"}],
             "evidence_refs": [], "evidence_gaps": [
-                "异常清单已有此项，但模型未交付对应业务卡片；本条由平台保全，依据需按异常清单复核"],
+                "原异常未绑定到可识别的业务卡片，本条由平台保全；可能与未关联条目重叠，需按原异常依据核对"],
             "evidence_notes": list(anomaly.evidence),
             "source": "anomaly_preservation",
         }

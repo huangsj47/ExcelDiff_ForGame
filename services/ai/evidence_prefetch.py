@@ -288,6 +288,21 @@ def diff_requests(scope: AnalysisScope, *, max_files: int = DEFAULT_MAX_FILES) -
     """
     input_paths = scope.input_paths if scope.input_paths is not None else scope.batch_paths()
     paths = sorted(input_paths, key=lambda item: (_ext_rank(item), item))
+    if len(paths) > max(0, int(max_files)):
+        # 按类型保留原优先级，同类型先轮转目录。字典序前八个常全属同一族表，
+        # 会把首次分诊锚定到单一系统；轮转不增加条数、字符份额或读取权限。
+        from collections import defaultdict, deque
+
+        groups = defaultdict(dict)
+        for path in paths:
+            parent = path.replace("\\", "/").rpartition("/")[0]
+            groups[_ext_rank(path)].setdefault(parent, deque()).append(path)
+        paths = []
+        for rank in sorted(groups):
+            queues = list(groups[rank].values())
+            while queues:
+                paths.extend(queue.popleft() for queue in queues)
+                queues = [queue for queue in queues if queue]
     requests: list[ContextRequest] = []
     for path in paths[: max(0, int(max_files))]:
         commit = scope.commit_of_path(path)

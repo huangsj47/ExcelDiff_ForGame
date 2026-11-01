@@ -15,7 +15,7 @@ REPORT_SEVERITIES = ("critical", "high", "medium", "low")
 EVIDENCE_STATUSES = ("verified", "partial", "unverified")
 SECTION_KEYS = ("overview", "changes", "impacts", "regressions", "release_actions", "gaps")
 ITEM_KEYS = frozenset((
-    "id", "finding_ref", "finding_fingerprint", "severity", "business_area", "change_fact", "change_fact_refs",
+    "id", "title", "finding_ref", "finding_fingerprint", "severity", "business_area", "change_fact", "change_fact_refs",
     "impact_hypothesis", "evidence_status", "decision_question", "test_actions", "evidence_refs",
 ))
 REFERENCE_KEYS = frozenset(("evidence_id", "repository_id", "repository", "commit", "path", "lines"))
@@ -123,6 +123,7 @@ def normalize_report_items(value: Any) -> tuple[dict, ...]:
         if item["evidence_status"] not in EVIDENCE_STATUSES:
             raise ReportValidationError(f"{label}.evidence_status 必须是 {EVIDENCE_STATUSES} 之一")
         item.update(
+            title=_text(raw.get("title", ""), f"{label}.title"),
             finding_ref=_text(raw.get("finding_ref", ""), f"{label}.finding_ref"),
             finding_fingerprint=_text(raw.get("finding_fingerprint", ""), f"{label}.finding_fingerprint"),
             decision_question=_text(raw.get("decision_question", ""), f"{label}.decision_question"),
@@ -174,8 +175,8 @@ def ground_report_items(items: Sequence[Mapping], store: Any, *, anomalies=()) -
             item["finding_fingerprint"] = anomaly_fingerprint(matches[0])
             item["id"] = stable_report_id(item)
         references, gaps = [], []
-        if item.get("finding_ref") and not bound:
-            gaps.append("异常关联键缺失或重复，未绑定复核裁决；保留待人工核查")
+        if item.get("finding_ref") and (len(matches) > 1 or card_refs.count(item["finding_ref"]) > 1):
+            gaps.append("异常关联键重复，未绑定复核裁决；保留待人工核查")
         for reference in item.get("evidence_refs", ()):
             identifier = reference["evidence_id"]
             evidence = by_id(identifier) if callable(by_id) else None
@@ -192,6 +193,10 @@ def ground_report_items(items: Sequence[Mapping], store: Any, *, anomalies=()) -
         item["evidence_refs"] = references
         item["evidence_gaps"] = gaps
         item["evidence_status"] = "partial" if any(ref.get("available") for ref in references) else "unverified"
-        item["decision_question"] = item.get("decision_question") or "请结合需求和实际行为核实影响假设是否成立"
+        # 不把每条已取回来源的事实都补成同一句泛化问题；真正的业务问句由模型给出。
+        # 地址缺失仍明确要求补证，不能把可定位性不足隐藏成「无需确认」。
+        item["decision_question"] = item.get("decision_question") or (
+            "请补取可定位依据，再确认该变化与影响的关联" if gaps or not references else ""
+        )
         result.append(item)
     return sort_report_items(result)

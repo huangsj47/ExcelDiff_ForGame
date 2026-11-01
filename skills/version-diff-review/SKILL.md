@@ -100,7 +100,7 @@ description: Use this skill whenever you review a game version's change set — 
   "candidate_dispositions": [{"candidate_id": "S1-1", "status": "adopted | rejected | deferred", "reason": "拒绝或延后时必填"}],
   "baseline_updates": [{"fingerprint": "上面历史清单里那条末尾的 16 位十六进制", "status": "standing | fixed | overturned", "reason": "修好或被推翻时写凭什么"}],
   "anomalies": [
-    {
+    {"finding_ref": "risk_1",
       "title": "【系统或模块】对象或条件下的可观察异常",
       "category": "config_id | config_value | config_data | value_sanity | config_linkage | module_coupling | code_logic | version_branch | process",
       "severity": "critical | high", "confidence": "high | very_high",
@@ -119,7 +119,7 @@ description: Use this skill whenever you review a game version's change set — 
     "release_actions": ["上线前确认、联动顺序、观测与回滚条件；放行由人工确认"],
     "gaps": ["缺什么、平台返回的失败原因、挡住了哪项判断"]
   },
-  "report_items": [{
+  "report_items": [{"finding_ref": "risk_1", "title": "业务对象＋关键字段/数值变化的一句短结论，不带长路径",
     "finding_fingerprint": "沿用已知发现指纹；新发现可省略",
     "severity": "critical | high | medium | low",
     "business_area": "项目知识包中的业务领域",
@@ -134,8 +134,8 @@ description: Use this skill whenever you review a game version's change set — 
 }
 ```
 
-`report_items` 是四档风险与待确认事项的完整展示来源，中低风险也不能漏；无发现时给空数组。
-同一发现同时出现在 anomalies 与 report_items 时，两处必须给同一 finding_ref（如 risk_1）；真实指纹由平台计算并绑定。平台分配稳定 ID、关联测试并排序；模型不计算哈希、不复写长文。
+`report_items` 是四档风险与待确认事项的完整展示来源，中低风险也不能漏；无发现时给空数组。**每条 `anomalies` 必须同时有对应的 `report_items`**，不允许高风险只在处置清单出现、正文却只有中低风险。两处等级与事实一致；不要为了省篇幅省掉对应验证动作。
+同一发现同时出现在 anomalies 与 report_items 时，两处必须给同一 finding_ref（如 risk_1）；真实指纹由平台计算并绑定。平台分配稳定 ID、关联测试并排序；模型不计算哈希、不复写长文。没有具体异常或可说明依据的业务疑点时，正常文案调整只列 changes/regressions，不为凑齐四档给每个文件编风险。
 `verified` 只声明你认为事实有依据，平台仍校验证据地址；取回原文不等于人工核实业务影响。
 证据不完整用 `partial`，未知语义用 `unverified` 并填写 `decision_question`；无证据的影响写假设。
 `report_sections` 六个键保持上例形状，概述非空，其他键允许空数组；不要新增字段或截掉风险。
@@ -151,13 +151,13 @@ description: Use this skill whenever you review a game version's change set — 
 
 你拿到的初始上下文只有**变更摘要**（提交信息、文件清单、周版本的差异文件列表），**不含 diff 正文**。这是刻意的：
 
-- **第一轮先分诊**：把这次变更按「最可能出事」排序并说出依据（改了什么业务行为、涉及哪条业务链、清单里哪些文件互相关联），把这段判断压成 `reason_code` 里的一个短标识（需要时在 `reason` 里补一行）；然后**一次点名 4~8 个**最关键的 `file_diff`，用 `reason_code` 说明这一批是围绕哪个判断挑的。**这一轮可能已经带着平台预取的取证**（改动差异 / 符号命中位置 / 命中处的邻近窗口，抬头写着「平台预先附上的取证」）—— 那是平台**替你**取回的、**不是你索取的**，不要再要一遍；缺的部分照常点名。
+- **第一轮先分诊**：把这次变更按「最可能出事」排序并说出依据（改了什么业务行为、涉及哪条业务链、清单里哪些文件互相关联），把这段判断压成 `reason_code` 里的一个短标识（需要时在 `reason` 里补一行）；然后**一次点名 4~8 个**最关键的 `file_diff`，用 `reason_code` 说明这一批是围绕哪个判断挑的。优先覆盖清单中的不同业务链，再深挖同一族表；平台按目录轮转的预取只是样本，不代表其他业务已检查。**这一轮可能已经带着平台预取的取证**（改动差异 / 符号命中位置 / 命中处的邻近窗口，抬头写着「平台预先附上的取证」）—— 那是平台**替你**取回的、**不是你索取的**，不要再要一遍；缺的部分照常点名。
 - **禁止请求整条 commit 的 diff。** 先根据文件清单缩小范围，再按文件要。
 - 索要前先问自己「这个文件里什么内容会改变我的结论」，只取能改变结论的。
 - **清单被截断时**（首行会写「还有 N 个文件的名字没有列出来」），那些文件**照样能读**：
   对那个提交用 `commit_detail` 拿到它的完整文件清单，再点名索取。别把「名字没列出来」
   当成「读不到」——那会让报告里的「信息缺口」白写。
-- **证据已经足够时优先输出 `final`**，别为了「看得更全」继续索取：补充上下文的预算有限，用尽后你会被要求直接收尾。
+- **证据已经足够时优先输出 `final`**，别为了「看得更全」继续索取：补充上下文的预算有限，用尽后你会被要求直接收尾。**出结论前回看整份变更清单**：尚未取证且可能涉及资产/奖励、时间边界、ID 删除复用、扣费入口或字段结构迁移的独立业务链，优先补取能区分风险的最小差异；不为重复取数而循环。预算不足时在 `gaps` 点名缺口和影响，不把未读写成无风险。
 
 ## 检查维度（下面是平台出厂默认的那一套）
 

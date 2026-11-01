@@ -317,7 +317,8 @@ def risk_level_from_outcome(outcome: EngineOutcome, summary: dict) -> Tuple[str,
         severities.update(item.severity for item in outcome.anomalies)
         level = next((level for severity, level in (("critical", "high"), ("high", "mid_high"),
                      ("medium", "medium"), ("low", "low")) if severity in severities), "low")
-        reasons = [f"结构化业务报告保留 {len(outcome.report_items)} 条风险与待确认事项；影响仍需验证"]
+        reasons = [f"本次差异关联依据：业务条目 {len(outcome.report_items)} 条，处置异常 {len(outcome.anomalies)} 条；"
+                   "两类可能重叠，影响仍需验证"]
         if outcome.degradation:
             reasons.append(outcome.degradation_label or outcome.degradation)
         return level, reasons
@@ -412,6 +413,8 @@ def result_payload(
     summary = payload.get("summary") or {}
     ruling = outcome.verdict if isinstance(outcome.verdict, dict) and outcome.verdict else None
     retracted = retracted_fingerprints(ruling)
+    kept = [item for item in outcome.anomalies
+            if anomaly_fingerprint(item) not in suppressed and anomaly_fingerprint(item) not in retracted]
     business_items = sort_report_items(tuple(
         item for item in outcome.report_items
         if item.get("finding_fingerprint") not in suppressed
@@ -437,7 +440,7 @@ def result_payload(
         )),
         anomalies=tuple(
             item
-            for item in outcome.anomalies
+            for item in kept
             if not _out_of_scope(
                 item.file_path or "",
                 allowed_paths,
@@ -453,7 +456,7 @@ def result_payload(
     # 只按 in-scope 计数的代价：如果模型只报了单列的结论，上面会落到「模型未报出达门槛的
     # 问题」那一支 —— 而它其实报了，只是平台不采纳。不说明这一点，「平台不采纳」会被
     # 读成「模型觉得没问题」，这两件事的处理方式完全相反（正是本模块开头那条口径）。
-    excluded = len(outcome.anomalies) - len(scoring.anomalies)
+    excluded = len(kept) - len(scoring.anomalies)
     if excluded:
         if allowed_paths is not None:
             risk_reasons = [
@@ -478,12 +481,6 @@ def result_payload(
     # —— 下面两个额外条件都退化成「什么都不做」，单代理那条路逐字不变。
     ruling = outcome.verdict if isinstance(outcome.verdict, dict) and outcome.verdict else None
     retracted = retracted_fingerprints(ruling)
-    kept = [
-        item
-        for item in outcome.anomalies
-        if anomaly_fingerprint(item) not in suppressed
-        and anomaly_fingerprint(item) not in retracted
-    ]
     # 逐条裁决按**指纹**与结论对起来（不按下标：撤销之后的清单已经短了，按下标会整体错位）。
     rows = {str(row.get("fingerprint") or ""): row for row in ruling_rows(ruling)}
     if outcome.report_sections is not None:

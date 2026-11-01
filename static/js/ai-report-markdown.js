@@ -12,9 +12,8 @@
  * 这里的做法是**先整体转义、再在白名单上套标签**：输出里的每一个 `<` 都来自本文件
  * 自己写的字面量，模型给的内容永远以实体形式出现。XSS 由构造保证，不靠消毒器兜底。
  *
- * 只覆盖用到的子集：`#`~`######` 标题、`-`/`*`/`+` 与 `1.` 列表、`>` 引用、
- * ``` 围栏代码、`**粗体**`、`` `行内码` ``。**刻意不支持的**：链接、图片、原始 HTML、
- * 表格。不支持的写法会退化成普通文字显示（不会消失、也不会变成标签）。
+ * 支持标题、列表、引用、表格、代码、强调和 http(s) 链接。原始 HTML、图片和危险协议
+ * 保持文字；代码按原字节文本显示，不进行实体解码或 Markdown 二次解析。
  */
 (function (global) {
     'use strict';
@@ -33,22 +32,89 @@
         // one standard entity layer, then escape the complete text again so an
         // encoded HTML tag remains text. Never decode recursively or after escaping.
         var entities = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'" };
-        return escapeHtml(String(text).replace(/&(amp|lt|gt|quot|apos|#39);/g, function (_, name) {
-            return entities[name];
-        }));
+        return inlineParts(String(text)).map(function (part) {
+            if (part.code) return part.marker + escapeHtml(part.text) + part.marker;
+            return escapeHtml(part.text.replace(/&(amp|lt|gt|quot|apos|#39);/g, function (_, name) {
+                return entities[name];
+            }));
+        }).join('');
+    }
+
+    function inlineParts(text) {
+        var parts = [], cursor = 0, index = 0;
+        while (index < text.length) {
+            if (text[index] !== '`') { index++; continue; }
+            var slashes = 0;
+            for (var before = index - 1; before >= 0 && text[before] === '\\'; before--) slashes++;
+            if (slashes % 2) { index++; continue; }
+            var end = index;
+            while (text[end] === '`') end++;
+            var marker = text.slice(index, end), closing = end;
+            while ((closing = text.indexOf(marker, closing)) >= 0) {
+                if (text[closing - 1] !== '`' && text[closing + marker.length] !== '`') break;
+                closing += marker.length;
+            }
+            if (closing < 0) { index = end; continue; }
+            parts.push({ text: text.slice(cursor, index) });
+            parts.push({ code: true, marker: marker, text: text.slice(end, closing) });
+            cursor = closing + marker.length;
+            index = cursor;
+        }
+        parts.push({ text: text.slice(cursor) });
+        return parts;
     }
 
     // 行内标记。入参**必须已经转义**，因此 `$1` 里不会出现原始尖括号。
     function inline(escaped) {
-        return escaped
+        return inlineParts(escaped).map(function (fragment) {
+            if (fragment.code) return '<code>' + fragment.text + '</code>';
+            var part = fragment.text
             // Encode escaped punctuation as character references before matching
             // emphasis/code. This both displays the original character and keeps
             // literal \* / \` from becoming formatting or executable markup.
             .replace(/\\([\\`*_{}\[\]<>#+.!|~-])/g, function (_, character) {
                 return '&#' + character.charCodeAt(0) + ';';
-            })
-            .replace(/`([^`]+)`/g, '<code>$1</code>')
-            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            });
+            return part.replace(/\[([^\[\]]+)\]\(([^\s)]+)\)|\*\*([^*]+)\*\*/g, function (original, label, href, strong, offset, content) {
+                if (strong !== undefined) return '<strong>' + strong + '</strong>';
+                if (offset > 0 && content[offset - 1] === '!') return original;
+                // 属性上下文仍使用已转义字串；只接受明确的 http(s) 协议。
+                if (!/^https?:\/\//i.test(href) || /[\\\u0000-\u0020]/.test(href)
+                    || /&(?:quot|apos|#39|lt|gt);/i.test(href)) return original;
+                return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+            });
+        }).join('');
+    }
+
+    function fenceStart(line) {
+        var match = /^\s{0,3}(`{3,}|~{3,})([^\r\n]*)$/.exec(line);
+        return match ? { marker: match[1][0], length: match[1].length,
+            language: /^[\w+#.-]{1,32}$/.test(match[2].trim()) ? match[2].trim() : 'text', lines: [] } : null;
+    }
+
+    function fenceEnd(line, fence) {
+        var match = /^\s{0,3}(`{3,}|~{3,})\s*$/.exec(line);
+        return !!match && match[1][0] === fence.marker && match[1].length >= fence.length;
+    }
+
+    function codeBlock(fence) {
+        return '<div class="ai-reader-code"><div class="ai-reader-code-toolbar"><span class="ai-reader-code-language">'
+            + escapeHtml(fence.language) + '</span><button type="button" class="ai-copy-code">复制代码</button>'
+            + '<span class="ai-copy-status" role="status" aria-live="polite"></span></div><pre tabindex="0"><code>'
+            + escapeHtml(fence.lines.join('\n')) + '</code></pre></div>';
+    }
+
+    function tableCells(line) {
+        var cells = [], current = '', slashes = 0;
+        line.trim().split('').forEach(function (character) {
+            if (character === '|' && slashes % 2 === 0) { cells.push(current.trim()); current = ''; }
+            else current += character;
+            slashes = character === '\\' ? slashes + 1 : 0;
+        });
+        cells.push(current.trim());
+        if (cells[0] === '') cells.shift();
+        if (cells[cells.length - 1] === '') cells.pop();
+        return cells;
     }
 
     function render(markdown) {
@@ -57,7 +123,7 @@
         // 先整体转义，再按行解析。转义不会动 `#`/`-`/`>`/`|`/数字这些行首字符，
         // 所以块的判定不受影响；唯一的例外是 `>` 会变成 `&gt;`，引用分支按转义后的
         // 形式匹配（见下面 quote 那条正则）。
-        var lines = escapeProse(source).split('\n');
+        var lines = source.split('\n');
 
         var out = [];
         var list = null;   // { tag: 'ul' | 'ol', items: [] }
@@ -94,22 +160,37 @@
         }
 
         for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
+            var raw = lines[i];
+            var line = escapeProse(raw);
             var trimmed = line.trim();
 
             // 围栏代码块：内容原样输出（已转义），不参与块解析
-            if (/^```/.test(trimmed)) {
-                if (fence === null) {
-                    flushAll();
-                    fence = [];
-                } else {
-                    out.push('<pre><code>' + fence.join('\n') + '</code></pre>');
-                    fence = null;
-                }
+            if (fence !== null) {
+                if (fenceEnd(raw, fence)) { out.push(codeBlock(fence)); fence = null; }
+                else fence.lines.push(raw);
                 continue;
             }
-            if (fence !== null) {
-                fence.push(line);
+            fence = fenceStart(raw);
+            if (fence) { flushAll(); continue; }
+
+            var separator = i + 1 < lines.length ? tableCells(lines[i + 1]) : [];
+            var headers = tableCells(raw);
+            if (raw.indexOf('|') >= 0 && headers.length && separator.length === headers.length &&
+                separator.every(function (cell) { return /^:?-{3,}:?$/.test(cell); })) {
+                flushAll();
+                var cells = function (row, tag) {
+                    return '<tr>' + row.map(function (cell) {
+                        return '<' + tag + (tag === 'th' ? ' scope="col"' : '') + '>' + inline(escapeProse(cell)) + '</' + tag + '>';
+                    }).join('') + '</tr>';
+                };
+                var table = '<div class="ai-reader-table-scroll" role="region" aria-label="报告表格" tabindex="0"><table><thead>'
+                    + cells(headers, 'th') + '</thead><tbody>';
+                i += 1;
+                while (i + 1 < lines.length && lines[i + 1].trim() && lines[i + 1].indexOf('|') >= 0
+                    && !/^\s*#{1,6}\s/.test(lines[i + 1]) && !fenceStart(lines[i + 1])) {
+                    table += cells(tableCells(lines[++i]), 'td');
+                }
+                out.push(table + '</tbody></table></div>');
                 continue;
             }
 
@@ -173,8 +254,8 @@
         }
 
         // 未闭合的围栏：当作代码块收尾，不要把它整段吞掉
-        if (fence !== null && fence.length) {
-            out.push('<pre><code>' + fence.join('\n') + '</code></pre>');
+        if (fence !== null) {
+            out.push(codeBlock(fence));
         }
         flushAll();
         return out.join('');
@@ -194,16 +275,18 @@
         if (/^运行提示（平台）$/.test(text)) return 'notice';
         if (/^(?:风险评估|风险清单|风险与待确认事项)$/.test(text)) return 'risk';
         if (/^信息缺口与待确认$/.test(text)) return 'gaps';
+        if (/^取证索引（技术详情）$/.test(text)) return 'evidence';
         if (/^(?:待确认事项|待确认问题|待确认)$/.test(text)) return 'questions';
         if (/^测试建议$/.test(text)) return 'tests';
         return 'context';
     }
 
     function readerHeadings(lines) {
-        var fenced = false;
+        var fenced = null;
         var headings = [];
         lines.forEach(function (line, index) {
-            if (/^\s*```/.test(line)) { fenced = !fenced; return; }
+            if (fenced) { if (fenceEnd(line, fenced)) fenced = null; return; }
+            fenced = fenceStart(line);
             if (fenced) return;
             var match = /^(#{1,6})\s+(.+)$/.exec(line.trim());
             // 覆盖段是平台现有的粗体块标签；只接受这一个完整标签，不能扫描普通正文猜事实。
@@ -243,7 +326,7 @@
         });
         var level = Math.min.apply(null, (ordinary.length ? ordinary : headings).map(function (heading) { return heading.level; }));
         var chapters = headings.filter(function (heading) {
-            return heading.level <= level || heading.kind === 'coverage' || heading.kind === 'notice' || heading.kind === 'gaps';
+            return heading.level <= level || heading.kind === 'coverage' || heading.kind === 'notice' || heading.kind === 'gaps' || heading.kind === 'evidence';
         });
         if (!chapters.length) return '<div class="ai-report-reader">' + render(source) + '</div>';
         var prefix = 'ai-reader-' + (++readerSequence) + '-';
@@ -251,7 +334,7 @@
             return { title: chapter.title, kind: chapter.kind, order: index, id: prefix + index,
                 lines: lines.slice(chapter.index + 1, index + 1 < chapters.length ? chapters[index + 1].index : lines.length) };
         });
-        var priority = { coverage: 0, notice: 1, risk: 2, gaps: 3, questions: 4, tests: 5, context: 6 };
+        var priority = { coverage: 0, notice: 1, risk: 2, gaps: 3, questions: 4, tests: 5, context: 6, evidence: 7 };
         sections.sort(function (a, b) { return priority[a.kind] - priority[b.kind] || a.order - b.order; });
         var nav = sections.map(function (section) {
             return '<a href="#' + section.id + '">' + inline(escapeProse(section.title)) + '</a>';
@@ -280,6 +363,40 @@
 
     function bindReader(container) {
         if (!container || !container.querySelectorAll) return;
+        Array.prototype.forEach.call(container.querySelectorAll('.ai-copy-code'), function (button) {
+            if (button.aiCopyBound) return;
+            button.aiCopyBound = true;
+            button.addEventListener('click', async function () {
+                var block = button.closest('.ai-reader-code');
+                var code = block.querySelector('code').textContent;
+                var status = block.querySelector('[role="status"]');
+                button.disabled = true;
+                try {
+                    var copied = false;
+                    if (global.navigator && global.navigator.clipboard) {
+                        try { await global.navigator.clipboard.writeText(code); copied = true; } catch (_) { /* HTTP/权限回退 */ }
+                    }
+                    if (!copied) {
+                        // 内网 HTTP 常没有 Clipboard API。只在用户点击后尝试旧式文本复制。
+                        var doc = button.ownerDocument;
+                        var area = doc.createElement('textarea');
+                        area.value = code;
+                        area.setAttribute('readonly', '');
+                        area.setAttribute('aria-hidden', 'true');
+                        area.style.cssText = 'position:fixed;left:-10000px;top:0;opacity:0';
+                        doc.body.appendChild(area);
+                        try { area.select(); copied = !!(doc.execCommand && doc.execCommand('copy')); }
+                        finally { area.remove(); }
+                    }
+                    status.textContent = copied ? '已复制' : '请手动选择代码复制';
+                } catch (_) {
+                    status.textContent = '请手动选择代码复制';
+                } finally {
+                    button.disabled = false;
+                    if (button.focus) button.focus({ preventScroll: true });
+                }
+            });
+        });
         Array.prototype.forEach.call(container.querySelectorAll('.ai-reader-nav a'), function (link) {
             link.addEventListener('click', function (event) {
                 // href 是本渲染器生成的数字 ID；查询限定在当前报告，不使用模型提供的选择器。

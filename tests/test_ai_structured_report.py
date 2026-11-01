@@ -42,7 +42,7 @@ def test_structured_final_generates_seven_chapters_without_markdown_duplication(
     result = parse(structured())
     assert [line[2:] for line in result.report_markdown.splitlines() if line.startswith("# ")] == list(REPORT_SECTIONS)
     assert len(result.report_items) == 1
-    assert "待确认假设" in result.report_markdown
+    assert "依据待补，影响待确认" in result.report_markdown
     assert "预期：待确认需求后补充预期" in result.report_markdown
 
 

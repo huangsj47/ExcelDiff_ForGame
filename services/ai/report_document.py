@@ -135,73 +135,11 @@ def render_structured_report(
     *,
     confirmed_blocker_ids: Sequence[str] = (),
 ) -> str:
-    """Render the seven business chapters from one canonical source, including all risks.
+    """Render canonical business findings; display labels never replace stable identity."""
+    from services.ai.business_report import render
 
-    Evidence status describes support, not human approval. An impact remains a
-    hypothesis until independently validated; no successful pipeline implies release.
-    Coverage is deliberately supplied by the platform outside model-authored sections.
-    """
-    from services.ai.report_items import sort_report_items
+    return render(items, sections, confirmed_blocker_ids=confirmed_blocker_ids)
 
-    ordered = sort_report_items(items, confirmed_blocker_ids=confirmed_blocker_ids)
-    lines = ["# 变更理解", "", _business_text(sections.get("overview")), ""]
-
-    def chapter(title: str, key: str, empty: str) -> None:
-        lines.extend([f"# {title}", ""])
-        values = sections.get(key) or []
-        lines.extend([f"- {_business_text(value)}" for value in values] or [empty])
-        lines.append("")
-
-    chapter("变更内容摘要", "changes", "未提供额外变更摘要。")
-    chapter("影响面分析", "impacts", "影响面尚待结合条目逐项验证。")
-    lines.extend(["# 风险评估", ""])
-    if not ordered:
-        lines.extend(["本次未报告风险条目；未取证范围不能据此判断安全。", ""])
-    states = {"verified": "配置事实已有证据，业务影响待验证", "partial": "部分依据，待确认假设",
-              "unverified": "待确认假设"}
-    for item in ordered:
-        identifier = item["id"]
-        lines.extend([
-            f"## {identifier} · {severity_label(item['severity'])} · {_business_text(item['business_area'])}"
-            f"：{_business_text(item['change_fact'])}", "",
-            f"变化：{_business_text(item['change_fact'])}", "",
-            f"影响假设：{_business_text(item['impact_hypothesis'])}", "",
-            f"依据状态：{states[item['evidence_status']]}", "",
-        ])
-        if item.get("change_fact_refs"):
-            lines.extend(["事实坐标：" + "；".join(map(_business_text, item["change_fact_refs"])), ""])
-        if item.get("decision_question"):
-            lines.extend([f"待确认：{_business_text(item['decision_question'])}", ""])
-        references = []
-        for reference in item.get("evidence_refs", ()):
-            references.append(" / ".join(_business_text(reference.get(key)) for key in (
-                "evidence_id", "repository_id", "repository", "commit", "path", "lines",
-            ) if reference.get(key)))
-        lines.extend(["证据：" + ("；".join(references) or "尚无可定位证据，须补取证。"), ""])
-        if item.get("evidence_notes"):
-            lines.extend(["原异常依据（未重新核验）：", ""])
-            lines.extend(f"- {_business_text(value)}" for value in item["evidence_notes"])
-            lines.append("")
-        if item.get("evidence_gaps"):
-            lines.extend(["证据缺口：" + "；".join(map(_business_text, item["evidence_gaps"])), ""])
-    lines.extend(["# 测试建议", ""])
-    for item in ordered:
-        for index, action in enumerate(item["test_actions"], 1):
-            lines.extend([
-                f"## 验证 {item['id']} · {index}", "",
-                f"条件：{_business_text(action['conditions'])}", "",
-                "步骤：" + " → ".join(map(_business_text, action["steps"])), "",
-                f"预期：{_business_text(action['expected'])}", "",
-            ])
-    if not ordered:
-        lines.extend(["没有关联风险条目的专项动作；仍需完成发布基础验证。", ""])
-    chapter("回归建议", "regressions", "未提供额外跨功能回归建议。")
-    chapter("上线与回滚关注点", "release_actions", "发布结论需由负责人结合验证结果确认。")
-    if sections.get("gaps"):
-        lines.extend(["## 信息缺口与待确认", ""])
-        lines.extend(f"- {_business_text(value)}" for value in sections["gaps"])
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
 
 CONFIDENCE_LABELS = {
     "high": "高",

@@ -192,6 +192,18 @@ def test_the_batch_diff_requests_are_bounded_by_count():
     assert diff_requests(scope, max_files=5) == diff_requests(scope, max_files=5)
 
 
+def test_prefetch_spreads_across_directories_before_reading_one_family_deeply():
+    paths = {f"editor/actors/a{i}.xlsx" for i in range(12)} | {
+        "tables/Calendar.xlsx", "tables/rewards/Reward.xlsx", "tables/items/Item.xlsx",
+    }
+    selected = [item.path for item in diff_requests(_scope({BATCH_COMMIT: paths}), max_files=4)]
+    assert len(selected) == 4
+    assert {path.rsplit("/", 1)[0] for path in selected} == {
+        "editor/actors", "tables", "tables/rewards", "tables/items",
+    }
+    assert selected == [item.path for item in diff_requests(_scope({BATCH_COMMIT: paths}), max_files=4)]
+
+
 def test_a_hit_becomes_a_small_window_request():
     """命中给的是**一小段**（`行号 ± span`），不是整份正文 —— 整份既贵又慢。"""
     rendered = f"{CALLER}:3:     return proto.{OLD_NAME}(attacker.atk, target.def)\n"

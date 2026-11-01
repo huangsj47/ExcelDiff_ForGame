@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -230,6 +231,7 @@ def test_a_realistic_report_gets_all_its_pieces(rendered):
 ALLOWED_TAGS = {
     "h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "li",
     "strong", "code", "blockquote", "pre", "br",
+    "div", "span", "button", "table", "thead", "tbody", "tr", "th", "td", "a",
 }
 
 _TAG_RE = re.compile(r"<\s*/?\s*([a-zA-Z][a-zA-Z0-9]*)")
@@ -268,18 +270,28 @@ def test_model_supplied_markup_can_never_become_a_tag(rendered, case):
     )
 
 
-def test_the_renderer_emits_no_attributes_at_all(rendered):
-    """渲染器产出的标签**一个属性都没有**，所以不存在「逃出属性上下文」。
+def test_the_renderer_emits_only_trusted_attributes(rendered):
+    """代码工具栏/表格需要属性，但不允许事件、样式、任意类或危险链接。"""
+    allowed = {
+        "div": {"class": {"ai-reader-code", "ai-reader-code-toolbar", "ai-reader-table-scroll"},
+                "role": {"region"}, "aria-label": {"报告表格"}, "tabindex": {"0"}},
+        "span": {"class": {"ai-reader-code-language", "ai-copy-status"}, "role": {"status"}, "aria-live": {"polite"}},
+        "button": {"class": {"ai-copy-code"}, "type": {"button"}},
+        "pre": {"tabindex": {"0"}}, "th": {"scope": {"col"}},
+        "a": {"target": {"_blank"}, "rel": {"noopener noreferrer"}},
+    }
 
-    这条比逐个比对 `onmouseover=` 之类的危险词可靠：只要输出里出现了任何带属性的
-    标签，就说明有东西不是渲染器自己写的。
-    """
-    for name, html in rendered.items():
-        for tag in _ANY_TAG_RE.findall(html):
-            assert tag.strip() in {"<" + t + ">" for t in ALLOWED_TAGS} | \
-                                  {"</" + t + ">" for t in ALLOWED_TAGS}, (
-                f"{name} 输出了带内容的标签（可能含属性）：{tag!r}"
-            )
+    class CheckAttributes(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            assert tag in ALLOWED_TAGS
+            for key, value in attrs:
+                if tag == "a" and key == "href":
+                    assert re.fullmatch(r'https?://[^\s<>"\\]+', value, re.I)
+                else:
+                    assert value in allowed.get(tag, {}).get(key, set()), (tag, key, value)
+
+    for html in rendered.values():
+        CheckAttributes().feed(html)
 
 
 def test_an_attribute_break_cannot_escape_an_attribute(rendered):
@@ -297,11 +309,11 @@ def test_the_renderer_only_emits_whitelisted_tags(rendered):
 
 
 def test_unsupported_markdown_degrades_to_visible_text(rendered):
-    """刻意不支持的写法（链接/图片/表格）要退化成可见文字，不能消失、也不能变标签。
+    """危险链接/图片/不完整表格退化为可见文字，不能消失或执行。
 
     这一条是「诚实降级」的守卫：宁可显示得朴素，也不能把内容弄丢。
     """
-    cases = [{"name": "link", "md": "见 [文档](http://x/y) 说明"},
+    cases = [{"name": "link", "md": "见 [文档](javascript:bad()) 说明"},
              {"name": "table", "md": "| a | b |\n| - | - |\n| 1 | 2 |"}]
     if not shutil.which("node"):
         pytest.skip("环境里没有 Node")
@@ -315,7 +327,7 @@ def test_unsupported_markdown_degrades_to_visible_text(rendered):
     out = {i["name"]: i["html"] for i in json.loads(proc.stdout)}
     assert "<a " not in out["link"] and "<a>" not in out["link"]
     assert "文档" in out["link"], "链接的文字被弄丢了"
-    assert "http://x/y" in out["link"], "链接地址被弄丢了"
+    assert "javascript:bad()" in out["link"], "拒绝的链接地址仍应作为文字保留"
     assert "<table" not in out["table"]
     assert "1" in out["table"] and "2" in out["table"], "表格内容被弄丢了"
 

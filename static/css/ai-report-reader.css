@@ -100,6 +100,22 @@
     color: var(--color-text-secondary, #49566a);
 }
 .ai-report-reader .ai-reader-archive > summary { min-height: 32px; font-size: 12px; }
+.ai-report-reader .ai-reader-table-scroll { max-width: 100%; overflow-x: auto; margin: 12px 0; }
+.ai-report-reader table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ai-report-reader th,
+.ai-report-reader td { padding: 8px 10px; border: 1px solid var(--color-border, #dce3ec); text-align: left; vertical-align: top; }
+.ai-report-reader th { background: var(--color-surface-subtle, #f1f5f9); font-weight: 600; }
+.ai-report-reader .ai-reader-code { min-width: 0; max-width: 100%; margin: 12px 0; border: 1px solid #cbd5e1; border-radius: 6px; overflow: hidden; }
+.ai-report-reader .ai-reader-code-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 10px; background: var(--color-surface-subtle, #f1f5f9); font: 12px/1.5 sans-serif; }
+.ai-report-reader .ai-reader-code-language { margin-right: auto; font-weight: 600; }
+.ai-report-reader .ai-copy-code { min-height: 32px; border: 1px solid #94a3b8; border-radius: 4px; padding: 3px 10px; background: var(--color-surface, #fff); color: inherit; cursor: pointer; }
+.ai-report-reader .ai-copy-code:hover { background: var(--color-surface-subtle, #e2e8f0); }
+.ai-report-reader .ai-copy-status { color: var(--color-text-secondary, #475569); }
+.ai-report-reader .ai-reader-code pre { margin: 0; padding: 12px; max-width: 100%; overflow-x: auto; white-space: pre; background: #172334; color: #e5edf8; border: 0; border-radius: 0; }
+.ai-report-reader .ai-reader-code pre code { display: block; white-space: inherit; padding: 0; border: 0; background: transparent; color: inherit; font: 13px/1.7 Consolas, monospace; }
+.ai-report-reader .ai-copy-code:focus-visible,
+.ai-report-reader .ai-reader-table-scroll:focus-visible,
+.ai-report-reader pre:focus-visible { outline: 2px solid var(--color-link, #245d92); outline-offset: -2px; }
 @media (max-width: 600px) {
     .ai-report-reader .ai-reader-section-body { padding: 10px; }
     .ai-report-reader .ai-reader-risk-card,

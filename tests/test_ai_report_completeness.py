@@ -52,5 +52,30 @@ def test_ignored_anomaly_is_not_restored_as_a_business_card():
 
 def test_risk_heading_contains_the_business_fact_not_only_a_machine_identifier():
     result = parse(structured())
-    heading = next(line for line in result.report_markdown.splitlines() if line.startswith("## R-"))
+    heading = next(line for line in result.report_markdown.splitlines() if line.startswith("## R1"))
     assert "人数由 4 改为 8" in heading
+
+
+def test_suppressed_or_retracted_anomalies_cannot_keep_an_empty_report_at_high_risk():
+    from dataclasses import replace
+
+    parsed = parse(structured(report_items=[], anomalies=[_anomaly()]))
+    anomaly = parsed.anomalies[0]
+    fp = anomaly_fingerprint(anomaly)
+    outcome = EngineOutcome(status="succeeded", anomalies=(anomaly,), report_items=(),
+                            report_sections=parsed.report_sections, report_markdown=parsed.report_markdown)
+    payload = {"delta_files": [{"file_path": anomaly.file_path}], "summary": {}}
+    ignored = result_payload(outcome, payload, suppressed=frozenset({fp}))
+    retracted = result_payload(replace(outcome, verdict={"rows": [{"fingerprint": fp, "active": False}]}), payload)
+    for result in (ignored, retracted):
+        assert not result["anomalies"] and not result["report_items"]
+        assert result["risk_level"] == "low"
+        assert not any("关联不足" in reason for reason in result["risk_reasons"])
+
+
+def test_risk_reason_does_not_call_anomaly_only_scoring_a_zero_item_business_report():
+    parsed = parse(structured(report_items=[], anomalies=[_anomaly()]))
+    outcome = EngineOutcome(status="succeeded", anomalies=parsed.anomalies, report_items=(),
+                            report_sections=parsed.report_sections, report_markdown=parsed.report_markdown)
+    result = result_payload(outcome, {"delta_files": [{"file_path": parsed.anomalies[0].file_path}]})
+    assert "处置异常 1 条" in " ".join(result["risk_reasons"])
