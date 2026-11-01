@@ -113,7 +113,7 @@ def test_compensation_and_dependency_inputs_are_visible_in_scope_and_coverage_te
     from services.ai.result_payload import coverage_notice_text
 
     notice = coverage_notice_text(ledger)
-    assert "没有取到证据" in notice, notice
+    assert "本次输入证据未覆盖" in notice, notice
     assert "补偿项" not in notice, notice
 
 
@@ -270,10 +270,10 @@ process.stdout.write(JSON.stringify({{
         # 贴到屏幕上的是「覆盖段 + 正文」：覆盖段回答「这份报告看了多少」，是读正文的
         # **前提**，所以它在正文之前（与导出那份 `.md` 一致，2026-11-01 修）。
         # 正文一个字节不少，只是排在它后面 —— 两条都要断，否则「前置」可以靠丢正文做到。
-        assert out["composed"].startswith(out["coverage"]), (
-            "覆盖段又拼到正文后面了（与导出的次序相反）：" + out["composed"][:200]
+        assert out["composed"].rstrip().endswith(out["coverage"]), (
+            "覆盖明细必须在正文后面：" + out["composed"][:200]
         )
-        assert out["composed"].endswith(seeded["response_text"]), (
+        assert out["composed"].startswith(seeded["response_text"]), (
             "覆盖段前置时把正文改写/丢了"
         )
         assert "本次覆盖与缺口" in out["composed"], out["composed"][:200]

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 # 退化原因。空字符串表示没有退化。
+DEGRADE_COVERAGE = "evidence_coverage_gap"
 DEGRADE_NONE = ""
 DEGRADE_ROUNDS = "rounds_exhausted"
 DEGRADE_REQUESTS = "requests_exhausted"
@@ -48,6 +49,7 @@ DEGRADE_VERIFY = "subagent_verify"
 DEGRADE_BUDGET = "token_budget_exhausted"
 
 DEGRADATION_LABELS = {
+    DEGRADE_COVERAGE: "本次输入差异未完整取证，已保留现有结论",
     DEGRADE_ROUNDS: "轮次用尽，基于已有证据出结论",
     DEGRADE_REQUESTS: "上下文索取额度用尽，基于已有证据出结论",
     DEGRADE_MARKDOWN: "模型没有按协议输出 JSON，已按 markdown 报告降级保存",

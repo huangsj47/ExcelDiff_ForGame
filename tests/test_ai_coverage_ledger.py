@@ -328,7 +328,7 @@ def test_a_single_commit_run_does_not_talk_about_a_version():
         tool_stats=_stats(file_diff={"failed": 1, "refused_by_budget": 0, "truncated": 0}),
     )
     assert missed["limited"] is True
-    assert any("没有取到证据" in one for one in missed["gaps"])
+    assert any("本次输入证据未覆盖" in one for one in missed["gaps"])
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +353,7 @@ def test_every_gap_kind_shows_up():
     gaps = "\n".join(ledger["gaps"])
 
     assert "变更清单长到列不下" in gaps
-    assert "没有取到证据" in gaps and "还有 3 个" in gaps
+    assert "本次输入证据未覆盖" in gaps and "还有 3 个" in gaps
     assert "取数失败 1 次" in gaps
     # 文案 2026-09-26 改过：这里的额度**不是**「上下文索取上限」那个已被收敛的旋钮，
     # 真正能调的是「单次分析预算」—— 旧那句话会把用户引到一个已经不存在的配置项上。
@@ -472,10 +472,10 @@ def test_the_report_shows_the_ledger_and_never_says_full_means_everything_read()
     )
     text = _report(coverage=ledger)
 
-    assert "| 本次覆盖 |" in text
+    assert "- 本次覆盖：" in text
     assert "取证 57（5.7%）" in text
     assert doc.COVERAGE_TITLE in text
-    assert text.index(doc.COVERAGE_TITLE) < text.index("# 变更理解"), "缺口要在正文之前说"
+    assert text.index(doc.COVERAGE_TITLE) > text.index("# 变更理解"), "覆盖明细在业务正文之后"
     # 被读成「全读」的那一行没了：范围那一格现在带限定语
     assert "| 分析范围 | 全量 |" not in text
     assert "不等于「整个版本都看过了」" in text
@@ -483,7 +483,7 @@ def test_the_report_shows_the_ledger_and_never_says_full_means_everything_read()
     # 分隔线数 = 元信息｜正文｜附录｜页脚三处（2026-09-25 末尾加了渲染版本页脚，
     # 原来只有元信息与正文两处；页脚那一段见 `report_document.RENDER_FOOTER`）。
     # 这里钉的是**覆盖那一段没有把三段式挤坏**：它在元信息表之后、正文之前，不占分隔线。
-    assert text.count("\n---\n") == 3
+    assert text.count("\n---\n") == 4
 
 
 def test_a_report_without_a_ledger_is_byte_for_byte_what_it_was():
@@ -513,7 +513,7 @@ def test_the_report_never_invents_coverage_from_junk():
     """账本形状不对（不是字典 / 行不是两元组）时**宁可什么都不显示**，不印半行。"""
     text = _report(coverage={"rows": ["坏行", ("只有一项",), None, ("好行", "值")], "gaps": ["一句话"]})
 
-    assert "| 好行 | 值 |" in text
+    assert "- 好行：值" in text
     assert "坏行" not in text
     assert "只有一项" not in text
 

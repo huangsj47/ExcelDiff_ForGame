@@ -299,7 +299,7 @@ def test_content_that_cannot_be_split_keeps_the_old_truncation():
     """
     text, meta = _render("file_diff", "开头-" + "中" * 30_000 + "-结尾", limit=2_000)
 
-    assert meta == {"segments": 1, "split": meta["split"], "truncated": True}
+    assert meta == {"segments": 1, "split": meta["split"], "truncated": True, "complete_segments": []}
     assert text.startswith("开头-") and text.endswith("-结尾"), "保留首尾"
     assert "共 1 段" not in text and "这里是第" not in text
 

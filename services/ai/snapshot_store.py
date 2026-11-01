@@ -47,6 +47,7 @@ from models.ai_analysis.diff_snapshot import (
     STATUS_SEALED,
 )
 from services.ai.coverage_ledger import FILE_EVIDENCE_KINDS, parse_evidence_label
+from services.ai.delivery_receipts import coverage_evidence
 from services.ai.header_scope import header_scope_fingerprint, scoped_version
 from services.ai.trace_evidence import decode_evidence
 
@@ -451,7 +452,7 @@ def coverage_ratio(ledger: Optional[Mapping[str, Any]]) -> Optional[float]:
     evidence = ledger.get("evidence_coverage") or {}
     if not evidence.get("collected"):
         return None
-    by_pair = evidence.get("by_pair") or {}
+    by_pair = evidence.get("complete_diffs") or evidence.get("by_pair") or {}
     covered = _count(by_pair.get("covered"))
     total = _count(by_pair.get("total"))
     if covered is None or not total:
@@ -552,20 +553,30 @@ def evidence_paths(run: Any) -> Optional[set]:
         .order_by(AiAnalysisTrace.id.asc())
         .all()
     )
+    deliveries, modern = [], False
     for row in rows:
         if getattr(row, "executed_json", None) is None:
             continue
         collected = True
-        for item in decode_evidence(row).get("executed") or ():
+        detail = decode_evidence(row)
+        modern = modern or detail.get("delivered") is not None
+        deliveries.extend(detail.get("delivered") or ())
+        for item in coverage_evidence(detail) or ():
             if not isinstance(item, Mapping):
                 continue
             if str(item.get("kind") or "") not in FILE_EVIDENCE_KINDS:
                 continue
-            if item.get("failed") or item.get("empty"):
+            if item.get("failed") or item.get("empty") or item.get("omitted_for_budget"):
                 continue
             _commit, path, _lines = parse_evidence_label(item.get("label"))
+            if item.get("delivery_version"):
+                path = item.get("path", "")
             if path:
                 paths.add(path)
+    if modern:
+        from services.ai.coverage_completion import completed_paths
+
+        paths = completed_paths(_input_files(run), deliveries)
     return paths if collected else None
 
 
@@ -660,9 +671,10 @@ def _input_files(run: Any) -> List[dict]:
         if not isinstance(item, Mapping):
             continue
         path = str(item.get("file_path") or "").strip()
-        if not path or path in seen:
+        key = (item.get("repository_id"), path, item.get("latest_commit_id"))
+        if not path or key in seen:
             continue
-        seen.add(path)
+        seen.add(key)
         out.append({
             "path": path,
             "repository_id": item.get("repository_id"),
@@ -721,9 +733,9 @@ def unread_files(run: Any) -> Optional[List[dict]]:
     unreadable = {
         path
         for path in (
-            parse_evidence_label(item.get("label"))[1]
+            (item.get("path", "") if item.get("delivery_version") else parse_evidence_label(item.get("label"))[1])
             for row in rows
-            for item in (decode_evidence(row).get("executed") or [])
+            for item in (coverage_evidence(decode_evidence(row)) or [])
             if isinstance(item, Mapping)
             and str(item.get("kind") or "") in FILE_EVIDENCE_KINDS
             and (item.get("failed") or item.get("empty"))

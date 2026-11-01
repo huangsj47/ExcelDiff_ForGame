@@ -64,6 +64,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from models.ai_analysis import AiAnalysisTrace
 from services.ai import window_commits
+from services.ai.delivery_receipts import coverage_evidence
 from services.ai.trace_evidence import (  # noqa: F401
     # `FILE_EVIDENCE_KINDS` 由 `trace_evidence` 定义（那里是纯层，运行中的进度也要用它），
     # 本模块转出这个名字供既有调用方按原路径取用。
@@ -289,10 +290,12 @@ def _evidence_files(
             continue
         if str(item.get("kind") or "") not in FILE_EVIDENCE_KINDS:
             continue
-        if item.get("failed") or item.get("empty"):
+        if item.get("failed") or item.get("empty") or item.get("omitted_for_budget"):
             failures.append(dict(item))
             continue
         commit, path, lines = parse_evidence_label(item.get("label"))
+        if item.get("delivery_version"):
+            commit, path, lines = item.get("commit", ""), item.get("path", ""), item.get("lines", "")
         if not path:
             continue
         # 只算**白名单里真的有**的文件：模型越权点名时平台会把它丢掉（它根本取不到内容），
@@ -581,6 +584,17 @@ def build_ledger(
             ],
         },
     }
+    if any(item.get("delivery_version") for item in executed_rows if isinstance(item, Mapping)):
+        from types import SimpleNamespace
+
+        from services.ai.coverage_completion import CoverageCompletion
+        complete = CoverageCompletion(tuple(SimpleNamespace(repository_id=repo, path=path, commit=commit)
+                                            for repo, path, commit in entries))
+        complete.observe(executed_rows)
+        ledger["evidence_coverage"]["complete_diffs"] = {
+            "covered": len(complete.done), "total": len(complete.entries),
+            "ratio": _ratio(len(complete.done), len(complete.entries)),
+        }
     ledger["findings"] = _findings_account(response_payload)
     ledger["limited"] = is_limited(ledger)
     ledger["scope_note"] = SCOPE_LIMITED_NOTE if ledger["limited"] else ""
@@ -612,6 +626,9 @@ def is_limited(ledger: Mapping[str, Any]) -> bool:
         return True
     if not evidence.get("collected"):
         return False
+    complete = evidence.get("complete_diffs")
+    if complete and complete.get("covered", 0) < complete.get("total", 0):
+        return True
     pair = _count(counts.get("evidence_files_by_pair"))
     # 采集过明细、白名单非空、但还有文件没取到证据 —— 这就是「全量 ≠ 全读」那一件事。
     if batch and (pair or 0) < batch:
@@ -779,6 +796,10 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
     # —— 不是「算了不显示」。
 
     # 结论的**两个数**（本轮新增 / 基线继承）：清单里同时有本轮新报的与上一轮继承下来的。
+    complete = (ledger.get("evidence_coverage") or {}).get("complete_diffs")
+    if complete:
+        rows.append(("差异交付完整度", f"完整交付 {complete['covered']} / {complete['total']} 个文件；"
+                     "证据触达不代表整份差异已读完，完整交付也不等于业务影响已验证"))
     findings_row = _findings_row(ledger.get("findings") or {})
     if findings_row:
         rows.append(findings_row)
@@ -847,8 +868,8 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
             # 分层的两个数跟在这一条上（2026-09-25）：它们要回答的是「为什么没取到」——
             # 分片压根没铺到它，还是铺到了但这一轮没取到。摆在覆盖段里没人会去解释。
             notes.append(
-                f"**没有取到证据**：还有 {pending} 个（{_layers_note(ledger)}）"
-                "—— 这不是「这些文件没问题」，是**这次没有看**。"
+                f"**本次输入证据未覆盖**：还有 {pending} 个（{_layers_note(ledger)}）。"
+                "尚无匹配本次输入版本的文件证据记录；可能只取得历史版本或关联片段，不能据此判为无风险。"
             )
     else:
         notes.append(
@@ -983,7 +1004,7 @@ def ledger_from_run(run: Any) -> dict:
         if getattr(row, "executed_json", None) is None:
             continue
         collected = True
-        executed.extend(decode_evidence(row).get("executed") or [])
+        executed.extend(coverage_evidence(decode_evidence(row)) or [])
 
     return build_ledger(
         request_payload=getattr(run, "request_payload", None),

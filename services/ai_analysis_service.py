@@ -734,6 +734,10 @@ def _apply_model_window(
                 # 问不到窗口不是失败点：下面按默认窗口继续（见 docstring）。
                 log_print(f"AI 分析：取模型上下文窗口失败（按默认窗口处理）: {exc}")
 
+    from services.ai.output_budget import cap_for_model_window, model_output_ceiling
+
+    output_cap, output_note = cap_for_model_window(limits.max_output_tokens, window)
+    limits = replace(limits, max_output_tokens=output_cap, model_output_ceiling=model_output_ceiling(window))
     budget, note = effective_prompt_budget(limits.prompt_char_budget, window)
     if not note:
         return replace(
@@ -742,7 +746,7 @@ def _apply_model_window(
                 prompt_char_budget=limits.prompt_char_budget,
                 max_tool_requests=limits.max_tool_requests,
             ),
-        ), ""
+        ), output_note
     # 压完再减去内置那一段：**用户的额度不能被平台自己的提示词吃掉**。窗口小到连
     # 内置提示词都装不下时落到 0 —— 那时组装侧还有条目下限兜着，而这一轮的说明已经
     # 把「窗口太小」讲清楚了。
@@ -750,13 +754,7 @@ def _apply_model_window(
     # ★ 这个 `effective` 是**用户内容**的额度，它的两个去处是「派生单条上限」与「报给 UI」，
     # **不是** `limits.prompt_char_budget`。
     #
-    # 2026-09-22 修：这一行原先把 `effective` 赋给了 `prompt_char_budget`，那是**扣了两次**
-    # 平台提示词 —— 引擎比的是**整份提示词**（`engine.estimate_chars(messages)`，而 `messages`
-    # 里第一条就是系统提示词，见 `subagent.build_seed_messages`），所以它要的是压过的**总数**
-    # `budget`；把「总数 − 平台那段」再交给它，等于平台那段先从水位里扣一次、又在比较里扣一次。
-    # 后果是重度压缩的项目白少用 `platform_chars` 那么多额度（本机 560k 的配置走的是**没压**
-    # 那条路，所以线上一直没暴露）。同一个数还让界面与预估端点对不上：预估侧报的是**内容额度**，
-    # 运行侧报的是总数，于是「配置 560,000 / 生效 580,000」这种读不通的话就出现了。
+    # 引擎比较整份提示词，工具预算使用扣除内置提示词后的内容额度。
     effective = max(0, budget - platform_chars)
     return replace(
         limits,
@@ -765,7 +763,7 @@ def _apply_model_window(
             prompt_char_budget=effective,
             max_tool_requests=limits.max_tool_requests,
         ),
-    ), note
+    ), "；".join(filter(None, (note, output_note)))
 
 
 def _configured_int(value: object, default: int) -> int:
@@ -1495,11 +1493,13 @@ def _run_engine_and_persist(
     # 在界面上已收掉，不进这条路径。
     analysis_plan = plan_of(payload)
     if analysis_plan is None:
-        # 老 payload（这次改动之前建的那一份）没有计划。**现算一份并写回去**，而不是
-        # 退回旧公式：旧公式正是「3 个文件也开 5 片」的来源。补记之后这份计划也进
-        # request_payload，事后能查「当时凭什么这么分工」。
+        # 缺失计划时按冻结输入补记；已有计划保持其额度口径。
         log_print("AI 分析：这份 payload 里没有计划，按当前口径现算一份并补记", "AI")
         analysis_plan = attach_weekly_plan(payload)
+    from services.ai.output_budget import respect_frozen_default
+
+    limits = respect_frozen_default(limits, analysis_plan)
+    engine_args["limits"] = limits
     sizing = (
         analysis_plan.family
         if (payload.get("mode") or "") == "weekly"
@@ -1579,7 +1579,7 @@ def _run_engine_and_persist(
         plan=analysis_plan.to_dict(),
     )
     outcome = (
-        run_analysis(**engine_args)
+        run_analysis(**engine_args, coverage_files=change.manifest.entries if change.manifest else ())
         if plan is None
         else run_family_with_seed(
             plan=plan,

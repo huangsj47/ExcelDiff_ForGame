@@ -213,12 +213,12 @@ test('canonical hashed risk IDs produce risk and test cards', () => {
     assert.equal(output.querySelectorAll('.ai-reader-action-card').length, 1);
 });
 
-test('coverage stays first and risks precede long folded context without losing text', () => {
+test('risks precede long folded context and coverage stays last without losing text', () => {
     const { output } = setup(report);
     const sections = [...output.querySelectorAll('.ai-reader-section')];
-    assert.match(sections[0].textContent, /覆盖摘要/);
-    assert.match(sections[1].textContent, /风险评估/);
-    assert.match(sections[2].textContent, /待确认事项/);
+    assert.match(sections[sections.length - 1].textContent, /覆盖摘要/);
+    assert.match(sections[0].textContent, /风险评估/);
+    assert.match(sections[1].textContent, /待确认事项/);
     const background = sections.find(section => section.textContent.includes('变更理解'));
     assert.equal(background.tagName, 'DETAILS');
     assert.equal(background.hasAttribute('open'), false);
@@ -267,7 +267,7 @@ test('multiple readers use distinct navigation targets and headings without fact
     assert.notEqual(output.querySelector('.ai-reader-nav a').getAttribute('href'), second.querySelector('.ai-reader-nav a').getAttribute('href'));
 });
 
-test('platform coverage and degraded warnings stay visible before folded release notes', () => {
+test('coverage details fold at the bottom while degradation stays visible', () => {
     const { window } = parseHTML('<html><body><div id="report"></div></body></html>');
     const sandbox = { window };
     vm.runInNewContext(source, sandbox);
@@ -286,7 +286,11 @@ test('platform coverage and degraded warnings stay visible before folded release
     assert.doesNotMatch(output.textContent, /999999/);
     const coverage = output.querySelector('.ai-reader-coverage');
     assert.match(coverage.textContent, /81 项/);
-    assert.ok(!coverage.querySelector('details'), 'coverage gaps must stay visible without an expansion action');
+    assert.equal(coverage.tagName, 'DETAILS');
+    assert.equal(coverage.hasAttribute('open'), false);
+    assert.ok(md.indexOf('本次覆盖与缺口') > md.indexOf('上线与回滚关注点'));
+    const sections = output.querySelectorAll('.ai-reader-section');
+    assert.equal(sections[sections.length - 1].classList.contains('ai-reader-coverage'), true);
 });
 
 function functionSource(template, name) {

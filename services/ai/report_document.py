@@ -962,7 +962,7 @@ UNCLASSIFIED_NOTE = (
 # 2026-11-01（第二轮）：附录把 `out_of_scope=True` 的条目挪进单独一节（`OUT_OF_SCOPE_TITLE`）。
 # 有范围外条目时文档多一节、且上面那张表少几行 —— 同一份数据在升级前后导出的两份形状不同，
 # 所以版本号再走一格（没有范围外条目时逐字与上一版相同）。
-RENDER_VERSION = "2026-11-01.2"
+RENDER_VERSION = "2026-11-01.3"
 
 # 文档末尾那行出处说明。**只讲读者拿它当证据时会问的两件事**：这份文件什么时候渲染的、
 # 与另一次导出差在哪。报告正文那一段是存档原文（不受渲染版本影响），附录的「处置」列反过来
@@ -1115,22 +1115,12 @@ def build_report_markdown(
         degradation_label=degradation_label,
         focus_label=focus_label,
         scope_note=coverage_scope_note(coverage),
-        coverage_rows=coverage_table_rows(coverage),
+        coverage_rows=(),
         mode_decision=mode_decision,
         analysis_profile_label=analysis_profile_label,
         repository_scope=repository_scope,
     ):
         lines.append(f"| {name} | {_cell(value)} |")
-
-    # 缺口那几句话紧跟在元信息表之后、正文之前：读者是在这里建立「这份报告看了多少」的
-    # 前提的，等读完正文再看到它就晚了（而正文里的每一条结论都建立在这个前提上）。
-    gap_lines = coverage_gap_lines(coverage)
-    if gap_lines:
-        lines.append("")
-        lines.append(f"**{COVERAGE_TITLE}**")
-        lines.append("")
-        for one in gap_lines:
-            lines.append(f"- {one}")
 
     lines.append("")
     lines.append("---")
@@ -1188,6 +1178,14 @@ def build_report_markdown(
             lines.append(OUT_OF_SCOPE_INTRO)
             lines.append("")
             _append_appendix_table(lines, out_of_scope_rows)
+
+    # Detailed coverage is an audit appendix, after the business report and findings.
+    coverage_rows = coverage_table_rows(coverage)
+    gap_lines = coverage_gap_lines(coverage)
+    if coverage_rows or gap_lines:
+        lines.extend(["", "---", "", f"## {COVERAGE_TITLE}", ""])
+        lines.extend(f"- {name}：{value}" for name, value in coverage_rows)
+        lines.extend(f"- {one}" for one in gap_lines)
 
     # 页脚（出处说明）。**排在最后、且与附录之间也隔一条 `---`**：它是关于这份**文件**的
     # 话，不是附录的一部分 —— 混在附录里会被读成又一条异常。内容的取舍见 `RENDER_FOOTER`。

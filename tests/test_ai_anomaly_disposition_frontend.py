@@ -1290,7 +1290,7 @@ def test_every_drawer_loads_the_disposition_module():
 NOTICE_SCRIPT = PROJECT_ROOT / "static" / "js" / "ai_context_notice.js"
 
 
-def test_the_coverage_section_comes_before_the_report_body():
+def test_the_coverage_section_comes_after_the_report_body():
     """「这次看了多少」必须**在正文之前**读，与导出那份 `.md` 一致。
 
     缺陷形态（方案 §4.10 第 1 条）：真机上一份 4000 字的报告，覆盖段拼在末尾，读者要
@@ -1322,8 +1322,8 @@ process.stdout.write(JSON.stringify(sandbox.AiContextNotice.withContextNotice(bo
 
     coverage_at = composed.index("本次覆盖与缺口")
     body_at = composed.index("## 变更理解")
-    assert coverage_at < body_at, "覆盖段又拼到正文后面了（与导出的次序相反）"
+    assert coverage_at > body_at, "覆盖明细应在正文之后"
     assert body in composed, "前置覆盖段把正文改写了"
-    assert composed.endswith(body), "正文必须在覆盖段之后原样出现"
+    assert composed.startswith(body), "正文必须在覆盖段之前原样出现"
     # 只出现一次：前置之后原来的追加位置不能再留一份。
     assert composed.count("本次覆盖与缺口") == 1

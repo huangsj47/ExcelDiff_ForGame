@@ -243,6 +243,7 @@ def encode_evidence(record: Any) -> dict:
         "executed_json": _dump({
             "items": int(getattr(record, "item_count", 0) or 0),
             "details": summarize_executed(getattr(record, "executed", ())),
+            **({"delivered": list(record.delivered)} if getattr(record, "delivered", None) is not None else {}),
         }),
         "dropped_json": _dump({
             "refused_by_budget": int(getattr(record, "refused_by_budget", 0) or 0),
@@ -306,6 +307,7 @@ def decode_evidence(row: Any) -> dict:
     return {
         "requests": _list_field(requests, "items"),
         "executed": _list_field(executed, "details"),
+        **({"delivered": _list_field(executed, "delivered")} if "delivered" in executed else {}),
         "dropped": _list_field(dropped, "details"),
         "response_text": str(getattr(row, "response_text", None) or ""),
         "budget_notes": str(getattr(row, "budget_notes", None) or ""),

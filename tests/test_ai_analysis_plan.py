@@ -903,6 +903,8 @@ def test_the_run_and_the_preview_read_the_same_persisted_plan(monkeypatch):
     于是它之后重建的 payload 会把「上轮没取到证据」的文件标成补偿项（`source` 变了，
     关键路径扫描也会跳过它）—— 那是**输入合法地变了**，不是两次推导不一致。
     """
+    from tests.test_ai_analysis_service import _patch_readable_provider
+    _patch_readable_provider(monkeypatch)
     from tests.test_ai_run_budget_warning import _prepare_weekly_run
 
     client = _patch_client(monkeypatch)
@@ -947,6 +949,8 @@ def test_a_rerun_plan_inside_the_worker_reuses_the_persisted_one(monkeypatch):
     这条守的是「老 payload / 被裁过的 payload」这一档 —— 它必须走同一个纯函数，
     而不是回到「从预算反解 5 片」。
     """
+    from tests.test_ai_analysis_service import _patch_readable_provider
+    _patch_readable_provider(monkeypatch)
     from tests.test_ai_run_budget_warning import _prepare_weekly_run
 
     _patch_client(monkeypatch)

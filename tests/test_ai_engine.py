@@ -253,12 +253,14 @@ def test_prompt_character_accounting_includes_replayed_history_and_wrap_up():
 
 
 def test_default_output_limit_recovers_once_but_explicit_limit_is_respected():
+    from services.ai.output_budget import DEFAULT_OUTPUT_TOKENS, RECOVERY_OUTPUT_TOKENS
+
     class Client(ScriptedClient):
         def __init__(self):
             super().__init__()
             self.caps = []
 
-        def complete(self, messages, *, temperature=None, max_tokens=8192):
+        def complete(self, messages, *, temperature=None, max_tokens=DEFAULT_OUTPUT_TOKENS):
             self.calls.append(messages)
             self.caps.append(max_tokens)
             return ChatResult(
@@ -267,7 +269,7 @@ def test_default_output_limit_recovers_once_but_explicit_limit_is_respected():
                 effective_max_tokens=max_tokens, prompt_tokens=100, completion_tokens=8192,
             )
 
-    for explicit, expected in ((False, [8192, 16384]), (True, [8192, 8192])):
+    for explicit, expected in ((False, [DEFAULT_OUTPUT_TOKENS, RECOVERY_OUTPUT_TOKENS]), (True, [DEFAULT_OUTPUT_TOKENS, DEFAULT_OUTPUT_TOKENS])):
         client = Client()
         outcome = _run(client, limits=EngineLimits(max_rounds=3,
                                                   max_output_tokens_explicit=explicit))

@@ -94,11 +94,11 @@ def complete_kwargs(limits: EngineLimits) -> dict[str, Any]:
 
     ## `max_tokens`：默认值由**客户端**补，这里只送「与默认不同」的那两档
 
-    `EngineLimits.max_output_tokens` 的默认值是 `DEFAULT_OUTPUT_TOKENS`（8192），而
+    `EngineLimits.max_output_tokens` 的默认值是 `DEFAULT_OUTPUT_TOKENS`（65,536），而
     `LLMClient.complete` 用**哨兵**区分「没传」与「显式 None」：没传 → 按同一个常量
     在 **wire 层补齐** `max_tokens`；显式 `None` → 不传字段。于是引擎默认轮不必多传一个
     与默认值相同的字段（否则每一个测试假 client 都要跟着改签名），而真实请求体照样带
-    `max_tokens=8192`。这一层只负责把**用户的决定**送出去：
+    `max_tokens=65536`。这一层只负责把**用户的决定**送出去：
 
     * **显式 `None`** → 送 `max_tokens=None`：客户端据此**不传字段**（旧行为，逃生口）。
       不送的话客户端会按默认值封顶，「显式关掉」就成了做不到的事；

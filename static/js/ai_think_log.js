@@ -361,6 +361,11 @@
             if (outcome) head += ' · ' + outcome;
             var tokens = fmtTokens(entry.tokens_input);
             if (tokens) head += ' · 输入 ' + tokens + ' tokens';
+            var output = fmtTokens(entry.tokens_output);
+            if (output) head += ' · 输出 ' + output + ' tokens';
+            if (entry.reasoning_tokens != null) head += '（含推理 ' + fmtTokens(entry.reasoning_tokens) + '）';
+            if (Number(entry.effective_max_tokens) > 0) head += ' · 单次输出上限 ' + fmtTokens(entry.effective_max_tokens);
+
             var cost = fmtDuration(entry.duration_ms);
             if (cost) head += ' · ' + cost;
             // 结束方式**折进这一行**（用户选的形态）：它是「这一轮怎么停下来的」，

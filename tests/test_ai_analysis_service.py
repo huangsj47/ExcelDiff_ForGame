@@ -1109,6 +1109,7 @@ def test_a_real_run_calls_the_model_and_persists_the_findings(monkeypatch):
     一条 trace）。开着它跑的是「3 个分片 + 1 次汇总」，那是
     `tests/test_ai_subagent_wiring.py` 的事。
     """
+    _patch_readable_provider(monkeypatch)
     from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisTrace
 
     with app.app_context():
@@ -1286,6 +1287,7 @@ def test_a_gateway_that_does_not_report_usage_persists_unknown_not_zero(monkeypa
     与它成对的是 `_FakeClient(report_usage=True)` 那条：每一轮都报的时候，落库的仍是那个
     真实的数（口径没被改成「一律 NULL」）。
     """
+    _patch_readable_provider(monkeypatch)
     with app.app_context():
         create_tables()
         project = _create_project()
@@ -1790,6 +1792,7 @@ def test_a_single_agent_weekly_run_says_the_review_it_was_asked_for_did_not_run(
     **这条量的不是那个函数，是接线**（`_run_engine_and_persist` 里那几行）：把接线停掉，
     `note_review_skipped` 自己的单测全绿而这条必须红 —— 那种漏改没有任何别的东西能抓到。
     """
+    _patch_readable_provider(monkeypatch)
     from models.ai_analysis import AiAnalysisRun
     from services.ai.verdict import RULING_SUMMARY_TITLE
 
@@ -1835,3 +1838,10 @@ def test_a_single_agent_weekly_run_says_the_review_it_was_asked_for_did_not_run(
         # 落库那一份与界面读的那一份是同一个字节串（`_persist_outcome` 读的就是它）
         payload = json.loads(run.response_payload)
         assert "没有跑「找反证」复核" in payload["report_markdown"]
+
+
+def _patch_readable_provider(monkeypatch):
+    """Service wiring fixtures use synthetic repositories; supply truthful diff evidence."""
+    from tests.test_ai_engine import FakeProvider
+
+    monkeypatch.setattr(ai_service, "PlatformContextProvider", lambda **_kwargs: FakeProvider())

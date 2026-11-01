@@ -367,7 +367,7 @@ def test_the_missing_evidence_gap_spells_out_the_assigned_and_inspected_counts()
     )
 
     gaps = "\n".join(ledger["gaps"])
-    assert "没有取到证据" in gaps
+    assert "本次输入证据未覆盖" in gaps
     assert "已分配 2 / 已检查 1" in gaps
 
 

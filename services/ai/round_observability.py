@@ -121,6 +121,7 @@ def with_observability(record: Any, entry: dict | None) -> dict | None:
         return None
     return {
         **entry,
+        **({"delivered": record.delivered} if getattr(record, "delivered", None) is not None else {}),
         **{key: getattr(record, key, None) for key in (
             "requested_max_tokens", "effective_max_tokens", "gateway_max_tokens", "max_tokens_adjustment",
         )},
@@ -187,3 +188,10 @@ __all__ = [
     "visible_response_chars",
     "with_observability",
 ]
+
+
+def sum_optional(values):
+    """A missing upstream measurement makes the aggregate unknown, including empty runs."""
+    if not values or any(value is None for value in values):
+        return None
+    return sum(int(value) for value in values)

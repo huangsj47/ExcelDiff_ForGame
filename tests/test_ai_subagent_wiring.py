@@ -158,6 +158,8 @@ def test_the_same_batch_stays_a_single_agent_when_the_flag_is_off(monkeypatch):
     显式关掉而不是「不配置」：默认值已经改成「开」了，靠默认值来测「关」的行为，
     改一次默认值这条用例就红 —— 而它守的东西（关掉 = 单代理）没有变。
     """
+    from tests.test_ai_analysis_service import _patch_readable_provider
+    _patch_readable_provider(monkeypatch)
     client = _FakeClient()
     with flask_app.app_context():
         create_tables()
@@ -187,6 +189,8 @@ def test_a_commit_analysis_never_splits_even_when_enabled(monkeypatch):
     直接驱动执行器并给它一个 `mode=commit` 的载荷 —— 这正是服务层读的那个字段，
     所以它同时钉住了「服务层把模式传对了」。
     """
+    from tests.test_ai_analysis_service import _patch_readable_provider
+    _patch_readable_provider(monkeypatch)
     client = _FakeClient()
     with flask_app.app_context():
         create_tables()
@@ -335,6 +339,8 @@ def test_the_verify_flag_does_nothing_on_its_own(monkeypatch):
     否则「开了对账轮但没开子代理」会变成一次**没有任何分片**的独立复核 —— 那既不是
     用户想要的，也没有可核对的「几个分片各自的结论」。
     """
+    from tests.test_ai_analysis_service import _patch_readable_provider
+    _patch_readable_provider(monkeypatch)
     client = _FakeClient()
     with flask_app.app_context():
         create_tables()

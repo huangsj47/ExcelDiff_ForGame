@@ -334,7 +334,7 @@
             return { title: chapter.title, kind: chapter.kind, order: index, id: prefix + index,
                 lines: lines.slice(chapter.index + 1, index + 1 < chapters.length ? chapters[index + 1].index : lines.length) };
         });
-        var priority = { coverage: 0, notice: 1, risk: 2, gaps: 3, questions: 4, tests: 5, context: 6, evidence: 7 };
+        var priority = { coverage: 8, notice: 1, risk: 2, gaps: 3, questions: 4, tests: 5, context: 6, evidence: 7 };
         sections.sort(function (a, b) { return priority[a.kind] - priority[b.kind] || a.order - b.order; });
         var nav = sections.map(function (section) {
             return '<a href="#' + section.id + '">' + inline(escapeProse(section.title)) + '</a>';
@@ -349,7 +349,7 @@
             // Only this explicit canonical gap chapter is promoted from a nested
             // heading; its contents remain verbatim and reuse the notice styling.
             if (section.kind === 'gaps') classes += ' ai-reader-notice';
-            if (section.kind === 'coverage' || section.kind === 'notice' || section.kind === 'gaps') {
+            if (section.kind === 'notice' || section.kind === 'gaps') {
                 html += '<section class="' + classes + '" id="' + section.id + '" tabindex="-1"><h2>' + title + '</h2>' + body + '</section>';
             } else {
                 var expanded = section.kind === 'risk' || section.kind === 'questions' || section.kind === 'tests' || sections.length === 1;

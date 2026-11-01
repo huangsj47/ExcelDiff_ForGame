@@ -1023,6 +1023,8 @@ class TestTheCallSitePassesTheEffectiveProfile:
     """
 
     def test_a_commit_analysis_uses_the_factory_nine(self, monkeypatch):
+        from tests.test_ai_analysis_service import _patch_readable_provider
+        _patch_readable_provider(monkeypatch)
         import services.ai_analysis_service as ai_service
         from app import app, create_tables, db
         from models import Project

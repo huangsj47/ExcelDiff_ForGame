@@ -345,7 +345,7 @@ def test_length_stop_with_null_content_keeps_hidden_reasoning_usage(monkeypatch)
     assert result.text == ""
     assert result.finish_reason == "length"
     assert result.completion_tokens == result.reasoning_tokens == 8192
-    assert result.effective_max_tokens == 8192
+    assert result.effective_max_tokens == DEFAULT_OUTPUT_TOKENS
 
 
 def test_null_content_without_length_evidence_is_still_a_response_error(monkeypatch):

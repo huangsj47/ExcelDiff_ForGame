@@ -5,12 +5,13 @@ import pytest
 
 from services.ai.budget_gate import SingleRunBudget
 from services.ai.pricing import BudgetWeights
+from services.ai.output_budget import DEFAULT_OUTPUT_TOKENS, RECOVERY_OUTPUT_TOKENS
 
 
 def recover(**overrides):
     from services.ai.output_budget import suggest_output_recovery
-    args = dict(usage={"finish_reason": "length", "effective_max_tokens": 8192},
-                configured_cap=8192, prompt_chars=1000)
+    args = dict(usage={"finish_reason": "length", "effective_max_tokens": DEFAULT_OUTPUT_TOKENS},
+                configured_cap=DEFAULT_OUTPUT_TOKENS, prompt_chars=1000)
     args.update(overrides)
     return suggest_output_recovery(**args)
 
@@ -18,9 +19,9 @@ def recover(**overrides):
 def test_default_truncation_gets_one_larger_recovery_without_changing_global_default():
     from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS
     decision = recover()
-    assert decision.cap == 16384
-    assert DEFAULT_OUTPUT_TOKENS == 8192
-    assert decision.estimated_call_tokens == 17384
+    assert decision.cap == RECOVERY_OUTPUT_TOKENS
+    assert DEFAULT_OUTPUT_TOKENS == 65536
+    assert decision.estimated_call_tokens == 1000 + RECOVERY_OUTPUT_TOKENS
     assert recover(recovery_attempts=1).cap is None
 
 
@@ -36,22 +37,22 @@ def test_recovery_never_overrides_user_or_gateway_constraints(kwargs):
 
 
 def test_recovery_reserves_full_prompt_and_report_using_actual_usage_if_larger():
-    budget = SingleRunBudget(total_token_budget=300000, spent_tokens=80000,
+    budget = SingleRunBudget(total_token_budget=370000, spent_tokens=80000,
                              report_reserve_tokens=10000)
-    usage = {"finish_reason": "length", "effective_max_tokens": 8192,
-             "prompt_tokens": 199000, "reasoning_tokens": 8192}
+    usage = {"finish_reason": "length", "effective_max_tokens": DEFAULT_OUTPUT_TOKENS,
+             "prompt_tokens": 199000, "reasoning_tokens": DEFAULT_OUTPUT_TOKENS}
     decision = recover(usage=usage, budget=budget, prompt_chars=1000)
-    assert decision.cap == 11000
-    assert decision.estimated_call_tokens == 210000
-    budget.spent_tokens += 4000
+    assert decision.cap == 81000
+    assert decision.estimated_call_tokens == 280000
+    budget.spent_tokens += 20000
     assert recover(usage=usage, budget=budget).cap is None
 
 
 def test_recovery_respects_weighted_output_and_known_gateway_cap():
-    budget = SingleRunBudget(total_token_budget=50000, weights=BudgetWeights(output=3))
-    decision = recover(budget=budget, prompt_chars=2000, known_gateway_cap=12000)
-    assert decision.cap == 12000
-    assert decision.estimated_call_tokens == 38000
+    budget = SingleRunBudget(total_token_budget=500000, weights=BudgetWeights(output=3))
+    decision = recover(budget=budget, prompt_chars=2000, known_gateway_cap=120000)
+    assert decision.cap == 120000
+    assert decision.estimated_call_tokens == 362000
 
 
 def test_missing_completion_usage_uses_actual_wire_cap():

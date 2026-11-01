@@ -68,6 +68,7 @@ from services.ai.degradation import (  # noqa: F401 —— 读侧与测试按属
     DEGRADATION_LABELS,
     DEGRADE_BUDGET,
     DEGRADE_CONTEXT,
+    DEGRADE_COVERAGE,
     DEGRADE_MARKDOWN,
     DEGRADE_NONE,
     DEGRADE_PROTOCOL,
@@ -82,6 +83,7 @@ from services.ai.evidence_prefetch import (
     prefetch_evidence,
 )
 from services.ai.evidence_store import EvidenceStore
+from services.ai.round_observability import sum_optional as _sum_optional
 from services.ai.frozen_repo import provider_repo_paths
 
 # 一次调用周边的三件小事（请求参数 / 截断判据 / 这一笔账怎么算）也从引擎里搬走了:
@@ -268,7 +270,7 @@ class EngineLimits:
     # 不解除循环上界。判据与理由见 `protocol.repair_dsml_tool_calls_payload`。
     max_channel_corrections: int = 1
     temperature: float = 0.0
-    # **单次输出上限**（token）。默认 `DEFAULT_OUTPUT_TOKENS`（8192），于是请求体一定带
+    # **单次输出上限**（token）。默认 `DEFAULT_OUTPUT_TOKENS`（65,536），于是请求体一定带
     # `max_tokens`；显式传 `None` = 不传这个字段、用端点默认值（旧行为，作为逃生口保留）。
     #
     # 它管的是「一次模型调用最多能写多长」，与分析逻辑无关：封顶之后，撞不撞上限由项目
@@ -277,6 +279,7 @@ class EngineLimits:
     # 那些事）。撞上上限时的处理见 `run_analysis` 里 `finish_reason == "length"` 那一支。
     max_output_tokens: int | None = DEFAULT_OUTPUT_TOKENS
     max_output_tokens_explicit: bool = False
+    model_output_ceiling: int | None = None
     tool_limits: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_TOOL_LIMITS))
 
     @classmethod
@@ -334,6 +337,7 @@ class RoundRecord:
     # 索取的 / 取到的 / 被丢掉的，各自一条摘要（由 `trace_evidence` 编码成 JSON）。
     requests: tuple = ()
     executed: tuple = ()
+    delivered: tuple | None = None  # 实际模型输入；None=旧记录，()=确实未交付
     dropped: tuple = ()
     # 预算层给出的说明（压了几级、省了多少、哪几条取数失败）——与 `note`（引擎自己写的
     # 那些「上游拒了、改用收尾提示词」）分开记，两者的读者不是同一批：前者是模型看的，
@@ -634,21 +638,6 @@ def failed(error_message: str) -> EngineOutcome:
     return EngineOutcome(status=STATUS_FAILED, error_message=str(error_message or "分析失败"))
 
 
-def _sum_optional(values: Sequence[int | None]) -> int | None:
-    """把各轮的值加起来；**只要有一轮没上报，整次就是 `None`**。
-
-    不能拿「手里有的那几轮」去算：一轮报了 900/1000、另一轮没报，只把报了的加起来会得出
-    一个偏高的命中率 —— 而那个数字看起来完全正常，没有人会去怀疑它。
-
-    空列表（一次模型调用都没成功）也是 `None`：没跑成与「花了 0」是两件事。
-    """
-    if not values:
-        return None
-    if any(value is None for value in values):
-        return None
-    return sum(int(value) for value in values if value is not None)
-
-
 # --------------------------------------------------------------------------
 # 编排
 # --------------------------------------------------------------------------
@@ -673,6 +662,7 @@ def run_analysis(
     body_cache: MutableMapping[Any, ContextItem] | None = None,
     single_run_budget: SingleRunBudget | None = None,
     mandatory_files: Sequence[Any] = (),
+    coverage_files: Sequence[Any] = (),
 ) -> EngineOutcome:
     """跑完一次分析。**不抛异常**：任何失败都变成 `status="failed"` 的结果。
 
@@ -695,26 +685,9 @@ def run_analysis(
     分片**的归属，界面于是写着「分片 S3 · 第 2 轮」，而实际上主代理已经在跑了。
     归属由调用方贴（见 `subagent._call_engine` 的 `report`），引擎这一层只知道「开始了」。
 
-    ## 子代理模式：`seed_messages` + `task_message` + `body_cache`
-
-    这三个参数是**唯一**为子代理开的门（编排在 `services/ai/subagent.py`），不传时本函数
-    的行为与它们不存在时**逐字节相同**（有一条回归测试钉着这件事）：
-
-    * `seed_messages` —— 已经拼好的**共享前缀**（system + 含整份变更清单的第一条 user 消息，
-      断点①②都挂好了）。传了它就**不重建** system，也不重发变更清单；
-    * `task_message` —— 第 1 轮的 user 消息**原文**（「你负责哪几个维度」）；
-    * `body_cache` —— N 个成员共享的正文缓存。**它只影响取数，不影响提示词的形状**：
-      别的成员取过的同一份内容直接给全文，不再取第二次（见 `context_tools` 第 5 条）；
-    * `mandatory_files` —— **本成员分到的必读清单**（`(仓库, 提交, 路径)` 三元组，
-      P1b）。它只被用来**每轮算一次进度**（「还有几条没取到证据」，见
-      `mandatory_progress`），既不改工具白名单、也不改取数行为；不传时那一段恒为空，
-      提示词与从前**逐字节相同**。
-
-    于是子代理的请求长成 `[system, 共享消息, 任务书, assistant, …]`：前两条在**同一批的
-    所有成员之间逐字节相同**，所以第一个成员写下的 prompt cache，后面每个成员（含汇总那
-    一次）都能命中；成员私有的差异**全部**排在共享前缀之后。这条性质是子代理模式省钱的
-    全部依据，改动这里之前先看 `subagent.build_seed_messages` 的说明与
-    `tests/test_ai_subagent_cache.py`。
+    `mandatory_files` supplies member progress; `coverage_files` additionally requires
+    delivery of each frozen input diff before accepting a complete single-agent result.
+    Catch-up never extends round, tool or run-token budgets; valid drafts survive failure.
 
     ## 提示词缓存：请求是 append-extension 的
 
@@ -745,6 +718,10 @@ def run_analysis(
     # 解析层的记账（`parse_payload(dimension_ids=…)`）、纠正提示、第一轮开场指令、
     # 以及报告末尾「未归类」那一节读的都是它 —— 四处各取一次平台出厂值，正好就是
     # 「校验按 A、提示词按 B」的来源，而那种错不会报错。
+    from services.ai.coverage_completion import CoverageCompletion
+    from services.ai.delivery_receipts import delivered_evidence
+
+    coverage = CoverageCompletion(tuple(coverage_files))
     dimension_ids = dimension_ids_of(loaded.dimensions)
 
     # 这一轮提示词里那份历史清单的指纹（给「逐条交代状态」那条规矩用）。
@@ -805,6 +782,7 @@ def run_analysis(
     # 哪几块」，而用户看到「额度用尽，还有文件没看」时第二个问题一定是「哪些」。
     refused_items: list[str] = []
     pending_items: tuple[ContextItem, ...] = prefetch.items
+    coverage_draft: AnalysisPayload | None = None
     budget_notes: list[str] = list(prefetch.notes)
     correction_hint = ""
     degradation = DEGRADE_NONE
@@ -1085,9 +1063,7 @@ def run_analysis(
             correction_hint=correction_hint,
             budget_exhausted=exhausted,
             token_budget_low=token_budget_low,
-            budget_notes=(
-                (*budget_notes, mandatory_note) if mandatory_note else tuple(budget_notes)
-            ),
+            budget_notes=tuple(n for n in (*budget_notes, mandatory_note, coverage.note()) if n),
             pending_items=tuple(pending_items),
             recap=recap_text,
             requests_remaining=tools.requests_remaining,
@@ -1144,6 +1120,9 @@ def run_analysis(
         if estimate_chars(messages) + len(user_message) > prompt_hard_budget:
             reason = "固定输入和必须保留的证据已超过提示词字符水位，请提高水位或缩小分析范围；未继续调用模型。"
             _emit(RoundRecord(round_index, "prompt_budget_exceeded", note=reason))
+            if coverage_draft is not None:
+                payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                break
             return EngineOutcome(status=STATUS_FAILED, rounds=tuple(rounds), dropped=tuple(dropped),
                                  error_message=reason, requests_used=tools.requests_seen,
                                  cache_hits=tools.cache_hits, **_totals(), **_usage_fields())
@@ -1161,6 +1140,9 @@ def run_analysis(
                     round_index, "transport_error",
                     note=f"调用模型失败（{type(exc).__name__}）：{exc}"[:400],
                 ))
+                if coverage_draft is not None:
+                    payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                    break
                 return EngineOutcome(
                     status=STATUS_FAILED,
                     rounds=tuple(rounds),
@@ -1274,6 +1256,9 @@ def run_analysis(
                     note=f"压小上下文重发时失败（{type(transport_error).__name__}: "
                          f"{transport_error}）"[:400],
                 ))
+                if coverage_draft is not None:
+                    payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                    break
                 return EngineOutcome(
                     status=STATUS_FAILED,
                     rounds=tuple(rounds),
@@ -1325,6 +1310,9 @@ def run_analysis(
                             f"（{type(final_exc).__name__}: {final_exc}）"
                         )[:400],
                     ))
+                    if coverage_draft is not None:
+                        payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                        break
                     return EngineOutcome(
                         status=STATUS_FAILED,
                         rounds=tuple(rounds),
@@ -1363,6 +1351,8 @@ def run_analysis(
             duration_ms=int((time.monotonic() - round_started) * 1000),
             text=text,
         )
+        round_extra["delivered"] = delivered_evidence(items)
+        coverage.observe(round_extra["delivered"])
         if single_run_budget is not None:
             # 单次上限的账也在这里扣（**按次**；上面那道闸是**按轮**判的，因为一轮里可能
             # 有两次调用，第二次用的是压小后的提示词）。上游没报用量时的口径、以及
@@ -1388,6 +1378,7 @@ def run_analysis(
             recovery = suggest_output_recovery(
                 usage=usage, configured_cap=limits.max_output_tokens,
                 explicit_cap=limits.max_output_tokens_explicit, recovery_attempts=output_recoveries,
+                known_model_cap=limits.model_output_ceiling,
                 budget=single_run_budget,
                 prompt_chars=estimate_chars(messages) + len(user_message) + len(TRUNCATED_OUTPUT_HINT),
             )
@@ -1395,7 +1386,7 @@ def run_analysis(
                 output_recoveries += 1
                 output_recovery_active = True
                 limits = replace(limits, max_output_tokens=recovery.cap)
-                round_notes.append(f"默认输出预算恢复一次：{recovery.cap} tokens（仍受运行预算约束）")
+                round_notes.append(f"下一次调用临时恢复输出预算至 {recovery.cap} tokens（仍受运行预算约束）")
             correction_hint = TRUNCATED_OUTPUT_HINT
             salvaged_report = salvage_report_markdown(text)
             if salvaged_report is not None:
@@ -1631,25 +1622,29 @@ def run_analysis(
         correction_hint = ""
         checkpoint = parsed.checkpoint or checkpoint
         if parsed.is_final:
-            # **历史清单没有逐条交代时，当场要一次。**
-            #
-            # 「模型不填这个字段」这个判断是**错的**（2026-09-25 晚订正）：当时拿的是
-            # run 75 / 76 的 `baseline_updates` 是 `[]`，而那个 `[]` 由平台自己造 ——
-            # `ground_payload` 漏带了 `baseline_closures`，写好的也被扔掉。反证在下面
-            # 这一支本身：清单里 5 / 6 条一条状态都没有时它会补问，而 run 77 / 78
-            # **一次都没补问**，只可能是收下了。
-            #
-            # 那这一支还要不要？要 —— 理由不依赖上面那个误判：这条规矩必须**平台说了算**，
-            # 而不是「模型多半会写」。`dimensions` 一次没漏过，正因为它必填、缺了会被打回。
-            #
-            # 与上面三种纠正不同的是：这一份结论**解析成功、照收不误**（缺状态不毁结论）。
-            # 所以只在「还有重问额度」且「还有下一轮」时才花这一次 —— 最后一轮要求它重发是
-            # 白花（那句话永远发不出去），那份额度本该留给别处。
-            # **这一轮的结局是 `final`，不是 `unparsable`**：那份 JSON 解析成功了，模型
-            # 确实给出了一份结论 —— 只是清单没交代完，平台把它退回去补一块。写成
-            # `unparsable` 会让运行轨迹里出现「输出无法解析」（`budget._ROUND_STATUS_LABELS`）
-            # 与 `parsed_ok=False`，而那两句都是假的。它被退回去这件事由 `correction_reason`
-            # 与 `correction_hint` 记着，不必借一个不成立的状态值来说。
+            if coverage.missing_count:
+                coverage_draft = parsed
+                # Catch-up shares the configured tool, round and token ceilings.
+                room = max(1, limits.prompt_char_budget // max(1, tools._limit_for("file_diff")))
+                catchup = coverage.next_requests(min(tools.requests_remaining, room)) if round_index < limits.max_rounds and not token_budget_low else ()
+                if catchup:
+                    requests, rejected = sanitize_requests(catchup, scope, repo_paths=repo_paths)
+                    batch = diagnostics.tool_fetch(tools.execute, requests)
+                    dropped.extend(rejected)
+                    dropped.extend(batch.dropped)
+                    refused_items.extend(batch.refused_items)
+                    pending_items = batch.items
+                    seen_items.extend(batch.items)
+                    budget_notes = _batch_notes(batch)
+                    correction_hint = coverage.note() + "平台已补取缺失差异。请结合新增证据修订本轮结论，保留已有独立风险。"
+                    _emit(RoundRecord(round_index, "requests", item_count=len(items),
+                                      requests=tuple(requests), executed=tuple(batch.items),
+                                      correction_hint=correction_hint,
+                                      note=_combine_notes(round_notes, "模型提前收口，按冻结输入补齐差异取证"),
+                                      **round_extra))
+                    round_memos.append(TurnMemo(index=round_index, status="requests", items=tuple(items)))
+                    continue
+            # Historical status corrections retain a valid draft.
             missing_statuses = missing_baseline_statuses(parsed)
             if (
                 missing_statuses
@@ -1776,6 +1771,11 @@ def run_analysis(
     # `looks_like_markdown_report`（最后一轮也不例外），像报告的在循环里就留下了。
     # 曾经在这里又写了一遍，是一段永远走不到的死代码 —— 它让「降级路径」看起来有两条，
     # 读代码的人会以为少了一条覆盖。
+    if payload is None and coverage_draft is not None:
+        payload = coverage_draft
+    if coverage.missing_count and degradation == DEGRADE_NONE:
+        degradation = DEGRADE_COVERAGE
+
     if payload is None and not markdown_fallback:
         # 既没拿到 final，也没有可用的 markdown。
         if degradation == DEGRADE_NONE:
@@ -1793,7 +1793,7 @@ def run_analysis(
             wrap_started = time.monotonic()
             entry = _mark_current(build_wrap_up_entry(), movable_breakpoint)
             wrap_prompt_chars = estimate_chars(messages) + len(entry["content"])
-            wrap_extra: dict[str, Any] = {}
+            wrap_extra: dict[str, Any] = {"delivered": ()}
             try:
                 result = diagnostics.model_call(
                     [*messages, entry], client.complete, complete_kwargs(limits)
@@ -1824,6 +1824,7 @@ def run_analysis(
                     duration_ms=int((time.monotonic() - wrap_started) * 1000),
                     text=text,
                 )
+                wrap_extra["delivered"] = ()
                 try:
                     wrap_payload = parse_payload(
                         text,
@@ -1909,7 +1910,7 @@ def run_analysis(
     dropped.extend(grounded.dropped)
     dropped.extend(normalized.dropped)
 
-    if tools.requests_remaining <= 0 and degradation == DEGRADE_NONE:
+    if tools.requests_remaining <= 0 and degradation == DEGRADE_NONE and (not coverage.entries or coverage.missing_count):
         degradation = DEGRADE_REQUESTS
 
     report_markdown = grounded.report_markdown

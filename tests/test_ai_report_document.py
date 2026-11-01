@@ -529,7 +529,7 @@ def test_the_input_scope_rows_sit_between_the_scope_and_the_coverage_rows():
         return next(index for index, line in enumerate(lines) if line.startswith(prefix))
 
     assert at("| 分析范围 |") < at("| 分析范围口径 |") < at("| 纳入仓库 |")
-    assert at("| 纳入仓库 |") < at("| 本次覆盖 |") < at("| 模式裁决 |")
+    assert at("| 纳入仓库 |") < at("| 模式裁决 |") < at("- 本次覆盖：")
     assert at("| 模式裁决 |") < at("| 触发方式 |") < at("| 分析焦点 |")
 
 

@@ -234,7 +234,7 @@ def render_window(
             if kind == "file_diff"
             else truncate_text(text, limit)
         )
-        meta = {"segments": 1, "split": split_note}
+        meta = {"segments": 1, "split": split_note, "complete_segments": [] if truncated else [1]}
         if truncated:
             meta["truncated"] = True
         return body, meta
@@ -271,6 +271,15 @@ def render_window(
         body, also_clipped = truncate_text(body, room)
         clipped = clipped or also_clipped
         head = head_cut
+    # Count only complete pieces present verbatim in the FINAL delivered body.
+    # Header growth may remove several small segments, not just the last one.
+    complete_segments, cursor = [], 0
+    for index in chosen:
+        piece = segments[index].rstrip("\n")
+        if not body.startswith(piece, cursor):
+            break
+        complete_segments.append(index + 1)
+        cursor += len(piece) + 1
     shown = _shown_text(chosen)
     # 什么时候算「被截断」：**平台自己收掉了内容**。模型点名要第 3-4 段、我们如实给了
     # 3-4 段，那不叫截断（否则消耗面板上会出现一堆「截断」，而真相是模型按段读的）；
@@ -279,6 +288,7 @@ def render_window(
     meta = {
         "segments": total,
         "shown": shown,
+        "complete_segments": complete_segments,
         "truncated": bool(clipped or asked_more or (span is None and len(chosen) < total)),
     }
     if preamble:

@@ -20,6 +20,7 @@
     // 降级原因 → 一句「这意味着什么」。键与服务端 engine.DEGRADATION_LABELS 一一对应，
     // 但这里说的不是「发生了什么」（那句由服务端给），而是**用户该据此怎么读这份报告**。
     var MEANING = {
+        evidence_coverage_gap: '部分输入差异未完整交付模型，现有结论已保留；未覆盖部分不能视为无风险。',
         rounds_exhausted: '模型没有在轮次用尽前收口，结论基于它当时手上的证据。',
         requests_exhausted: '上下文索取额度用完了，还有文件没看。',
         markdown_report: '模型没有按协议输出 JSON，平台把它的正文原样保留了下来。',
@@ -194,33 +195,16 @@
      * 处理方式完全相反（见本模块开头的 docstring）。覆盖段同理：少了它，「范围：全量」
      * 这一个词会被读成「整个版本都看过了」。
      *
-     * ## 顺序：覆盖段在前、正文在中、告警在后（2026-11-01 修）
-     *
-     * 覆盖段回答的是「这份报告看了多少」，而正文里**每一条结论**都建立在这个前提上 ——
-     * 它必须在正文**之前**读，与导出那份 `.md` 一致（导出把「分析范围 / 覆盖」放在元信息
-     * 表、正文之前）。**这里原先的注释已经这么写，实现却是把覆盖段拼在正文后面**
-     * （自相矛盾，2026-11-01 一并修掉）：真机上一份 4000 字的报告，读者要读完才看到
-     * 「版本 996 → 输入 120 → 取证 60」，第一眼只剩元信息里「范围：全量」一个词。
-     *
-     * 降级/压缩那几行仍然**紧跟正文之后**：它们说的是「这份结论该不该当真」，是读完之后
-     * 紧接着要判断的那一句；而覆盖段是读之前的**前提**。两者性质不同，不一起前置。
-     *
-     * 拼接用**空行**：报告渲染器把段落内的单换行当软换行接起来，单换行会让「覆盖段的
-     * 最后一句」与「正文第一行」粘成一段。
-     *
-     * 所以口径改成：**提示是「这一次运行」的属性，不是某一条传输通道的属性** ——
-     * 凡是把一份报告正文画到屏幕上的地方，都从这里取「提示 + 正文」的合体。
-     * 服务端导出的那份 `.md` 早已自带（`services/ai/report_document.py`），这里补的是屏幕。
+     * 业务结论优先，覆盖明细放末尾；实际降级告警保持独立可见。
      */
     function withContextNotice(responseText, payload) {
         var body = str(responseText);
-        // 覆盖段（读之前的前提）→ 正文 → 告警（读完之后紧接着要判断的那句）。
-        var before = [coverageNotice(payload)].filter(function (one) { return one; });
         var notice = contextNotice(payload);
-        // 独立章节让阅读器保持降级告警展开，避免落入最后一章的折叠正文。
         var after = notice ? ['## 运行提示（平台）\n\n' + notice] : [];
-        if (!before.length && !after.length) { return body; }
-        return before.concat(body ? [body] : [], after).join('\n\n');
+        var coverage = coverageNotice(payload);
+        if (coverage) after.push(coverage);
+        if (!after.length) return body;
+        return (body ? [body] : []).concat(after).join('\n\n');
     }
 
     global.AiContextNotice = {

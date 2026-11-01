@@ -12,8 +12,8 @@ from typing import Any, Mapping
 
 from services.ai.pricing import equivalent_tokens
 
-DEFAULT_OUTPUT_TOKENS = 8192
-RECOVERY_OUTPUT_TOKENS = 16384
+DEFAULT_OUTPUT_TOKENS = 65536
+RECOVERY_OUTPUT_TOKENS = 131072
 MAX_OUTPUT_RECOVERIES = 1
 
 
@@ -38,6 +38,7 @@ def suggest_output_recovery(
     budget: Any = None,
     prompt_chars: int = 0,
     known_gateway_cap: int | None = None,
+    known_model_cap: int | None = None,
     cap_supported: bool = True,
     finalizing: bool = False,
 ) -> OutputRecoveryDecision:
@@ -62,7 +63,7 @@ def suggest_output_recovery(
     current = int(current)
     cap = RECOVERY_OUTPUT_TOKENS
     gateway_limits = [int(value) for value in
-                      (known_gateway_cap, usage.get("gateway_max_tokens"))
+                      (known_model_cap, known_gateway_cap, usage.get("gateway_max_tokens"))
                       if value is not None and int(value) > 0]
     if gateway_limits:
         cap = min(cap, *gateway_limits)
@@ -84,3 +85,39 @@ def suggest_output_recovery(
     estimated = equivalent_tokens(input_tokens=prompt, output_tokens=cap, weights=weights)
     return OutputRecoveryDecision(cap=cap, reason="length_stop_default_cap_recovery",
                                   estimated_call_tokens=estimated)
+
+
+def cap_for_model_window(configured_cap, declared_window):
+    """Keep the declared input/output window usable; unknown windows do not invent a limit."""
+    from services.ai.budget import COMPACT_AT_RATIO, resolve_context_window
+
+    window, assumed = resolve_context_window(declared_window)
+    if configured_cap is None or assumed:
+        return configured_cap, ""
+    available = max(1, int(window * (1 - COMPACT_AT_RATIO)))
+    effective = min(int(configured_cap), available)
+    note = (f"单次输出上限按端点声明的 {window:,} token 窗口从 {configured_cap:,} "
+            f"调整至 {effective:,} tokens，为提示词保留空间。") if effective < configured_cap else ""
+    return effective, note
+
+
+def model_output_ceiling(declared_window):
+    from services.ai.budget import COMPACT_AT_RATIO, resolve_context_window
+
+    window, assumed = resolve_context_window(declared_window)
+    return None if assumed else max(1, int(window * (1 - COMPACT_AT_RATIO)))
+
+
+def respect_frozen_default(limits, plan):
+    """Queued old plans retain their measured cap/reserves; new jobs use the new default."""
+    from dataclasses import replace
+
+    from services.ai.auto_sizing import PLAN_VERSION
+
+    frozen = int(plan.thresholds.get("output_tokens") or 0)
+    if plan.plan_version == PLAN_VERSION or limits.max_output_tokens_explicit or not frozen:
+        return limits
+    if limits.max_output_tokens is None:
+        return limits
+    return replace(limits, max_output_tokens=min(limits.max_output_tokens, frozen),
+                   max_output_tokens_explicit=True)
