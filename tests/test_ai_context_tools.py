@@ -208,7 +208,7 @@ def test_the_repeat_pointer_counts_toward_the_prompt_budget():
     assert counters["produced_chars"] == len(first.text) + len(second.text)
     # `source_chars` 的口径**没有变**：命中缓存时那些字符是上一轮取过的，仍然算这个
     # 类型的产出（见 execute 里那段注释），所以它是两份原文长度之和。
-    assert counters["source_chars"] == 2 * len(first.text)
+    assert counters["source_chars"] == 2 * len("差异" * 4000)
     assert counters["cache_hits"] == 1 and counters["executions"] == 1
     # 真正交给模型的字符数里，第二份只有指针那么长。
     assert len(second.text) < len(first.text) / 10
@@ -578,24 +578,21 @@ def test_a_zero_budget_refuses_everything():
 # ==========================================================================
 
 
-def test_a_long_diff_is_truncated_but_keeps_its_tail():
-    """结构化 diff **保留首尾**。
-
-    只砍尾巴会让排在后面的整张表完全不可见，而「配表 A 改了、配表 B 也要跟着改」正是
-    这个平台最关心的风险。保留尾巴之后，至少每张被改动的表都露过面。
-    """
+def test_a_long_diff_is_paged_and_its_tail_remains_addressable():
     content = "开头-" + "中" * 20_000 + "-结尾"
-    batch = ContextTools(FakeProvider(file_diff=content), limits={"file_diff": 2_000}).execute(
-        [_diff_request()]
-    )
+    tools = ContextTools(FakeProvider(file_diff=content), limits={"file_diff": 6_000})
+    batch = tools.execute([_diff_request()])
     item = batch.items[0]
-
     assert item.meta["truncated"] is True
     assert item.meta["original_chars"] == len(content)
-    assert item.text.startswith("开头-")
-    assert item.text.endswith("-结尾")
-    assert "中间省略" in item.text
+    assert "开头-" in item.text
+    assert "中间省略" not in item.text
     assert batch.truncated == 1
+    total = item.meta["segments"]
+    tail = tools.execute([ContextRequest(type="file_diff", commit=COMMIT_A, path=PATH_A,
+                                        lines=str(total))]).items[0]
+    assert tail.text.endswith("-结尾")
+    assert tail.meta["complete_segments"] == [total]
 
 
 def test_a_long_plain_text_keeps_the_head_only():
@@ -631,7 +628,7 @@ def test_each_type_has_its_own_limit():
     )
 
     assert batch.items[0].meta.get("truncated") is True
-    assert "truncated" not in batch.items[1].meta
+    assert batch.items[1].meta.get("truncated", False) is False
 
 
 # ==========================================================================

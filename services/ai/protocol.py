@@ -41,6 +41,9 @@
 
 from __future__ import annotations
 
+from services.ai.context_request_protocol import coerce_requests as _coerce_requests
+from services.ai.context_request_protocol import normalize_line_window as _normalize_line_window
+
 import json
 import re
 from dataclasses import dataclass, field, replace
@@ -170,6 +173,7 @@ class ContextRequest:
     # **它不进 `describe()` 的标签**（那份标签是被逐字断言的地址格式，见 `context_tools`
     # 的模块说明），但要进缓存键 —— 它决定返回的是哪个仓库的正文。
     repository_id: str = ""
+    cursor: str = ""
 
     def describe(self) -> str:
         if self.lines:
@@ -313,6 +317,7 @@ class AnalysisPayload:
     report_markdown: str = ""
     report_items: tuple[dict, ...] = ()
     report_sections: dict | None = None
+    evidence_needs: tuple[dict, ...] = ()
     checkpoint: dict | None = None
     anomalies: tuple[Anomaly, ...] = ()
     dimensions: tuple[DimensionReview, ...] = ()
@@ -372,30 +377,6 @@ def parse_json_candidates(text: str) -> list[Any]:
     return parsed
 
 
-def _coerce_requests(value: Any) -> tuple[ContextRequest, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list):
-        raise ProtocolError("requests 必须是数组")
-    requests: list[ContextRequest] = []
-    for entry in value:
-        if not isinstance(entry, dict):
-            continue
-        requests.append(
-            ContextRequest(
-                type=_as_str(entry.get("type")),
-                commit=_as_str(entry.get("commit")),
-                path=_as_str(entry.get("path")),
-                name=_as_str(entry.get("name")),
-                lines=_as_str(entry.get("lines")),
-                # `find_references` 的搜索词。**漏掉这一个字段的后果不是「差一点」**：
-                # `sanitize_requests` 会按「搜索词太短（至少 3 个字）」把每一条
-                # `find_references` 都丢掉，于是这个工具端到端**从来没有执行过**，
-                # 而丢掉的理由还把责任推给了模型（它明明按 SKILL.md 写了 query）。
-                query=_as_str(entry.get("query")),
-            )
-        )
-    return tuple(requests)
 
 
 def _coerce_anomalies(
@@ -782,7 +763,13 @@ def parse_payload(
             + dropped_coverage
         )
 
+    evidence_needs = ()
     if status == STATUS_FINAL:
+        from services.ai.evidence_followup import parse_needs
+        try:
+            evidence_needs = parse_needs(raw.get("evidence_needs"))
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from exc
         from services.ai.review_delivery import parse_review_delivery
         try:
             verdicts = parse_review_delivery(raw.get("verdicts"))
@@ -801,6 +788,7 @@ def parse_payload(
         report_markdown=report_markdown,
         report_items=report_items,
         report_sections=report_sections,
+        evidence_needs=evidence_needs,
         checkpoint=checkpoint,
         anomalies=anomalies,
         dimensions=dimensions,
@@ -996,6 +984,8 @@ def sanitize_requests(
                     request.name,
                     request.query,
                     request.repository_id,
+                    request.lines,
+                    request.cursor,
                 )
                 if _has_control_chars(value)
             ),
@@ -1054,6 +1044,20 @@ def sanitize_requests(
             allowed.append(ContextRequest(type=request_type, name=evidence_id))
             continue
 
+        if "!" in str(request.lines):
+            try:
+                if request_type != "file_content":
+                    raise ValueError("Excel 矩形坐标只用于 file_content")
+                from services.ai.excel_source import _is_openpyxl_workbook
+                if not _is_openpyxl_workbook(request.path):
+                    raise ValueError("矩形坐标只用于工作簿路径")
+                _normalize_line_window(request.lines)
+            except ValueError as exc:
+                dropped.append(DroppedItem("request", index, str(exc), request.path))
+                continue
+        if len(request.cursor) > 8192:
+            dropped.append(DroppedItem("request", index, "检索游标过长", "cursor"))
+            continue
         if request_type == "find_references":
             # 这个工具**不带 commit**：它搜的是整个批次改动的文件（每份用各自最后那次
             # 提交的内容），所以它没有「某一条提交」可以校验，取而代之的是两件事 ——
@@ -1103,12 +1107,12 @@ def sanitize_requests(
                     )
                 )
                 continue
-            key = (request_type, "", prefix, query)
+            key = (request_type, "", prefix, query, request.cursor)
             if key in seen:
                 continue
             seen.add(key)
             allowed.append(
-                ContextRequest(type=request_type, path=prefix, query=query)
+                ContextRequest(type=request_type, path=prefix, query=query, cursor=request.cursor)
             )
             continue
 
@@ -1279,22 +1283,6 @@ def _repository_gate(scope, commit: str, path: str, raw_repository_id: str) -> s
 _LINE_WINDOW_RE = re.compile(r"(\d{1,7})\s*(?:[-~—到]\s*(\d{1,7}))?")
 
 
-def _normalize_line_window(value) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    match = _LINE_WINDOW_RE.fullmatch(text)
-    if match is None:
-        return ""
-    start = int(match.group(1))
-    if start < 1:
-        return ""
-    if match.group(2):
-        end = int(match.group(2))
-        if end < start:
-            return ""
-        return f"{start}-{end}"
-    return str(start)
 
 
 # --------------------------------------------------------------------------

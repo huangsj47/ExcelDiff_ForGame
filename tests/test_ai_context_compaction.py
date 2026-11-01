@@ -469,7 +469,7 @@ def test_a_shrink_that_cannot_reduce_anything_is_not_sent():
         *([_requests(_ROTATION[i]) for i in range(2)] + [_final(_anomaly())]), reject_at=(3,)
     )
 
-    outcome = _run_big(client)
+    outcome = _run_big(client, limits=EngineLimits(prompt_char_budget=30_000, max_rounds=6))
 
     assert len(client.calls) == 4, "第 3 次被拒 → 第 4 次应当是丢历史，而不是原样重发"
     third, fourth = client.calls[2], client.calls[3]

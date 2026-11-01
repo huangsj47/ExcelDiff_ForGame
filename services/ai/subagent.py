@@ -47,6 +47,7 @@ from typing import Any, Callable, Mapping, MutableMapping, Sequence
 
 from services.ai.auto_sizing import FamilySizing, conservative_member_tokens
 from services.ai.budget import ContextItem, truncate_text
+from services.ai.degradation import DEGRADE_COVERAGE
 from services.ai.engine import (
     DEGRADATION_LABELS,
     DEGRADE_CONTEXT,
@@ -1201,6 +1202,8 @@ def _call_engine(
     # 提示词与从前逐字相同。
     if member.assigned_files:
         optional_kwargs["mandatory_files"] = tuple(member.assigned_files)
+        if member.role == ROLE_SUBAGENT:
+            optional_kwargs["coverage_files"] = tuple(member.assigned_files)
     return run_analysis_fn(
         client=client,
         provider=provider,
@@ -1235,6 +1238,8 @@ _DEGRADE_RANK: Mapping[str, int] = {
     DEGRADE_MARKDOWN: 3,
     DEGRADE_PROTOCOL: 3,
     DEGRADE_CONTEXT: 4,
+    DEGRADE_COVERAGE: 4,
+    "evidence_needs_unresolved": 4,
     # 对账轮没跑成排在「缺一个分片」**之前**：缺分片是「有一块维度没人看过」，
     # 而对账轮是可选的一道复核 —— 结论仍然完整，只是少了「找反证」这一步。
     DEGRADE_VERIFY: 5,
@@ -1423,7 +1428,7 @@ def aggregate_outcomes(
     任一成员没上报就是 `None`（**不是 0**）：一轮报了 900/1000、另一个没报，只把报了的那几
     个加起来会得出一个偏高、且看起来完全正常的命中率。
     """
-    from services.ai.report_family import apply_business_rulings, reconcile_business_reports
+    from services.ai.report_family import apply_business_rulings, family_evidence_followup, reconcile_business_reports
     synthesis = reconcile_business_reports(synthesis, steps)
     report_source = synthesis.report_markdown or ""
     report = report_source
@@ -1559,6 +1564,7 @@ def aggregate_outcomes(
         payload=synthesis.payload,
         report_items=synthesis.report_items,
         report_sections=synthesis.report_sections,
+        evidence_followup=family_evidence_followup(synthesis, steps),
         # **只有 `final_findings` 里的那些进这里**：被复核撤销的条目不在其中，于是
         # 异常表、下一轮基线（读的是异常表的行）、以及面板上那份活动清单都不会再把它
         # 当成「仍然成立的问题」。**这是这条链路上唯一的取舍点** —— 落库、读侧、导出

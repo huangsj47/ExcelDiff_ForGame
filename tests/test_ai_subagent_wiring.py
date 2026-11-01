@@ -58,7 +58,11 @@ def _force_shard_count(monkeypatch, count: int) -> None:
     """
     import services.ai.analysis_plan as analysis_plan
     import services.ai.auto_sizing as auto_sizing
+    from tests.test_ai_analysis_service import _patch_readable_provider
 
+    # Synthetic repositories still need real delivered diff bodies for every
+    # assigned analysis shard. Keep the coverage gate enabled in this wiring test.
+    _patch_readable_provider(monkeypatch)
     monkeypatch.setattr(auto_sizing, "SMALL_BATCH_MAX_FILES", 0)
     monkeypatch.setattr(auto_sizing, "SMALL_BATCH_MAX_TOTAL_CHARS", 0)
     monkeypatch.setattr(auto_sizing, "SMALL_BATCH_MAX_FILE_CHARS", 0)
@@ -121,8 +125,9 @@ def test_the_family_runs_and_persists_as_one_run(monkeypatch):
 
         assert outcome["status"] == "succeeded", outcome
 
-        # 假 client 每次都答 final → 2 个成员 + 1 次汇总 = 3 次模型调用。
-        assert len(client.calls) == 3, (
+        # The assigned shard first answers final without reading its diff. The
+        # platform fetches that assigned evidence, then requires a new final.
+        assert len(client.calls) == 4, (
             f"分片没有真的跑起来（只调了 {len(client.calls)} 次模型）"
         )
         # 每个成员的第 1 轮请求前两条消息必须完全相同（省钱的依据）。
@@ -145,11 +150,16 @@ def test_the_family_runs_and_persists_as_one_run(monkeypatch):
             .order_by(AiAnalysisTrace.round_index.asc())
             .all()
         )
-        assert [row.agent for row in traces] == ["S1", "S2", "汇总"]
-        assert [row.round_index for row in traces] == [1, 2, 3]
+        assert [row.agent for row in traces] == ["S1", "S1", "S2", "汇总"]
+        assert [row.round_index for row in traces] == [1, 2, 3, 4]
 
         payload = json.loads(run.response_payload)
         assert [item["label"] for item in payload["subagents"]] == ["S1", "S2", "汇总"]
+        assert payload["degradation"] != "evidence_coverage_gap"
+        assert payload["subagents"][0]["status"] == "succeeded"
+        assert payload["subagents"][0]["rounds"] == 2
+        assert payload["subagents"][0]["requests"] == 1
+        assert "diff of " in json.dumps(client.calls[1], ensure_ascii=False)
 
 
 def test_the_same_batch_stays_a_single_agent_when_the_flag_is_off(monkeypatch):
@@ -255,8 +265,9 @@ def test_a_frozen_dirty_count_no_longer_changes_the_weekly_run(monkeypatch, froz
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
 
         assert outcome["status"] == "succeeded", outcome
-        # 计划里的 2 片 + 汇总 = 3 次模型调用 —— 脏列没有把分片压没。
-        assert len(client.calls) == 3, (
+        # Two shards, one assigned-diff followup, and synthesis. The stale
+        # database count must neither remove a shard nor skip its coverage gate.
+        assert len(client.calls) == 4, (
             f"冻结的脏 subagent_count={frozen} 仍然在起作用（只调了 {len(client.calls)} 次）"
         )
         run = (
@@ -278,7 +289,7 @@ def test_the_verify_round_runs_and_lands_on_the_same_run(monkeypatch):
     """开了对账轮：多跑**一次**模型调用（标签 V1），报告里多出「对账结果」那一节。
 
     这里量的是接线：配置项从库里读出来、传进 `plan_family`、编排跑完、再落进同一条运行
-    （`uq_ai_trace_run_round` 靠家族内全局递增的 `round_index` 撑住 —— 对账轮是第 4 轮）。
+    （`uq_ai_trace_run_round` 靠家族内全局递增的 `round_index` 撑住，包含分片补证轮）。
     """
     client = _FakeClient()
     with flask_app.app_context():
@@ -292,8 +303,8 @@ def test_the_verify_round_runs_and_lands_on_the_same_run(monkeypatch):
         outcome = ai_service.run_weekly_analysis_background(cfg.id)
 
         assert outcome["status"] == "succeeded", outcome
-        # 2 个分片 + 1 次汇总 + 1 次对账
-        assert len(client.calls) == 4, f"对账轮没有跑起来（只调了 {len(client.calls)} 次）"
+        # Two shards, one assigned-diff followup, synthesis and verification.
+        assert len(client.calls) == 5, f"对账轮没有跑起来（只调了 {len(client.calls)} 次）"
         # 对账轮同样吃共享前缀（省钱的机制对它一样成立）。
         shared = {json.dumps(call[:2], ensure_ascii=False) for call in client.calls}
         assert len(shared) == 1, "对账轮没有用共享前缀 —— 缓存会 miss"
@@ -310,8 +321,8 @@ def test_the_verify_round_runs_and_lands_on_the_same_run(monkeypatch):
             .order_by(AiAnalysisTrace.round_index.asc())
             .all()
         )
-        assert [row.agent for row in traces] == ["S1", "S2", "汇总", "V1"]
-        assert [row.round_index for row in traces] == [1, 2, 3, 4]
+        assert [row.agent for row in traces] == ["S1", "S1", "S2", "汇总", "V1"]
+        assert [row.round_index for row in traces] == [1, 2, 3, 4, 5]
         # 「对账轮落在**同一条** run 上」是这一条要保的不变量（`uq_ai_trace_run_round` 靠
         # 家族内全局递增的 `round_index` 撑住）—— 上面那个查询按 `run_id=run.id` 过滤，
         # 这里把它写成明文断言：对账轮不许另起一条运行。

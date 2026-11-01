@@ -33,7 +33,7 @@ def test_long_fact_is_shortened_only_in_navigation_and_never_lost_from_detail():
     report = parse(structured(report_items=[report_item(title="人数上限由4增至8", change_fact=fact)])).report_markdown
     heading = next(line for line in report.splitlines() if line.startswith("## R1"))
     assert len(heading) < 110
-    assert "变化：" + fact in report
+    assert "变化（待核实描述）：" + fact in report
 
 
 def test_legacy_title_fallback_does_not_cut_the_key_value_at_the_end():

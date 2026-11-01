@@ -57,6 +57,9 @@ def _is_openpyxl_workbook(path: str) -> bool:
 def parse_sheet_window(window: str) -> Optional[tuple]:
     """`lines` 在**配表**上表示「第几张工作表」（1 起算的闭区间）。认不出来返回 `None`。
 
+    精确物理坐标（例如 `Sheet1!A262:H262`）由 `_read_excel_sheets` 提前分流，
+    不经过工作表预览与前若干行限制；超长矩形用 `@字符偏移` 继续读取。
+
     ## 为什么配表按「张」而不是按「行」
 
     文本 / 代码的 `lines` 是行号，因为行号是模型在代码里定位的坐标（`@@ -1180,7` 与正文
@@ -139,9 +142,8 @@ def _read_excel_sheets(
     修法在 `file_content`：配表那条路**两端都按扣掉那一行之后的额度**渲染
     （见 `_AGENT_EXCEL_NOTE`）—— 两端正文逐字节相同，补上出处之后仍不超上限。
 
-    单张工作表自身超额度时仍会落到下面那句 `truncate_text`（只砍尾巴，重问同一张表
-    得到逐字节相同的结果）——那一段是**真的拿不回来**，所以 `engine._truncation_note`
-    必须把这件事说给模型听（但只能说「表内被砍掉的行」，不能说成整类配表）。
+    单张工作表的默认预览超额度时会截断。需要未展示的行列时，改用精确物理坐标
+    `Sheet1!A262:H262`；其正文可按回执的 `@字符偏移` 续读，不再重复同一张表的预览。
 
     ## 参数
 
@@ -170,6 +172,11 @@ def _read_excel_sheets(
     取法与原函数一样只动**坐标**，不改编排：`header_rows` 的那几行既不进统计、也不进
     正文，只在工作表抬头里如实写一句「表头共 N 行不计入」，免得模型以为这几行凭空消失。
     """
+    if "!" in str(window or ""):
+        from services.ai.excel_range import render_range
+
+        return render_range(raw, window, path=path, char_budget=char_budget,
+                            header_rows=header_rows, header_name_row=header_name_row)
     try:
         from openpyxl import load_workbook
     except ImportError:  # pragma: no cover —— openpyxl 是平台的既有依赖

@@ -27,8 +27,19 @@ def business_candidates_prompt(steps: Sequence) -> tuple[dict, ...]:
     for row in business_candidate_rows(steps):
         original = row["report_item"]
         item = {key: value for key, value in original.items() if key in ITEM_KEYS}
-        item["evidence_refs"] = [{key: value for key, value in ref.items() if key in REFERENCE_KEYS}
-                                 for ref in original.get("evidence_refs", ())]
+        def refs(values):
+            return [{key: value for key, value in ref.items() if key in REFERENCE_KEYS} for ref in values]
+
+        item["evidence_refs"] = refs(original.get("evidence_refs", ()))
+        item["impact_refs"] = refs(original.get("impact_refs", ()))
+        actions = []
+        for action in original.get("test_actions", ()):
+            clean = {key: value for key, value in action.items() if key in (
+                "conditions", "steps", "expected", "expected_status")}
+            clean["expected"] = action.get("model_expected", action.get("expected", ""))
+            clean["expected_refs"] = refs(action.get("expected_refs", ()))
+            actions.append(clean)
+        item["test_actions"] = actions
         result.append({**row, "report_item": item,
                        "platform_evidence_gaps": original.get("evidence_gaps", [])})
     return tuple(result)
@@ -42,6 +53,24 @@ def _union(left: Sequence, right: Sequence) -> list:
             result.append(value)
             seen.add(key)
     return result
+
+
+def family_evidence_followup(synthesis, steps: Sequence) -> tuple[dict, ...]:
+    """Member-local need IDs must never overwrite another member's open questions."""
+    from services.ai.family_ledger import ROLE_SYNTHESIS, SYNTHESIS_LABEL
+
+    sources = [(step.plan.label, step.outcome) for step in steps
+               if step.plan.role != ROLE_SYNTHESIS and step.outcome is not None]
+    synthesis_label = next((step.plan.label for step in steps if step.plan.role == ROLE_SYNTHESIS),
+                           SYNTHESIS_LABEL)
+    sources.append((synthesis_label, synthesis))
+    result = []
+    for member, outcome in sources:
+        for row in outcome.evidence_followup:
+            identifier = row.get("original_need_id") or row.get("need_id", "")
+            result.append(dict(row, need_id=f"{member}:{identifier}",
+                               original_need_id=identifier, member=member))
+    return tuple(result)
 
 
 def reconcile_business_reports(synthesis, steps: Sequence):
@@ -85,6 +114,17 @@ def reconcile_business_reports(synthesis, steps: Sequence):
         else:
             current["test_actions"] = _union(current.get("test_actions", ()), original.get("test_actions", ()))
             current["evidence_refs"] = _union(current.get("evidence_refs", ()), original.get("evidence_refs", ()))
+            for key in ("evidence_gaps", "evidence_notes"):
+                current[key] = _union(current.get(key, ()), original.get(key, ()))
+            current["impact_conditions"] = _union(current.get("impact_conditions", ()), original.get("impact_conditions", ()))
+            current["impact_refs"] = _union(current.get("impact_refs", ()), original.get("impact_refs", ()))
+            if "conditional" in (current.get("impact_basis", "conditional"), original.get("impact_basis", "conditional")):
+                current["impact_basis"] = "conditional"
+            # A merge/adoption reason does not establish a business requirement.
+            # Keep the question until there is a structured, evidence-backed resolution.
+            if original.get("decision_question"):
+                current["decision_question"] = "；".join(dict.fromkeys(
+                    question for question in (current.get("decision_question"), original["decision_question"]) if question))
             if (REPORT_SEVERITIES.index(original["severity"]) < REPORT_SEVERITIES.index(current["severity"])
                     and not (disposition and disposition.reason.strip())):
                 current["severity"] = original["severity"]

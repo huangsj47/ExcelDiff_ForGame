@@ -354,8 +354,8 @@ def test_an_index_page_limit_reports_insufficient_coverage_not_no_references(
 
     assert "还没索引" in text, text
     assert "**覆盖不足**" in text
-    assert "下一页起点" in text and "scripts/" in text, (
-        "分页必须给出**可以照抄**的下一页范围，否则「还有没索引的」是句没法行动的话"
+    assert 'next_cursor="' in text and 'next_cursor=""' not in text and '"cursor":' in text, (
+        "分页必须给出真正可续取的游标，目录前缀无法推进同目录240文件后的尾页"
     )
 
 

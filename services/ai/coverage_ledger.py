@@ -596,6 +596,10 @@ def build_ledger(
             "ratio": _ratio(len(complete.done), len(complete.entries)),
         }
     ledger["findings"] = _findings_account(response_payload)
+    context = _as_mapping(_as_mapping(response_payload).get("context"))
+    followup = context.get("evidence_followup")
+    if isinstance(followup, (list, tuple)):
+        ledger["evidence_followup"] = [dict(row) for row in followup if isinstance(row, Mapping)]
     ledger["limited"] = is_limited(ledger)
     ledger["scope_note"] = SCOPE_LIMITED_NOTE if ledger["limited"] else ""
     ledger["rows"] = coverage_rows(ledger)
@@ -726,7 +730,7 @@ def _findings_row(findings: Mapping[str, Any]) -> Optional[tuple[str, str]]:
     retracted = _count(findings.get("retracted")) or 0
     value = (
         f"本轮新增 {_num(current)} 条 + 基线继承 {_num(inherited)} 条 = 在挂 {_num(total)} 条"
-        "（**正文的「风险评估」应当覆盖全部在挂条目**；明显少于这个数就是正文没写全）"
+        "（处置异常口径；业务正文按显式关联逐条核对，不以两个总数判断完整性）"
     )
     if retracted:
         # **不写死「按复核裁决撤销」**：这一格里现在有两种东西 —— 复核轮的裁决，以及
@@ -770,8 +774,8 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
       逐类报；
     * 提交数、段数、「都不是 100% 是常态」三样见 `_headline_row` 的说明。
 
-    留下的是 `本次覆盖`（看了多少）与 `结论（本轮 / 继承）`（正文该覆盖多少）—— 后者是
-    「正文有没有写全」唯一的判据，所以它不跟着一起删。
+    结论账按处置异常的本轮/继承拆分；业务条目另计，两类通过显式关联核对，
+    总数大小不能证明正文完整或遗漏。
     """
     counts = ledger.get("counts") or {}
     evidence = ledger.get("evidence_coverage") or {}
@@ -800,9 +804,17 @@ def coverage_rows(ledger: Mapping[str, Any]) -> list[tuple[str, str]]:
     if complete:
         rows.append(("差异交付完整度", f"完整交付 {complete['covered']} / {complete['total']} 个文件；"
                      "证据触达不代表整份差异已读完，完整交付也不等于业务影响已验证"))
-    findings_row = _findings_row(ledger.get("findings") or {})
+    account = ledger.get("findings") or {}
+    if account.get("business_count") is not None or account.get("anomaly_count") is not None:
+        rows.append(("业务条目 / 处置异常", f"业务条目 {_num(account.get('business_count'))} 条；"
+                     f"处置异常 {_num(account.get('anomaly_count'))} 条；两类可重叠，按 finding_ref 关联核对"))
+    findings_row = _findings_row(account)
     if findings_row:
         rows.append(findings_row)
+    if ledger.get("evidence_followup"):
+        followup = ledger["evidence_followup"]
+        rows.append(("证据需求审计", f"共 {len(followup)} 项；其中 {sum(row.get('status') == 'open' for row in followup)} 项仍待处理，"
+                     "逐项状态、取证坐标与原因见下文"))
 
     return rows
 
@@ -911,7 +923,37 @@ def gap_notes(ledger: Mapping[str, Any]) -> list[str]:
             f"**本次只分析了「{ledger['focus_label']}」** —— 其它仓库的改动不在这次输入里，"
             "结论不能读成「整个版本没问题」。"
         )
+    notes.extend(_followup_notes(ledger.get("evidence_followup") or ()))
     return notes
+
+
+def _followup_notes(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """平台留存的需求账是审计来源；模型后续省略不能使未决项消失。"""
+    def text(value):
+        return str(value or "").replace("\r", "\\r").replace("\n", "\\n")
+
+    result = []
+    for row in rows:
+        status = row.get("status", "open")
+        label = {"resolved": "已声明解决", "not_applicable": "已说明撤回"}.get(status)
+        if label is None:
+            label = "业务语义待确认" if row.get("kind") == "external_semantics" else "仍待补取或核实"
+        parts = [f"**证据需求 {text(row.get('need_id'))}（{label}）**：{text(row.get('question'))}"]
+        if row.get("finding_refs"):
+            parts.append("关联发现：" + "、".join(map(text, row["finding_refs"])))
+        for key, title in (("platform_reason", "平台原因"), ("resolution_reason", "关闭说明")):
+            if row.get(key):
+                parts.append(title + "：" + text(row[key]))
+        for request in row.get("requests") or ():
+            if isinstance(request, Mapping):
+                address = " / ".join(f"{key}={text(request[key])}" for key in (
+                    "type", "repository_id", "commit", "path", "lines", "query", "cursor", "name")
+                    if request.get(key) not in (None, "", 0))
+                parts.append("取证地址：" + address)
+        if row.get("evidence_ids"):
+            parts.append("证据地址：" + "、".join(map(text, row["evidence_ids"])))
+        result.append("；".join(parts))
+    return result
 
 
 def _findings_account(response_payload: Any) -> dict:
@@ -924,13 +966,16 @@ def _findings_account(response_payload: Any) -> dict:
     但它们不是同一个集合；读者先看到 13、再翻到 50 条清单，只能猜是哪个错了（或者干脆
     以为平台在虚报）。
 
-    所以这里把两个数**分开写**，并点明正文那一份只含本轮。**没有这份数据时一个字都不说**
+    所以这里把两个数**分开写**，业务条目另计。**没有这份数据时一个字都不说**
     （`recorded=False`）—— 老运行、失败运行都取不到它，把它们当成「0 条结论」比不说更糟。
     """
     payload = _as_mapping(response_payload)
+    counts = {key: len(payload[source]) for key, source in (
+        ("business_count", "report_items"), ("anomaly_count", "anomalies"))
+        if isinstance(payload.get(source), (list, tuple))}
     rows = [item for item in payload.get("final_findings") or [] if isinstance(item, Mapping)]
     if not rows:
-        return {"recorded": False}
+        return {"recorded": False, **counts}
     active = [item for item in rows if item.get("active") is not False]
     inherited = sum(1 for item in active if str(item.get("source") or "") == "baseline")
     return {
@@ -939,6 +984,7 @@ def _findings_account(response_payload: Any) -> dict:
         "inherited": inherited,
         "current": len(active) - inherited,
         "retracted": len(rows) - len(active),
+        **counts,
     }
 
 

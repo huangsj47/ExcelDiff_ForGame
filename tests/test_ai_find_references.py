@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from services.agent_reference_search import apply_batch_total
+from services.ai import provider_search as agent_mode_module
 from services.ai import reference_search as rs
 from services.ai.protocol import ContextRequest, parse_payload, sanitize_requests
 from services.ai.reference_search import (
@@ -33,7 +34,6 @@ from services.ai.reference_search import (
     search_text,
 )
 from services.ai.scope import AnalysisScope, normalize_path
-from services.ai import provider_search as agent_mode_module
 
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
@@ -1136,8 +1136,8 @@ def test_the_second_query_with_a_different_prefix_still_sees_the_whole_batch(mon
     assert "config/goods.lua:1: local target_id = 1" in whole, (
         "第一个前缀的范围把配置文件从索引里挤掉了 —— 这一条命中再也拿不回来"
     )
-    assert reads == ["config/goods.lua", "scripts/net/proto.lua", "scripts/optional/activity.lua"], (
-        f"整批只该读一次，且读的是**整批**（前缀不参与建索引）：读了 {reads}"
+    assert len(reads) == 3 and set(reads) == {"config/goods.lua", "scripts/net/proto.lua", "scripts/optional/activity.lua"}, (
+        f"前缀可以改变预热顺序，但同一快照的正文不应重复读取：读了 {reads}"
     )
 
 

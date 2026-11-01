@@ -16,7 +16,8 @@ EVIDENCE_STATUSES = ("verified", "partial", "unverified")
 SECTION_KEYS = ("overview", "changes", "impacts", "regressions", "release_actions", "gaps")
 ITEM_KEYS = frozenset((
     "id", "title", "finding_ref", "finding_fingerprint", "severity", "business_area", "change_fact", "change_fact_refs",
-    "impact_hypothesis", "evidence_status", "decision_question", "test_actions", "evidence_refs",
+    "impact_hypothesis", "impact_basis", "impact_conditions", "impact_refs",
+    "evidence_status", "decision_question", "test_actions", "evidence_refs",
 ))
 REFERENCE_KEYS = frozenset(("evidence_id", "repository_id", "repository", "commit", "path", "lines"))
 
@@ -79,14 +80,23 @@ def _actions(value: Any, location: str) -> list[dict]:
     result = []
     for index, entry in enumerate(_list(value, location)):
         label = f"{location}[{index}]"
-        raw = _object(entry, {"conditions", "steps", "expected"}, label)
+        raw = _object(entry, {"conditions", "steps", "expected", "expected_status", "expected_refs"}, label)
         steps = _strings(raw.get("steps"), f"{label}.steps")
         if not steps:
             raise ReportValidationError(f"{label}.steps 不得为空")
+        status = _text(raw.get("expected_status", "needs_confirmation"), f"{label}.expected_status")
+        if status not in ("known", "needs_confirmation"):
+            raise ReportValidationError(f"{label}.expected_status 必须是 known 或 needs_confirmation")
+        expected = _text(raw.get("expected", ""), f"{label}.expected")
+        refs = _references(raw.get("expected_refs", []), f"{label}.expected_refs")
+        if status == "known" and (not expected or not refs):
+            raise ReportValidationError(f"{label}.expected_refs 与非空 expected 是 known 预期的必要依据")
         result.append({
             "conditions": _text(raw.get("conditions"), f"{label}.conditions", required=True),
             "steps": steps,
-            "expected": _text(raw.get("expected", ""), f"{label}.expected") or "待确认需求后补充预期",
+            "expected": expected if status == "known" else "待确认需求后补充预期",
+            "model_expected": expected,
+            "expected_status": status, "expected_refs": refs,
         })
     if not result:
         raise ReportValidationError(f"{location} 不得为空，每条风险须给出验证动作")
@@ -135,6 +145,16 @@ def normalize_report_items(value: Any) -> tuple[dict, ...]:
             raise ReportValidationError(f"{label}.evidence_refs 不得为空，verified 必须提供证据")
         if item["evidence_status"] != "verified" and not item["decision_question"]:
             raise ReportValidationError(f"{label}.decision_question 不得为空，未知语义须写待确认问题")
+        item["impact_basis"] = _text(raw.get("impact_basis", "conditional"), f"{label}.impact_basis")
+        if item["impact_basis"] not in ("conditional", "supported"):
+            raise ReportValidationError(f"{label}.impact_basis 必须是 conditional 或 supported")
+        item["impact_conditions"] = _strings(raw.get("impact_conditions", []), f"{label}.impact_conditions")
+        item["impact_refs"] = _references(raw.get("impact_refs", []), f"{label}.impact_refs")
+        if item["impact_basis"] == "supported" and not (item["impact_conditions"] and item["impact_refs"]):
+            raise ReportValidationError(f"{label}.impact_conditions 与 impact_refs 不得为空，推断须提供前提与依据")
+        if item["decision_question"]:
+            for action in item["test_actions"]:
+                action.update(expected_status="needs_confirmation", expected="待确认需求后补充预期")
         item["id"] = stable_report_id(item)
         if item["id"] in seen:
             raise ReportValidationError(f"report_items 存在重复身份 {item['id']}，请合并重复项或修正 finding_fingerprint")
@@ -177,21 +197,39 @@ def ground_report_items(items: Sequence[Mapping], store: Any, *, anomalies=()) -
         references, gaps = [], []
         if item.get("finding_ref") and (len(matches) > 1 or card_refs.count(item["finding_ref"]) > 1):
             gaps.append("异常关联键重复，未绑定复核裁决；保留待人工核查")
-        for reference in item.get("evidence_refs", ()):
-            identifier = reference["evidence_id"]
-            evidence = by_id(identifier) if callable(by_id) else None
-            valid = bool(evidence is not None and callable(verify) and verify(identifier)
-                         and not evidence.meta.get("tool_failed") and not evidence.meta.get("tool_empty"))
-            if not valid:
-                references.append({"evidence_id": identifier, "available": False})
-                gaps.append(f"证据 {identifier} 未取回、为空或校验失败，原引用坐标未采信")
-                continue
-            request = _request_of_key(evidence.meta["cache_key"])
-            references.append({"evidence_id": identifier, "available": True,
-                               "repository_id": request.repository_id, "commit": request.commit,
-                               "path": request.path, "lines": request.lines})
+        def bind(refs):
+            bound_refs = []
+            for reference in refs:
+                identifier = reference["evidence_id"]
+                evidence = by_id(identifier) if callable(by_id) else None
+                valid = bool(evidence is not None and callable(verify) and verify(identifier)
+                             and not evidence.meta.get("tool_failed") and not evidence.meta.get("tool_empty"))
+                if not valid:
+                    bound_refs.append({"evidence_id": identifier, "available": False})
+                    gaps.append(f"证据 {identifier} 未取回、为空或校验失败，原引用坐标未采信")
+                    continue
+                request = _request_of_key(evidence.meta["cache_key"])
+                bound_refs.append({"evidence_id": identifier, "available": True,
+                                   "repository_id": request.repository_id, "commit": request.commit,
+                                   "path": request.path, "lines": request.lines})
+            return bound_refs
+
+        references = bind(item.get("evidence_refs", ()))
+        item["impact_refs"] = bind(item.get("impact_refs", ()))
+        if not item.get("impact_conditions") or not item["impact_refs"] or not all(
+                ref.get("available") for ref in item["impact_refs"]):
+            item["impact_basis"] = "conditional"
+        actions = []
+        for original_action in item["test_actions"]:
+            action = dict(original_action)
+            action["expected_refs"] = bind(action.get("expected_refs", ()))
+            if item.get("decision_question") or not action["expected_refs"] or not all(
+                    ref.get("available") for ref in action["expected_refs"]):
+                action.update(expected_status="needs_confirmation", expected="待确认需求后补充预期")
+            actions.append(action)
+        item["test_actions"] = actions
         item["evidence_refs"] = references
-        item["evidence_gaps"] = gaps
+        item["evidence_gaps"] = list(dict.fromkeys(gaps))
         item["evidence_status"] = "partial" if any(ref.get("available") for ref in references) else "unverified"
         # 不把每条已取回来源的事实都补成同一句泛化问题；真正的业务问句由模型给出。
         # 地址缺失仍明确要求补证，不能把可定位性不足隐藏成「无需确认」。

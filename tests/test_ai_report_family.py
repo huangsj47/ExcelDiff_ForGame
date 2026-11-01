@@ -52,6 +52,75 @@ def test_synthesis_can_copy_grounded_candidate_without_copying_internal_schema_f
     assert rows[0]["platform_evidence_gaps"] == ["待补证"]
 
 
+def test_synthesis_handoff_retains_original_expected_and_removes_nested_platform_marks():
+    from services.ai.report_family import business_candidates_prompt
+    from services.ai.report_items import normalize_report_items
+    family = plan()
+    step = shard(family)
+    ref = {"evidence_id": "a" * 20, "path": "rules.md", "available": True}
+    action = {"conditions": "触发", "steps": ["记录"], "expected": "待确认需求后补充预期",
+              "model_expected": "模型最初提出的预期", "expected_status": "needs_confirmation",
+              "expected_refs": [ref]}
+    item = dict(step.outcome.report_items[0], test_actions=[action], impact_conditions=["前提未确认"],
+                impact_refs=[ref], impact_basis="conditional")
+    step = replace(step, outcome=replace(step.outcome, report_items=(item,)))
+    handed = business_candidates_prompt((step,))[0]["report_item"]
+    assert handed["test_actions"][0]["expected"] == "模型最初提出的预期"
+    parsed = normalize_report_items([handed])[0]
+    assert parsed["test_actions"][0]["model_expected"] == "模型最初提出的预期"
+    assert parsed["test_actions"][0]["expected_status"] == "needs_confirmation"
+    assert parsed["impact_conditions"] == ["前提未确认"]
+
+
+def test_merge_retains_impact_premises_and_does_not_promote_unverified_basis():
+    from services.ai.report_family import reconcile_business_reports
+    family = plan()
+    step = shard(family)
+    original = dict(step.outcome.report_items[0], impact_conditions=["分片前提"],
+                    impact_refs=[{"evidence_id": "a" * 20}], impact_basis="conditional")
+    step = replace(step, outcome=replace(step.outcome, report_items=(original,)))
+    current = dict(original, impact_conditions=["汇总前提"],
+                   impact_refs=[{"evidence_id": "b" * 20}], impact_basis="supported",
+                   decision_question="")
+    synthesis = EngineOutcome(status="succeeded", report_items=(current,),
+                              report_sections=step.outcome.report_sections)
+    merged = reconcile_business_reports(synthesis, (step,)).report_items[0]
+    assert set(merged["impact_conditions"]) == {"分片前提", "汇总前提"}
+    assert {ref["evidence_id"] for ref in merged["impact_refs"]} == {"a" * 20, "b" * 20}
+    assert merged["impact_basis"] == "conditional"
+    assert original["decision_question"] in merged["decision_question"]
+
+
+def test_adoption_reason_cannot_resolve_a_child_business_question():
+    from services.ai.report_family import reconcile_business_reports, report_candidate_id
+    family = plan()
+    step = shard(family)
+    original = step.outcome.report_items[0]
+    current = dict(original, decision_question="", test_actions=[{
+        "conditions": "新配置", "steps": ["发起匹配"], "expected": "人数必须为八人",
+        "expected_status": "known", "expected_refs": [{"evidence_id": "a" * 20}],
+    }])
+    payload = replace(step.outcome.payload, candidate_dispositions=(CandidateDisposition(
+        report_candidate_id(step.plan.label, original), "adopted", "合并重复发现并统一表述"),))
+    synthesis = replace(step.outcome, payload=payload, report_items=(current,))
+    result = reconcile_business_reports(synthesis, (step,))
+    assert original["decision_question"] in result.report_items[0]["decision_question"]
+    business = result.report_markdown.split("取证索引（技术详情）", 1)[0]
+    assert "预期：人数必须为八人" not in business
+
+
+def test_merge_keeps_child_evidence_gaps_and_unverified_original_coordinates():
+    from services.ai.report_family import reconcile_business_reports
+    step = shard(plan())
+    original = dict(step.outcome.report_items[0], evidence_gaps=["目标行尚未取回"],
+                    evidence_notes=["旧版表.xlsx 第262行，尚未重新核验"])
+    step = replace(step, outcome=replace(step.outcome, report_items=(original,)))
+    current = dict(original, evidence_gaps=["消费方尚未取得"], evidence_notes=[])
+    result = reconcile_business_reports(replace(step.outcome, report_items=(current,)), (step,))
+    assert result.report_items[0]["evidence_gaps"] == ["消费方尚未取得", "目标行尚未取回"]
+    assert "旧版表\\.xlsx 第262行" in result.report_markdown
+
+
 def test_successful_synthesis_cannot_silently_drop_medium_findings():
     family = plan()
     step = shard(family)

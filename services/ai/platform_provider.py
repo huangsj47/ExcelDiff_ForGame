@@ -30,6 +30,8 @@ payload），见 `_weekly_stored_diff`。
 
 from __future__ import annotations
 
+from services.ai.evidence_rendering import lossless_evidence
+
 import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -109,6 +111,7 @@ _AGENT_EXCEL_NOTE = "（配表正文由业务节点（Agent）上的工作副本
 
 
 
+@lossless_evidence
 def render_diff_payload(
     diff_data: Any,
     *,
@@ -1726,7 +1729,7 @@ class PlatformContextProvider(ReferenceSearchMixin):
 
     # -- 检索 ---------------------------------------------------------------
 
-    def find_references(self, query: str, path: str = "") -> Optional[str]:
+    def find_references(self, query: str, path: str = "", cursor: str = "", max_output_chars: int = 7800) -> Optional[str]:
         """找这个标识符还有哪些出现位置。
 
         ## 范围（工作包 D 的 P1，2026-09-24 起）
@@ -1751,7 +1754,7 @@ class PlatformContextProvider(ReferenceSearchMixin):
         if not search:
             return None
 
-        repo_text = self._search_frozen_repo(search, normalize_path(path))
+        repo_text = self._search_frozen_repo(search, normalize_path(path), cursor=cursor, max_output_chars=max_output_chars)
         if repo_text is not None:
             return repo_text
 
@@ -1767,11 +1770,11 @@ class PlatformContextProvider(ReferenceSearchMixin):
         # 覆盖率的分母：本批次里**落在这个前缀范围内**的文件数（与本地那条路
         # `index.search(prefix=...)` 算出来的 `files_total` 是同一个数）。
         in_scope = sum(1 for item, _commit in pairs if not prefix or item.startswith(prefix))
-        local = self._search_local(pairs, search, prefix=prefix)
+        local = self._search_local(pairs, search, prefix=prefix, cursor=cursor, max_output_chars=max_output_chars)
         if local is not None:
             return self._with_narrow_scope_note(local)
         return self._with_narrow_scope_note(
-            self._search_from_agent(pairs, search, prefix=prefix, total_files=in_scope)
+            self._search_from_agent(pairs, search, prefix=prefix, total_files=in_scope, cursor=cursor, max_output_chars=max_output_chars)
         )
 
 

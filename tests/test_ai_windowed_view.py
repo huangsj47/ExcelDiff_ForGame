@@ -291,17 +291,31 @@ def test_a_window_that_does_not_fit_is_a_truncation():
     assert meta["shown"].split("-")[-1] != "30", f"没装上就不该说给了 30 段：{meta}"
 
 
-def test_content_that_cannot_be_split_keeps_the_old_truncation():
-    """切不开时**不编段号**：仍旧按老办法截断（`file_diff` 保留首尾）。
+def test_a_single_long_cell_can_be_read_in_full_using_stable_segment_numbers():
+    source = "开头-" + "中" * 15000 + "CRITICAL_MIDDLE" + "尾" * 15000 + "-结尾"
+    pieces, _ = split_segments(source, kind="file_diff")
+    assert len(pieces) > 1
+    assert "".join(pieces) == source
+    for limit in (6000, 11000, 32000):
+        complete = set()
+        for index, piece in enumerate(pieces, 1):
+            text, meta = _render("file_diff", source, window=str(index), limit=limit)
+            assert len(text) <= limit
+            assert piece.rstrip("\n") in text.split("\n\n", 1)[1]
+            complete.update(meta["complete_segments"])
+        assert complete == set(range(1, len(pieces) + 1))
 
-    假称「共 1 段，这里是第 1 段」会让模型以为还有第 2 段 —— 一次为不存在的段花的额度，
-    和没说一样糟。
-    """
-    text, meta = _render("file_diff", "开头-" + "中" * 30_000 + "-结尾", limit=2_000)
 
-    assert meta == {"segments": 1, "split": meta["split"], "truncated": True, "complete_segments": []}
-    assert text.startswith("开头-") and text.endswith("-结尾"), "保留首尾"
-    assert "共 1 段" not in text and "这里是第" not in text
+def test_one_large_worksheet_preserves_all_rows_and_all_middle_cell_characters():
+    source = "### 工作表 Main\n" + "".join(
+        f"[修改] 第 {i} 行: value=" + ("z" * 7000 if i == 150 else str(i)) + "\n"
+        for i in range(1, 263))
+    pieces, _ = split_segments(source, kind="file_diff")
+    assert "".join(pieces) == source
+    for index, piece in enumerate(pieces, 1):
+        body, meta = _render("file_diff", source, window=str(index), limit=11000)
+        assert piece.rstrip("\n") in body.split("\n\n", 1)[1]
+        assert meta["complete_segments"] == [index]
 
 
 def _many_hunks(hunks: int = 40, lines_per_hunk: int = 30) -> str:

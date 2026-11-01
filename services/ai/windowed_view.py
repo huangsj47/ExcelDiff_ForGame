@@ -114,10 +114,31 @@ def split_segments(text: str, *, kind: str) -> tuple[list[str], str]:
     那几行**每次都要给**（它们回答「这是哪条提交」），要分页的只有文件清单。
     """
     if kind == "commit_detail":
-        return _split_file_list(text)
-    if kind == "read_reference":
-        return _split_document(text)
-    return _split_blocks(text)
+        pieces, note = _split_file_list(text)
+    elif kind == "read_reference":
+        pieces, note = _split_document(text)
+    else:
+        pieces, note = _split_blocks(text)
+    # A worksheet/hunk/paragraph (even a single cell) may exceed a tool page.
+    # Stable subsegments must be independent of the current page budget so that
+    # coverage receipts can safely union reads from different rounds.
+    result = []
+    divided = False
+    for piece in pieces:
+        if len(piece) <= (9_000 if kind == "read_reference" else _FALLBACK_CHUNK_CHARS):
+            result.append(piece)
+            continue
+        divided = True
+        remaining = piece
+        while len(remaining) > _FALLBACK_CHUNK_CHARS:
+            end = remaining.rfind("\n", 0, _FALLBACK_CHUNK_CHARS + 1) + 1
+            if not end:
+                end = _FALLBACK_CHUNK_CHARS
+            result.append(remaining[:end])
+            remaining = remaining[end:]
+        if remaining:
+            result.append(remaining)
+    return result, note + ("；超长块按原文顺序续分（长单元格可跨段），合并后阅读" if divided else "")
 
 
 def _split_on(text: str, starts_new: Callable[[str], bool]) -> list[str]:
@@ -223,6 +244,7 @@ def render_window(
     unit, how, ordinal, noun = _UNITS.get(kind, ("段", "按块切分", "段", "段"))
     segments, split_note = split_segments(text, kind=kind)
     total = len(segments)
+    how = split_note
     preamble = commit_preamble(text) if kind == "commit_detail" else ""
 
     if total <= 1:

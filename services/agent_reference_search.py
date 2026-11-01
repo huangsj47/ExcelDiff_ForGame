@@ -1,64 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Agent 端：在**本机的工作副本**里搜一个关键词出现在哪些文件的哪几行。
+"""Agent execution of bounded, resumable reference searches.
 
-与 `services/agent_file_content_reader.py` 是一对：那个读一个文件的正文，这个一次读很多个
-文件、只回位置。分开成两个文件的理由与它相同 —— `services/task_worker_service.py` 贴着
-2000 行的硬上限，而搜索这件事本身（读哪些文件、怎么收敛、怎么如实回报覆盖率）已经够写一个
-模块了。
-
-## 为什么是「读内容再搜」而不是 `git grep`
-
-`git grep <commit>` 更快，但它在工作副本上的行为受 clone 形态影响（浅克隆、部分检出、
-GIT_DIR 的解析各不一样），而 `get_file_content_from_git` 是**平台与 Agent 两端已经共用**的
-那一条路 —— 同一份实现、两端结果一致这条纪律（见 `utils/content_window`）在这里同样成立。
-代价是慢一些，所以这里**不逐个文件重复读**：一次读整批建快照索引
-（`ai/reference_index.SnapshotReferenceIndex`，有 `MAX_INDEX_FILES` 的预热门槛），
-之后的查询只查内存。**扫了多少、跳过了哪几类都要如实回报** —— 模型必须分得清
-「没搜到」与「没搜完」。
+The platform supplies the exact batch entries, query, prefix, continuation and
+output budget. The same batch_reference/repo_reference engine is used locally
+and on Agents; no separate sampling or unbounded index cache lives here.
 """
 
 from __future__ import annotations
 
-import threading
-from collections import OrderedDict
 from dataclasses import replace
 
 from models import Repository, db
-from services.ai.reference_index import (
-    MAX_INDEX_FILES,
-    SnapshotReferenceIndex,
-    snapshot_digest,
-)
-from services.ai.reference_search import (
-    SearchResult,
-    render_result,
-)
-
-_INDEX_CACHE: "OrderedDict[str, SnapshotReferenceIndex]" = OrderedDict()
-_INDEX_CACHE_LOCK = threading.Lock()
-_INDEX_CACHE_MAX = 8
-
-
-def _snapshot_key(repository_id: int, pairs: list[tuple[str, str]]) -> str:
-    """索引缓存键 = 仓库 + **文件清单本身**的指纹（不是条数，见 `reference_index.snapshot_digest`）。"""
-    return f"{repository_id}:" + snapshot_digest(pairs)
-
-
-def _cached_index(key: str):
-    with _INDEX_CACHE_LOCK:
-        value = _INDEX_CACHE.get(key)
-        if value is not None:
-            _INDEX_CACHE.move_to_end(key)
-        return value
-
-
-def _store_index(key: str, value: SnapshotReferenceIndex) -> None:
-    with _INDEX_CACHE_LOCK:
-        _INDEX_CACHE[key] = value
-        _INDEX_CACHE.move_to_end(key)
-        while len(_INDEX_CACHE) > _INDEX_CACHE_MAX:
-            _INDEX_CACHE.popitem(last=False)
+from services.ai.reference_search import SearchResult
 
 
 def apply_batch_total(result: SearchResult, total_files) -> SearchResult:
@@ -124,41 +78,24 @@ def search_references_for_agent(payload: dict) -> dict:
     def reader(path: str, commit: str):
         return get_file_content_from_git(repository, commit, path)
 
-    cache_key = _snapshot_key(int(repository_id), pairs)
-    index = _cached_index(cache_key)
-    if index is None:
-        # 一次读整批，但**有预热门槛**（`MAX_INDEX_FILES`）：Agent 这条路的等待上限是
-        # 40 秒（`REFERENCES_WAIT_SECONDS`），整批顺序读 blob 会让第一次查询落成 `pending`。
-        # 门槛之外的那些如实算缺口（`search()` 报 `unindexed`）。
-        index = SnapshotReferenceIndex.build(pairs, reader=reader, max_files=MAX_INDEX_FILES)
-        _store_index(cache_key, index)
-    result = index.search(query, prefix=str(payload.get('prefix') or ''))
-    result = apply_batch_total(result, payload.get('total_files'))
-    text = render_result(
-        result,
-        scope_note=(
-            f"索引版本 `{result.index_version}`，快照 `{result.snapshot_digest[:12]}`；"
-            f"索引覆盖本批次的前 {index.indexed_files} 个文件，"
-            "相同快照后续查询复用索引，不重复读取 blob。"
-        ),
+    from services.ai.batch_reference import bounded_git_reader, search_batch_references
+    reader = bounded_git_reader(repository, reader)
+
+    outcome = search_batch_references(
+        pairs, query, reader=reader, repository_id=int(repository_id),
+        prefix=str(payload.get("prefix") or ""), cursor=str(payload.get("cursor") or ""),
+        max_output_chars=int(payload.get("max_output_chars") or 7_000),
+        total_files=payload.get("total_files"),
     )
     return {
-        'text': text,
-        'query': result.query,
-        'scanned': result.scanned,
-        'files_total': result.files_total,
-        'hits': len(result.hits),
-        # 截断/分页**之前**的真实命中数。少了它，「命中 80 处」在读的人眼里就是全部。
-        'matched': result.matched,
-        'missing': result.missing,
-        'binary': result.binary,
-        'oversized': result.oversized,
-        'undecodable': result.undecodable,
-        'unindexed': result.unindexed,
-        'cursor': result.cursor,
-        'next_cursor': result.next_cursor,
-        'truncated_files': result.truncated_files,
-        'truncated_hits': result.truncated_hits,
-        'index_version': result.index_version,
-        'snapshot_digest': result.snapshot_digest,
+        "text": outcome.text, "query": outcome.query, "scanned": outcome.indexed,
+        "files_total": outcome.files_total, "hits": outcome.returned_hits,
+        "matched": outcome.matched, "missing": outcome.missing, "binary": outcome.binary,
+        "oversized": outcome.oversized, "undecodable": outcome.undecodable,
+        "unindexed": outcome.unindexed, "cursor": str(payload.get("cursor") or ""),
+        "next_cursor": outcome.next_cursor, "scan_start": outcome.scan_start,
+        "scan_end": outcome.scan_end, "query_id": outcome.query_id,
+        "coverage_complete": outcome.coverage_complete,
+        "truncated_files": bool(outcome.unindexed), "truncated_hits": outcome.truncated_hits,
+        "index_version": outcome.index_version, "snapshot_digest": outcome.snapshot_digest,
     }

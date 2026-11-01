@@ -556,6 +556,7 @@ def result_payload(
         # 上下文预算与压缩的账。放在这里（而不是只写日志）的理由与 usage 一样：
         # SSE 的 result 事件与 /latest 自动都有，界面不必再拉一次接口。
         "context": {
+            **({"evidence_followup": list(outcome.evidence_followup)} if outcome.evidence_followup else {}),
             "budget_note": str(context_budget_note or ""),
             "budget_plan": dict(budget_plan or {}),
             "compaction": outcome.compaction.to_dict(),

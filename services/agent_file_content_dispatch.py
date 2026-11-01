@@ -601,6 +601,8 @@ def request_references(
     entries: Sequence[Sequence[str]],
     prefix: str = "",
     total_files: int = 0,
+    cursor: str = "",
+    max_output_chars: int = 7_800,
     wait_seconds: Optional[float] = None,
     sleep_func=time.sleep,
 ) -> dict:
@@ -649,6 +651,7 @@ def request_references(
     """
     signature = (
         f"{query}|{prefix}|{len(entries)}|{int(total_files or 0)}|{_entries_fingerprint(entries)}"
+        f"|cursor={cursor}|output={int(max_output_chars)}"
     )
     return _request_from_agent(
         task_type=REFERENCES_TASK_TYPE,
@@ -660,6 +663,8 @@ def request_references(
         extra_payload={
             "query": str(query or ""),
             "prefix": str(prefix or ""),
+            "cursor": str(cursor or ""),
+            "max_output_chars": int(max_output_chars),
             # 这次结论的分母：本批次里**落在这个前缀范围内**的文件数（Agent 自己也能从
             # 整批清单里数出来；带过去是把这个前提显式化，不一致时以平台的为准）。
             "total_files": int(total_files or 0),

@@ -248,20 +248,20 @@ def test_an_oversized_workbook_is_skipped_and_counted_without_raising():
     assert result.scanned == 0 and result.unindexed == 0
 
 
-def test_only_the_first_rows_are_indexed_and_the_limit_is_a_boundary():
-    """只索引每张表的前 200 行，且第 200 行**在**、第 201 行**不在**（边界要钉住）。"""
+def test_rows_after_the_old_sampling_limit_are_indexed():
+    """200 行曾是静默抽样边界；可读工作簿必须完整匹配。"""
     rows = [[f"Item_{1000 + index}"] for index in range(1, XLSX_MAX_INDEX_ROWS + 1)]
     rows.append(["Item_9999"])
     raw = _workbook_bytes({"道具表": rows})
 
     index = SnapshotReferenceIndex.build([(XLSX_PATH, COMMIT)], reader=lambda _path, _commit: raw)
 
-    assert index.search("Item_9999").hits == (), "第 201 行在限制之外"
+    assert index.search("Item_9999").hits, "第 201 行不能被当成已搜索却零命中"
     boundary = index.search(f"Item_{1000 + XLSX_MAX_INDEX_ROWS}").hits
     assert [hit.line for hit in boundary] == [XLSX_MAX_INDEX_ROWS], "第 200 行必须在限制之内"
 
 
-def test_only_the_first_sheets_are_indexed():
+def test_sheets_after_the_old_sampling_limit_are_indexed():
     sheets = {f"表{index}": [["Item_1001"]] for index in range(1, XLSX_MAX_INDEX_SHEETS + 1)}
     sheets["表4"] = [["Item_4004"]]
     raw = _workbook_bytes(sheets)
@@ -269,7 +269,7 @@ def test_only_the_first_sheets_are_indexed():
     index = SnapshotReferenceIndex.build([(XLSX_PATH, COMMIT)], reader=lambda _path, _commit: raw)
 
     assert len(index.search("Item_1001").hits) == XLSX_MAX_INDEX_SHEETS, "前三张表都要索引"
-    assert index.search("Item_4004").hits == (), "第 4 张表在限制之外"
+    assert index.search("Item_4004").hits, "第 4 张表不能被静默排除"
 
 
 # ---------------------------------------------------------------------------

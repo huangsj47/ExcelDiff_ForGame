@@ -125,8 +125,8 @@ test('real structured report roundtrips escaped coordinates, punctuation and HTM
     ].join('\n');
     const markdown = execFileSync('python', ['-c', script, JSON.stringify(literal)], { cwd: root, encoding: 'utf8' });
     const { output } = setup(markdown);
-    const change = [...output.querySelectorAll('p')].find(p => p.textContent.startsWith('变化：'));
-    assert.equal(change.textContent, '变化：' + literal);
+    const change = [...output.querySelectorAll('p')].find(p => p.textContent.startsWith('变化（待核实描述）：'));
+    assert.equal(change.textContent, '变化（待核实描述）：' + literal);
     assert.equal(change.querySelector('strong,code,img'), null);
     assert.equal(output.querySelector('script,img,svg,[onerror],[onload]'), null);
     assert.ok(output.querySelector('.ai-reader-archive').textContent.includes(literal));

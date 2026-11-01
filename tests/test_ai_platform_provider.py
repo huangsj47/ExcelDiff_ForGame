@@ -119,16 +119,17 @@ def test_an_empty_cell_is_shown_as_empty_not_as_none():
     assert "名称: 匕首 → （空）" in text
 
 
-def test_rows_beyond_the_cap_are_omitted_and_counted():
+def test_all_source_rows_survive_before_addressable_budget_pagination():
     rows = [
         {"row_number": index, "status": "added", "data": {"ID": str(index)}} for index in range(200)
     ]
     text = render_diff_payload(_excel({"S": {"rows": rows, "stats": {"added": 200}}}))
 
-    assert f"另有 {200 - DEFAULT_MAX_ROWS_PER_SHEET} 行差异未列出" in text
+    assert "第 199 行" in text
+    assert "行差异未列出" not in text
 
 
-def test_a_very_long_cell_is_clipped():
+def test_a_long_source_cell_is_not_silently_clipped_before_budget_pagination():
     text = render_diff_payload(
         _excel(
             {
@@ -140,8 +141,8 @@ def test_a_very_long_cell_is_clipped():
         )
     )
 
-    assert "…" in text
-    assert "长" * 500 not in text
+    assert "…" not in text
+    assert "长" * 500 in text
 
 
 def test_a_deleted_worksheet_is_called_out():

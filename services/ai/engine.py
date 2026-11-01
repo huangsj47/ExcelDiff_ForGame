@@ -57,7 +57,14 @@ from services.ai.context_tools import (
     ContextProvider,
     ContextTools,
 )
-from services.ai.context_working_set import compact_working_set
+from services.ai.context_working_set import (
+    archived_brief,
+    compact_working_set,
+    evidence_directory,
+    fit_observed_window,
+    protected_history,
+    restore_pending_pointers,
+)
 
 # 退化（degradation）的取值域与中文标签：常量与文案，没有任何依赖，单独一层。
 # 搬到 `degradation.py` 是为了让本文件离 2000 行 ERROR 闸门远一点（本文件顶着那个闸门）。
@@ -83,7 +90,6 @@ from services.ai.evidence_prefetch import (
     prefetch_evidence,
 )
 from services.ai.evidence_store import EvidenceStore
-from services.ai.round_observability import sum_optional as _sum_optional
 from services.ai.frozen_repo import provider_repo_paths
 
 # 一次调用周边的三件小事（请求参数 / 截断判据 / 这一笔账怎么算）也从引擎里搬走了:
@@ -170,6 +176,7 @@ from services.ai.round_observability import (
 from services.ai.round_observability import (
     replay_chars as _replay_chars,
 )
+from services.ai.round_observability import sum_optional as _sum_optional
 from services.ai.round_observability import (
     truncation_reason as _truncation_reason,
 )
@@ -500,6 +507,7 @@ class EngineOutcome:
     report_markdown: str = ""
     report_items: tuple[dict, ...] = ()
     report_sections: dict | None = None
+    evidence_followup: tuple[dict, ...] = ()
     # 复核裁决的**结构化**那一份（`verdict.Reduction.as_dict()` 的产物，见
     # `services/ai/verdict.py`）。承载它的不再是报告正文末尾那行 HTML 注释 ——
     # 那个做法在安全 Markdown 渲染器下会变成一段可见的乱码（实测 run 20 的
@@ -689,21 +697,8 @@ def run_analysis(
     delivery of each frozen input diff before accepting a complete single-agent result.
     Catch-up never extends round, tool or run-token budgets; valid drafts survive failure.
 
-    ## 提示词缓存：请求是 append-extension 的
-
-    `messages` 从第一轮起就是 append-only 的：system 只构造一次，之后每轮只 append
-    一条 user 和一条 assistant。这**不是顺手写成这样**，而是跨轮次命中 prompt cache 的
-    全部前提 —— 上游按**逐字节前缀**匹配缓存，任何一处重建（重新排序、重写 system、
-    把上下文插回去）都会让第 2 轮及以后的缓存命中归零。`cache_control` 断点也挂在这条
-    性质上：断点只落在「跨轮次不变、跨运行也尽量不变」的那几段末尾。
-
-    ## 单次 token 硬上限（`single_run_budget`）
-
-    不传它时本函数的行为与它不存在时**逐字节相同**（老调用点一个都不用改）。传了就在
-    每一轮开头问一次「还付得起下一轮吗」，付不起就带着已经拿到的证据停住 —— 判据与
-    保证的边界写在 `services/ai/budget_gate.py`，那**唯一的**公式在
-    `auto_sizing.single_run_guard`。停住的原因进 `degradation`（`DEGRADE_BUDGET`），
-    与「轮次用尽」「索取额度用尽」并列成三件不同的事：那两条是额度，这条是钱。
+    Shared prefixes remain append-only until explicit compaction. Evidence follow-up
+    shares the existing round/tool/token ceilings and retains a valid draft on failure.
     """
     limits = limits or EngineLimits()
     prompt_hard_budget = limits.prompt_char_budget
@@ -722,6 +717,9 @@ def run_analysis(
     from services.ai.delivery_receipts import delivered_evidence
 
     coverage = CoverageCompletion(tuple(coverage_files))
+    from services.ai.evidence_followup import EvidenceFollowup
+
+    followup = EvidenceFollowup()
     dimension_ids = dimension_ids_of(loaded.dimensions)
 
     # 这一轮提示词里那份历史清单的指纹（给「逐条交代状态」那条规矩用）。
@@ -877,6 +875,7 @@ def run_analysis(
             # 上游偶尔只在某些轮上报，取不到的那轮不该把已经看出来的形态覆盖成空。
             "cache_source": next((item for item in cache_sources if item), ""),
             "tool_stats": tools.stats,
+            "evidence_followup": followup.summary(),
             "context_chars": context_chars,
             "duration_ms": int((time.monotonic() - started_at) * 1000),
             "compaction": _compaction_report(),
@@ -1093,8 +1092,20 @@ def run_analysis(
             compaction_chars += compacted.dropped_chars
             round_notes.extend(compacted.notes)
             diagnostics.mark_compacted()
-            brief = replace(brief, recap=recap_text)
+            brief = replace(brief, recap=recap_text,
+                            pending_items=restore_pending_pointers(brief.pending_items, body_cache))
             items, user_message = _prepare_round(brief, messages)
+
+        if context_overflow_recovered:
+            base, items, user_message, note, removed = fit_observed_window(
+                brief, messages, _prepare_round, protect_head=3 if seed_messages else 1, store=body_cache)
+            if removed:
+                messages[:] = base
+                tools.archive_history()
+                recap_text = _join_recap(recap_text, note)
+                compaction_events += 1
+                compaction_turns += removed
+                round_notes.append(note)
 
         # 断点 ②：**第一轮** user 消息的末尾。变更清单（全量列出，顶到上限时约 87,000
         # 字符）、历史结论基线、首轮指引这三段在一批变更里是恒定的，而且占了整份提示词的
@@ -1117,11 +1128,12 @@ def run_analysis(
         if round_index > 1 or seed_messages:
             movable_breakpoint = entry
 
-        if estimate_chars(messages) + len(user_message) > prompt_hard_budget:
+        current_hard_budget = min(prompt_hard_budget, limits.prompt_char_budget) if context_overflow_recovered else prompt_hard_budget
+        if estimate_chars(messages) + len(user_message) > current_hard_budget:
             reason = "固定输入和必须保留的证据已超过提示词字符水位，请提高水位或缩小分析范围；未继续调用模型。"
             _emit(RoundRecord(round_index, "prompt_budget_exceeded", note=reason))
             if coverage_draft is not None:
-                payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                payload, degradation = coverage_draft, (DEGRADE_COVERAGE if coverage.missing_count else "evidence_needs_unresolved")
                 break
             return EngineOutcome(status=STATUS_FAILED, rounds=tuple(rounds), dropped=tuple(dropped),
                                  error_message=reason, requests_used=tools.requests_seen,
@@ -1141,7 +1153,7 @@ def run_analysis(
                     note=f"调用模型失败（{type(exc).__name__}）：{exc}"[:400],
                 ))
                 if coverage_draft is not None:
-                    payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                    payload, degradation = coverage_draft, (DEGRADE_COVERAGE if coverage.missing_count else "evidence_needs_unresolved")
                     break
                 return EngineOutcome(
                     status=STATUS_FAILED,
@@ -1154,19 +1166,8 @@ def run_analysis(
                     **_usage_fields(),
                 )
 
-            # 上游说装不下。**不能认输**：前面几轮的钱已经花了，空手而归是最坏的结果。
-            #
-            # 补救按「丢得越少越先试」的顺序来：
-            #   ① 历史留着，把**本轮的条目**按更小的额度重压一遍再发；
-            #   ② 历史丢掉，条目仍按紧缩后的额度重压（保住最近这一批证据文本）；
-            #   ③ 都不行才用「收尾」提示词 —— 它只带变更清单开头与已取内容**目录**，
-            #      正文一条不带，必然装得下，但模型只能靠记得的东西作答。
-            # 每一步都**要先算出它确实压小了**才发（见下面 `original_chars` 那段）。
-            #
-            # 原先只有 ③，理由是「上游拒了说明水位估得不准，压历史也补不上」。那句话对
-            # **历史**成立，对**条目**不成立：条目是按我们自己的额度渲染出来的，压到
-            # 1/4 是我们说了算的确定量（每次最多 40 条 × 11,000 字符，是提示词里最大的
-            # 一块，而且每轮都要重发一遍）。所以先把确定能压掉的那块压掉，再谈放弃。
+            # 先压当前条目，再归档历史，最后才收尾；只有确实缩小的请求才重发。
+            # 家族共享前缀和任务书始终保留，历史证据以完整地址目录保全。
             log_print(
                 f"⚠️ AI 分析：上游拒绝了本次请求（{error_text[:300]}）。"
                 "按「提示词超出上下文窗口」处理。",
@@ -1190,9 +1191,10 @@ def run_analysis(
                             MIN_ITEM_BUDGET, limits.prompt_char_budget // factor
                         ),
                     )
-                    base = list(messages) if keep_history else list(messages[:1])
+                    retry_brief = brief if keep_history else archived_brief(brief, body_cache)
+                    base = list(messages) if keep_history else protected_history(messages, brief, 3 if seed_messages else 1, include_task=brief.round_index > 1)
                     fitted, shrunk_text = _prepare_round(
-                        replace(brief, limits=shrunk_limits), base
+                        replace(retry_brief, limits=shrunk_limits), base
                     )
                     shrunk_entry = {"role": "user", "content": shrunk_text}
                     if estimate_chars([*base, shrunk_entry]) >= original_chars:
@@ -1210,32 +1212,19 @@ def run_analysis(
                             continue
                         transport_error = shrink_exc
                         break
-                    # **`entry` 必须换成真发出去的那一条。** 出口处那句
-                    # `messages.append(entry)` 追加的是「这一轮发给模型的消息」—— 不同步过来，
-                    # 进历史的会是**刚被上游拒掉的那条超大消息**，它比发出去的这条大一倍，
-                    # 于是下一轮再被拒一次、再补救一次，越补越大（实测：补救后那一轮
-                    # 21,845 → 之后每轮 27,000+）。补救的意义就是别让它留在上下文里。
+                    # 历史仅追加真实发送的缩小请求，不追加被拒绝的原请求。
                     messages[:] = base
+                    if not keep_history:
+                        tools.archive_history()
                     entry = shrunk_entry
-                    # 与正常路径逐字同一条规矩（见上面 `if round_index > 1 or seed_messages`）：
-                    # 不记下来的话，断点会一轮一轮往上堆 —— 上一轮那条没被摘掉，下一轮又加
-                    # 一个，超过 `MAX_CACHE_BREAKPOINTS` 之后被**静默丢掉**的恰好是最新的那条。
-                    # 这条路径只可能在 `round_index >= 2` 上走（第 1 轮没有条目可压），
-                    # 所以那个条件在这里恒真。
+                    # 压缩重试后仍只保留最新的缓存断点。
                     movable_breakpoint = shrunk_entry
                     user_message = shrunk_text
                     items = fitted
                     context_overflow_recovered = True
                     overflow_recovered = True
                     diagnostics.mark_compacted()
-                    # **把这次观测到的上限记下来，供本次运行剩下的轮次用。**
-                    # 上游刚说了「这么大装不下」，而那份提示词正是 `original_chars` 这么大
-                    # —— 这是本次运行里唯一一个**实测**的上限（水位那些数是估出来的，估错
-                    # 了才会走到这里）。不记的话，下一轮照原样组装、再被拒一次、再补救一次。
-                    # 落成 3/4 是给「字符 → token 的换算误差」留的余量。
-                    #
-                    # 不需要另加机制：`compact_history` 与 `_fit_items` 都按
-                    # `limits.prompt_char_budget` 干活，调小它，下一轮自己就会压。
+                    # 实测窗口约束剩余轮次；fit_observed_window 在必要时突破历史保留下限。
                     limits = replace(
                         limits,
                         prompt_char_budget=max(MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
@@ -1257,7 +1246,7 @@ def run_analysis(
                          f"{transport_error}）"[:400],
                 ))
                 if coverage_draft is not None:
-                    payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                    payload, degradation = coverage_draft, (DEGRADE_COVERAGE if coverage.missing_count else "evidence_needs_unresolved")
                     break
                 return EngineOutcome(
                     status=STATUS_FAILED,
@@ -1278,15 +1267,15 @@ def run_analysis(
                 # 一份被大幅裁剪的提示词上得到的。彻底失败的那条路径读的是 `error_message`。
                 context_overflow_recovered = True
                 overflow_recovered = True
-                # 同上面那条：把实测到的上限记进本次运行剩下的轮次（收尾之后模型还可能
-                # 再要一轮上下文，那一轮不该再按原来那个已经被拒过的预算组装）。
+                # 后续轮次继续使用实测水位。
                 limits = replace(
                     limits,
                     prompt_char_budget=max(MIN_ITEM_BUDGET, int(original_chars * 3 / 4)),
                 )
-                messages[:] = messages[:1]
+                messages[:] = protected_history(messages, brief, 3 if seed_messages else 1)
                 items = ()
-                user_message = _salvage_user_message(change_summary, seen_items)
+                user_message = _salvage_user_message(change_summary, seen_items) + evidence_directory(body_cache)
+                tools.archive_history()
                 diagnostics.mark_compacted()
                 entry = _mark_current({"role": "user", "content": user_message}, movable_breakpoint)
                 movable_breakpoint = entry
@@ -1296,22 +1285,24 @@ def run_analysis(
                     "（只带变更清单开头与已取内容目录）；本次运行后续轮次的提示词预算按"
                     f"这次实测的上限收到 {limits.prompt_char_budget:,} 字。"
                 )
+                fixed_overflow = estimate_chars([*messages, entry]) > limits.prompt_char_budget
                 try:
+                    if fixed_overflow:
+                        raise RuntimeError("固定指令和证据目录超过实测上下文水位，未继续调用模型")
                     result = diagnostics.model_call(
                         [*messages, entry], client.complete, complete_kwargs(limits)
                     )
                 except Exception as final_exc:  # noqa: BLE001
-                    # 同上面那条：这一轮连着两次都没发出去，也要留痕（`transport_error`），
-                    # 否则「上游到底拒了什么」在 trace 上无从查起。
+                    failure = "收尾请求未发出" if fixed_overflow else "收尾请求也被拒绝"
                     _emit(RoundRecord(
                         round_index, "transport_error",
                         note=(
-                            f"上游以「上下文超长」拒绝（{error_text[:200]}），收尾请求也被拒绝"
+                            f"上游以「上下文超长」拒绝（{error_text[:200]}），{failure}"
                             f"（{type(final_exc).__name__}: {final_exc}）"
                         )[:400],
                     ))
                     if coverage_draft is not None:
-                        payload, degradation = coverage_draft, DEGRADE_COVERAGE
+                        payload, degradation = coverage_draft, (DEGRADE_COVERAGE if coverage.missing_count else "evidence_needs_unresolved")
                         break
                     return EngineOutcome(
                         status=STATUS_FAILED,
@@ -1321,7 +1312,7 @@ def run_analysis(
                         cache_hits=tools.cache_hits,
                         **_totals(),
                         error_message=(
-                            "模型上下文不足：收尾请求也被拒绝"
+                            f"模型上下文不足：{failure}"
                             f"（{type(final_exc).__name__}: {final_exc}）。"
                             "建议缩小本次分析的范围（按单个提交或指定文件分析），"
                             "或改用上下文窗口更大的模型。"
@@ -1353,6 +1344,7 @@ def run_analysis(
         )
         round_extra["delivered"] = delivered_evidence(items)
         coverage.observe(round_extra["delivered"])
+        followup.observe(round_extra["delivered"])
         if single_run_budget is not None:
             # 单次上限的账也在这里扣（**按次**；上面那道闸是**按轮**判的，因为一轮里可能
             # 有两次调用，第二次用的是压小后的提示词）。上游没报用量时的口径、以及
@@ -1644,6 +1636,24 @@ def run_analysis(
                                       **round_extra))
                     round_memos.append(TurnMemo(index=round_index, status="requests", items=tuple(items)))
                     continue
+            more, hint = followup.plan(parsed, body_cache, remaining=tools.requests_remaining,
+                                       can_continue=round_index < limits.max_rounds and not token_budget_low)
+            if hint:
+                coverage_draft = parsed
+                requests, rejected = sanitize_requests(more, scope, repo_paths=repo_paths)
+                batch = diagnostics.tool_fetch(tools.execute, requests)
+                followup.fetched(batch, rejected, requests=more)
+                dropped.extend(rejected)
+                dropped.extend(batch.dropped)
+                refused_items.extend(batch.refused_items)
+                pending_items, budget_notes = batch.items, _batch_notes(batch)
+                seen_items.extend(batch.items)
+                correction_hint = hint
+                _emit(RoundRecord(round_index, "requests", requests=tuple(requests),
+                                  executed=tuple(batch.items), item_count=len(items),
+                                  correction_hint=hint, note="按结构化信息缺口补证并要求重判", **round_extra))
+                round_memos.append(TurnMemo(index=round_index, status="requests", items=tuple(items)))
+                continue
             # Historical status corrections retain a valid draft.
             missing_statuses = missing_baseline_statuses(parsed)
             if (
@@ -1773,6 +1783,8 @@ def run_analysis(
     # 读代码的人会以为少了一条覆盖。
     if payload is None and coverage_draft is not None:
         payload = coverage_draft
+    if followup.unresolved and degradation == DEGRADE_NONE:
+        degradation = "evidence_needs_unresolved"
     if coverage.missing_count and degradation == DEGRADE_NONE:
         degradation = DEGRADE_COVERAGE
 
@@ -1899,6 +1911,10 @@ def run_analysis(
             **_usage_fields(),
         )
 
+    followup.plan(payload, body_cache, remaining=0, can_continue=False)
+    if followup.unresolved and degradation == DEGRADE_NONE:
+        degradation = "evidence_needs_unresolved"
+
     grounded = ground_payload(payload, scope)
     if grounded.report_sections is not None:
         from services.ai.report_document import render_structured_report
@@ -1915,26 +1931,9 @@ def run_analysis(
 
     report_markdown = grounded.report_markdown
     if not seed_messages:
-        # 「未归类」那一节：**单代理路径的报告正文里也必须有它**（与子代理路径同一份
-        # 渲染函数 —— 两份实现迟早会长出两种措辞，而这里说的是一件很要紧的事）。
-        #
-        # 子代理路径由 `subagent.aggregate_outcomes` 在汇总之后追加，所以这里只在
-        # **这一份报告就是最终报告**时追加。`seed_messages` 非空就是「我在替一家子里的
-        # 某个成员跑」：那一份是分片交上去的素材，最终报告由汇总那一次产出 —— 在这里
-        # 也追加一遍，最终报告里就会出现两节「未归类」。
-        #
-        # 渲染函数从 `subagent` **函数内导入**：它在模块级 import 本模块（要用
-        # `run_analysis` 跑每个成员），顶层互相导入会成环。
-        from services.ai.subagent import build_cap_section, build_unclassified_section
+        from services.ai.report_document import append_analysis_notices
 
-        section = build_unclassified_section(normalized.anomalies, dimension_ids)
-        if section:
-            report_markdown = (report_markdown.rstrip() + "\n\n" + section).strip() + "\n"
-        # 「结论条数上限」那一节：**同一条理由、同一个位置**。上限生效时清单是静默变短的，
-        # 报告正文读起来完全正常 —— 用户看到「这次报了 10 条」，看不出还有几条被截掉了。
-        cap_section = build_cap_section(normalized.dropped)
-        if cap_section:
-            report_markdown = (report_markdown.rstrip() + "\n\n" + cap_section).strip() + "\n"
+        report_markdown = append_analysis_notices(report_markdown, normalized, dimension_ids)
 
     return EngineOutcome(
         status=STATUS_DEGRADED if degradation else STATUS_SUCCEEDED,

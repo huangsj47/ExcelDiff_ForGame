@@ -410,7 +410,7 @@ def _run_a_family(monkeypatch, *, reporting_calls: int | None = None):
         ai_service, project, cfg = _prepare_weekly_run(monkeypatch)
         _enable_subagents(project.id)
         # 收敛后分片数由 auto_sizing 推导（默认 5）；这条要的是「2 个分片 + 汇总」
-        # 的固定形态（3 次调用、3 份用量），所以把推导结果钉在 2 片。
+        # 的固定形态，所以把推导结果钉在 2 片；补证轮仍按实际调用计费。
         _force_shard_count(monkeypatch, 2)
         monkeypatch.setattr(ai_service, "build_endpoint_client", lambda *a, **k: (client, []))
         # 跑完就清是设计（见模块 docstring），但这一条要读**最后那一帧**：
@@ -423,7 +423,7 @@ def _run_a_family(monkeypatch, *, reporting_calls: int | None = None):
         assert outcome["status"] in ("succeeded", "degraded"), outcome
         run_id = outcome["run_id"]
         assert run_id in cleared, "跑完没有清快照（界面会一直显示「正在跑」）"
-        return outcome, run_progress.snapshot(run_id), db.session.get(AiAnalysisRun, run_id)
+        return outcome, run_progress.snapshot(run_id), db.session.get(AiAnalysisRun, run_id), client
 
 
 def test_the_final_job_total_matches_the_run_that_got_persisted(monkeypatch):
@@ -432,7 +432,7 @@ def test_the_final_job_total_matches_the_run_that_got_persisted(monkeypatch):
     全员都上报时，`job_tokens` 必须**逐字节等于** `run.tokens_input + tokens_output`
     （落库那一份是 `_sum_optional` 跨成员求和，两者是同一个事实的两条来路）。
     """
-    outcome, snap, run = _run_a_family(monkeypatch)
+    outcome, snap, run, client = _run_a_family(monkeypatch)
 
     assert snap is not None, "跑完连一帧快照都没有 —— 界面全程「进度不可用」"
     assert run.tokens_input is not None and run.tokens_output is not None, (
@@ -443,9 +443,11 @@ def test_the_final_job_total_matches_the_run_that_got_persisted(monkeypatch):
         f"{run.tokens_input + run.tokens_output} 对不上"
     )
     assert snap.job_tokens_partial is False
-    # **不是「最后一个成员」的局部量**：一家子（2 个分片 + 汇总）各一次调用，
-    # 最后一帧的局部量是 200，而 job 那一栏是全部加起来。
-    assert snap.live_tokens == 200 and snap.job_tokens == 200 * 3, (
+    # Include every actual call, including the assigned-diff followup. The final
+    # member's local usage remains one call while job usage sums the whole family.
+    assert run.tokens_input == 120 * len(client.calls)
+    assert run.tokens_output == 80 * len(client.calls)
+    assert snap.live_tokens == 200 and snap.job_tokens == 200 * len(client.calls), (
         f"live={snap.live_tokens} job={snap.job_tokens}"
     )
 
@@ -456,7 +458,7 @@ def test_a_silent_member_leaves_a_marked_lower_bound_not_a_wrong_total(monkeypat
     而 job 累计是**已知下界** + `partial` 标记。差额因此是「明确说明的」——
     界面说的是「至少这么多，还有一块没上报」，不是一个假装完整的数。
     """
-    outcome, snap, run = _run_a_family(monkeypatch, reporting_calls=1)
+    outcome, snap, run, _client = _run_a_family(monkeypatch, reporting_calls=1)
 
     assert snap is not None
     # 只有第一个成员报了数：下界 = 那一次调用的 200。

@@ -20,6 +20,7 @@
     // 降级原因 → 一句「这意味着什么」。键与服务端 engine.DEGRADATION_LABELS 一一对应，
     // 但这里说的不是「发生了什么」（那句由服务端给），而是**用户该据此怎么读这份报告**。
     var MEANING = {
+        evidence_needs_unresolved: '可从冻结版本补取的信息仍未闭环，详见报告末尾的信息缺口；取到来源不等于业务语义已确认。',
         evidence_coverage_gap: '部分输入差异未完整交付模型，现有结论已保留；未覆盖部分不能视为无风险。',
         rounds_exhausted: '模型没有在轮次用尽前收口，结论基于它当时手上的证据。',
         requests_exhausted: '上下文索取额度用完了，还有文件没看。',

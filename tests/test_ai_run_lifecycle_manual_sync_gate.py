@@ -276,7 +276,8 @@ def _cleanup_runs(seeded: dict) -> None:
     job / 意图行一并收掉，理由同上（一条 `active_key` 非空的 job 会占着唯一索引，
     让**别的**用例建不出同目标的 job）。
     """
-    AiAnalysisRun.query.filter_by(target_id=seeded["primary_config_id"]).delete()
+    AiAnalysisRun.query.filter_by(project_id=seeded["project_id"], target_type="weekly",
+                                      target_id=seeded["primary_config_id"]).delete()
     for job_id in list(_CREATED_JOBS):
         row = db.session.get(AiAnalysisJob, job_id)
         if row is not None and row.active_key is not None:
@@ -324,7 +325,8 @@ def test_the_manual_entry_is_blocked_while_the_batch_sync_runs(monkeypatch):
         assert _analysis_tasks(group_key) == [], "同步还在跑，却排出了分析任务"
         assert calls == [], "同步还在跑，却发起了模型调用"
         assert (
-            AiAnalysisRun.query.filter_by(target_id=seeded["primary_config_id"]).count() == 0
+            AiAnalysisRun.query.filter_by(project_id=seeded["project_id"], target_type="weekly",
+                                      target_id=seeded["primary_config_id"]).count() == 0
         ), "被拦下了却还是留下了一条 run 记录"
         _cleanup_runs(seeded)
 

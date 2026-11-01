@@ -1,68 +1,37 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""在**冻结仓库的跟踪文件**里找一处标识符（工作包 D 的核心取数）。
+"""Reference search over immutable, authorized Git trees.
 
-## 它替掉了什么
+Each page reads at most 240 files, also respecting decoded-text and raw-byte
+budgets. Opaque continuations advance through real file offsets and all hits
+within each slice, including flat/root directories and a single high-hit file.
+Cursors bind repository identity, tip, tracked tree, authorization scope, query,
+prefix and parser version. A tail page alone cannot prove a whole-tree negative.
 
-`find_references` 原先只搜**本批次改动过的文件**（`scope.batch_paths()`）。小 diff 恰好
-改了公共接口时，这个范围会让模型既不能证伪「调用方没改」（调用方不在批次里），也不能
-证实它 —— run 45/46 的报告因此把「旧函数名是否仍被其它模块调用」写成信息缺口，
-而**继续加 `file_diff` 次数解决不了它**：缺的是范围，不是额度。
-
-## 只读**对象库里的**那个版本
-
-读取一律走 `frozen_repo.FrozenTreeReader`（`commit.tree[path]`），tip 由
-`platform_provider` 固定，模型给的 commit / 分支一概忽略。绝不经由工作区（见那边的说明）。
-
-## 索引的规模上限：**分页**，而不是「搜不完就算了」
-
-`SnapshotReferenceIndex` 一次最多索引 `max_files` 个文件（顺序读 blob 是有代价的）。为了
-让「仓库很大」不等于「后面那些永远搜不到」，本模块做两件事：
-
-1. **按前缀（目录）分页**：模型给的 `path` 前缀命中的文件**排在最前面**，于是「先问
-   `scripts/net/`、再问全局」时那一页真的覆盖了它；
-2. **把下一页的起点写进回执**（`next_cursor`）：一句可以直接抄进下一轮 `path` 的**目录
-   前缀**。没有它，「还有 500 个文件没索引」是句没法行动的话。
-
-（按**文件类型**分页这一档没做：`ContextRequest` 上只有 `path` 一个范围字段，而
-「`.lua` 结尾的文件」不是一个路径前缀。要么给它加一个新字段（工作包 D 明说不要另造语义
-重复的名字），要么让模型用目录分页走到——先按目录走。真需要时再按金标证据加。）
-
-## 「没搜到」与「没搜完」必须分得开
-
-回执里逐个列出：`files_total`（分母：这个前缀范围里跟踪文件的总数）、`scanned`（真读了
-文本的）、`missing`（读不到）、`binary`（不是文本）、`oversized`（太大）、`undecodable`
-（解不出文本）、`unindexed`（这一页之外的）、`truncated_hits`（命中数到上限）。
-**只要有一个不为零，就不许下「全仓没有调用」的结论** —— 那句话在回执里被显式禁掉。
-
-## 配表（xlsx）现在也在范围里
-
-索引那一层对工作簿开了定向豁免（`reference_index.XLSX_MAX_INDEX_BYTES` 那段）：打开前
-3 张表的前 200 行，按 `[第k张表 表名 第r行] 单元格 ｜ …` 建行索引。所以本模块的
-`find_references` 能直接命中「这个 id 还被哪张表引用」，命中里带 `路径:行号`。
-
-于是覆盖账那一行不再把配表一律写成「没搜」：留在 `binary` 里的是**打不开**的工作簿与
-真正的二进制（图片/音频/压缩包），超过 5 MB 的配表进 `oversized`，两者都照样如实计数。
-命中里出现配表时，回执末尾会补一句「行号是表内物理行、`file_content` 的 `lines` 对配表
-表示第几张表」—— 否则模型会把 `文件:417` 当成代码行号去开一个不存在的行窗。
-
-## 与 Agent 路径的关系
-
-多节点（platform/agent）模式下平台没有本地工作副本，这一层拿不到冻结版本，于是照旧走
-「问 Agent 的本批次检索」并**显式声明覆盖范围只有本批次**（`platform_provider` 里那一支）。
-本模块只管单机这一条。
+Matching is independent of delivery: snippets are query-centered, output budgets
+create resumable hit pages, and all repository receipts precede the hit bodies.
+Index caches are synchronized and bounded by both entry count and memory weight.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence
+import hashlib
+import sys
+import threading
+from concurrent.futures import Future
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from services.ai.excel_source import _is_openpyxl_workbook
 from services.ai.frozen_repo import repository_label
+from services.ai.reference_cursor import decode_cursor, encode_cursor
 from services.ai.reference_index import (
+    MAX_INDEX_FILE_BYTES,
+    XLSX_MAX_INDEX_BYTES,
     IndexedSearchResult,
+    IndexReadLimit,
     SnapshotReferenceIndex,
+    snapshot_digest,
 )
 from services.ai.reference_search import MAX_HITS
 
@@ -74,6 +43,13 @@ MAX_REPO_INDEX_FILES = 240
 #: 进程内索引缓存的条数。索引里装着每个文件每一行的 token（几百个文件 = 几 MB），
 #: 所以只留最近的两页；键里含 tip 与读取范围，强推 / 换范围之后都不会复用。
 INDEX_CACHE_MAX_ENTRIES = 2
+INDEX_CACHE_MAX_BYTES = 32 * 1024 * 1024
+INDEX_BUILD_MAX_ACTIVE = 32
+_INDEX_LOCK = threading.RLock()
+_INDEX_READY = threading.Condition(_INDEX_LOCK)
+# Only active builds live here. The cache identity keeps injected caches isolated;
+# each builder retains its store until removal, so its id cannot be reused.
+_INDEX_BUILDING: Dict[tuple, Future] = {}
 
 #: 渲染用的「这是哪一版」一行。
 _SCOPE_PREFIX = "仓库冻结版本"
@@ -97,23 +73,22 @@ class RepoSearch:
     skipped: int = 0
     truncated_hits: bool = False
     next_cursor: str = ""
+    scan_start: int = 0
+    scan_end: int = 0
+    matched: int = 0
+    query_id: str = ""
+    missing: int = 0
+    binary: int = 0
+    oversized: int = 0
+    undecodable: int = 0
+    returned_hits: int = 0
+    index_version: str = ""
+    snapshot_digest: str = ""
 
     @property
     def coverage_complete(self) -> bool:
         """扫全了吗（**只有扫全了才能下「没有引用」这个否定结论**）。"""
-        return self.unindexed == 0 and self.skipped == 0
-
-
-def _index_entries(paths: Sequence[str], prefix: str, tip: str) -> tuple:
-    """索引的条目顺序：**前缀命中的排最前面**（见模块抬头第 1 条）。
-
-    提交位一律填 tip（本模块只搜冻结的那个版本）——`SnapshotReferenceIndex` 的身份是
-    `(路径, 提交)`，填 tip 让同一个文件的两次搜索命中同一份条目，
-    也让缓存键里的 tip 与条目身份对得上。
-    """
-    head = [path for path in paths if not prefix or path.startswith(prefix)]
-    tail = [path for path in paths if prefix and not path.startswith(prefix)]
-    return tuple((path, tip) for path in head + tail)
+        return self.unindexed == 0 and self.skipped == 0 and self.scan_start == 0
 
 
 def _allowed_paths_key(allowed_paths: Any) -> Optional[tuple]:
@@ -168,17 +143,21 @@ def _index_key(
     )
 
 
-def _looks_like_a_directory(path: str) -> str:
-    """`next_cursor` 给一段**可以抄进 `path` 的目录前缀**（不是单个文件）。
+def _query_identity(reader, entries, query, prefix, max_files):
+    frozen = getattr(reader, "frozen", None)
+    identity = repr((getattr(frozen, "repository_id", None), str(getattr(frozen, "tip", "") or ""),
+                     _allowed_paths_key(getattr(reader, "allowed_paths", None)),
+                     snapshot_digest(entries), prefix, query.lower(), "repo-reference-index/v2", max_files))
+    return hashlib.sha256(identity.encode()).hexdigest()[:24]
 
-    模型下一轮要做的是「把范围缩到那一段」，所以给 `scripts/net/` 比给
-    `scripts/net/proto.lua` 有用：后者只能搜一个文件（而它已经在这一页里了）。
-    """
-    text = str(path or "")
-    cut = text.rfind("/")
-    if cut <= 0:
-        return ""
-    return text[: cut + 1]
+
+def _initial_cursor(reader, query, prefix, max_files, *, after, group):
+    frozen = getattr(reader, "frozen", None)
+    tip = str(getattr(frozen, "tip", "") or "")
+    paths = sorted(path for path in reader.tracked_paths() or () if not prefix or path.startswith(prefix))
+    entries = tuple((path, tip) for path in paths)
+    scope = _query_identity(reader, entries, query, prefix, max_files)
+    return encode_cursor(scope, getattr(frozen, "repository_id", None), 0, 0, after=after, group=group)
 
 
 def search_frozen_repository(
@@ -188,6 +167,8 @@ def search_frozen_repository(
     prefix: str = "",
     max_files: int = MAX_REPO_INDEX_FILES,
     max_hits: int = MAX_HITS,
+    cursor: str = "",
+    max_output_chars: int = 7_000,
     cache: Optional[Dict[tuple, SnapshotReferenceIndex]] = None,
 ) -> Optional[RepoSearch]:
     """在冻结跟踪树里搜一次。**拿不到跟踪树时返回 `None`**（调用方按「无法检索」回报）。
@@ -201,8 +182,14 @@ def search_frozen_repository(
         return None
     frozen = getattr(reader, "frozen", None)
     tip = str(getattr(frozen, "tip", "") or "")
-    entries = _index_entries(tuple(paths), prefix, tip)
-    index_version = "repo-reference-index/v1"
+    paths = tuple(sorted(path for path in paths if not prefix or path.startswith(prefix)))
+    entries = tuple((path, tip) for path in paths)
+    index_version = "repo-reference-index/v2"
+    query_id = _query_identity(reader, entries, query, prefix, max_files)
+    address = decode_cursor(cursor, scope=query_id) if cursor else {"start": 0, "hit": 0}
+    start, hit_offset = address["start"], address["hit"]
+    if start > len(entries) or (start == len(entries) and entries):
+        raise ValueError("检索游标 cursor 超出当前快照范围")
     # 范围必须进键：`tracked_paths()` 已按它过滤，索引条目就是范围的函数。漏掉它，
     # 先全量后受限会搜出范围外的位置，先受限后全量会漏搜（见 `_allowed_paths_key`）。
     key = _index_key(
@@ -211,23 +198,52 @@ def search_frozen_repository(
         max_files,
         index_version,
         getattr(reader, "allowed_paths", None),
-    )
+    ) + (start, snapshot_digest(entries))
     store = _INDEX_CACHE if cache is None else cache
-    index = store.get(key)
-    if index is None:
-        index = SnapshotReferenceIndex.build(
-            entries,
-            # 读者忽略 commit：本模块只搜冻结的那个版本（条目位填的就是 tip）。
-            reader=lambda path, _commit: reader.read_bytes(path),
-            version=index_version,
-            max_files=max_files,
-        )
-        store[key] = index
-        while len(store) > INDEX_CACHE_MAX_ENTRIES:
-            store.pop(next(iter(store)), None)
-    result = index.search(query, prefix=prefix, max_hits=max_hits)
+    def read(path, _commit):
+        bound = XLSX_MAX_INDEX_BYTES if _is_openpyxl_workbook(path) else MAX_INDEX_FILE_BYTES
+        size_of = getattr(reader, "blob_size", None)
+        size = size_of(path) if callable(size_of) else None
+        if size is not None and size > bound:
+            raise IndexReadLimit("blob size exceeds indexing bound")
+        return reader.read_bytes(path)
+
+    index = _shared_index(
+        store, key, lambda: SnapshotReferenceIndex.build(
+            entries[start:], reader=read, version=index_version, max_files=max_files))
+    result = index.search(query, prefix=prefix, max_hits=max(1, int(max_hits)), cursor=hit_offset)
+    end = start + index.indexed_files
+    if hit_offset > result.matched:
+        raise ValueError("检索游标 cursor 超出当前命中范围")
+    # A continuation page describes only its own read set. Previously delivered
+    # pages must be retained by the caller; a final tail page alone proves no
+    # whole-scope negative.
+    result = replace(result, files_total=len(entries),
+                     unindexed=len(entries) - index.indexed_files,
+                     truncated_files=index.indexed_files < len(entries))
+    output_limit = max(1_200, int(max_output_chars))
+    # Preview bounds are a delivery page, never a loss of matched locations.
+    # The continuation offset is computed AFTER reducing the final hit body.
+    while len(result.hits) > 1 and len(render_repo_result(result, frozen=frozen, index=index)) > output_limit - 850:
+        hits = result.hits[:-1]
+        offset = hit_offset + len(hits)
+        result = replace(result, hits=hits, truncated_hits=offset < result.matched,
+                         next_cursor=offset if offset < result.matched else None)
+    next_address = ""
+    if result.next_cursor is not None:
+        next_address = encode_cursor(query_id, getattr(frozen, "repository_id", None), start, result.next_cursor)
+    elif end < len(entries):
+        next_address = encode_cursor(query_id, getattr(frozen, "repository_id", None), end, 0)
+    receipt = (f"[reference_page] query_id={query_id} scan_start={start} scan_end={end} "
+               f"files_total={len(entries)} indexed={result.scanned} skipped={_skips(result)} "
+               f"matched_page={result.matched} hit_offset={hit_offset} "
+               f"returned_hits={len(result.hits)} "
+               f"coverage_complete={'true' if not start and not result.unindexed and not _skips(result) else 'false'} "
+               f'next_cursor="{next_address}"\n')
+    continuation = (f'\n继续同一关键词和 path，写 `"cursor": "{next_address}"`。'
+                    if next_address else "\n本页已到末尾；全范围结论需要合并同一 query_id 的全部分页和缺口账。")
     return RepoSearch(
-        text=render_repo_result(result, frozen=frozen, index=index),
+        text=receipt + render_repo_result(result, frozen=frozen, index=index) + continuation,
         query=query,
         prefix=prefix,
         tip=str(getattr(frozen, "tip", "") or ""),
@@ -236,25 +252,88 @@ def search_frozen_repository(
         unindexed=result.unindexed,
         skipped=result.binary + result.missing + result.oversized + result.undecodable,
         truncated_hits=result.truncated_hits,
-        next_cursor=_next_cursor(index, prefix),
+        next_cursor=next_address,
+        scan_start=start,
+        scan_end=end,
+        matched=result.matched,
+        query_id=query_id,
+        missing=result.missing,
+        binary=result.binary,
+        oversized=result.oversized,
+        undecodable=result.undecodable,
+        returned_hits=len(result.hits),
+        index_version=index.version,
+        snapshot_digest=index.snapshot_digest,
     )
 
 
-def _next_cursor(index: SnapshotReferenceIndex, prefix: str) -> str:
-    """没索引到的那些文件里，**按目录分页**的下一页起点（空串 = 这一页已到末尾）。
+def _index_bytes(index: SnapshotReferenceIndex) -> int:
+    """Conservative cache weight, including token posting containers."""
+    return (sum(sys.getsizeof(line) for lines in index.lines_by_path.values() for line in lines)
+            + sum(sys.getsizeof(token) + sys.getsizeof(rows) + len(rows) * 128
+                  for token, rows in index.lines_by_token.items())
+            + len(index.entries) * 200)
 
-    取的是「没索引 + 落在当前前缀范围内」的第一个路径的目录（见 `_looks_like_a_directory`）。
-    刻意**不**给一个「还剩多少个」之外的东西：分页的粒度是目录，模型下一轮只需要一个能抄的
-    前缀。
+
+def _publish_index(store, key, index):
+    """Compute weights without holding the cache lock; publish a complete index."""
+    weight = _index_bytes(index)
+    while True:
+        with _INDEX_LOCK:
+            previous = tuple(store.items())
+        weights = {item_key: _index_bytes(item) for item_key, item in previous}
+        with _INDEX_LOCK:
+            if len(store) != len(previous) or any(store.get(item_key) is not item for item_key, item in previous):
+                continue
+            if weight <= INDEX_CACHE_MAX_BYTES:
+                store[key] = index
+                weights[key] = weight
+            total = sum(weights.values())
+            while len(store) > INDEX_CACHE_MAX_ENTRIES or total > INDEX_CACHE_MAX_BYTES:
+                removed_key = next(iter(store))
+                store.pop(removed_key)
+                total -= weights.pop(removed_key)
+            return
+
+
+def _shared_index(store, key, build: Callable[[], SnapshotReferenceIndex]) -> SnapshotReferenceIndex:
+    """Singleflight per cache/page, with bounded active-build bookkeeping.
+
+    Blob reads, workbook parsing, weight calculation and waiter blocking all run
+    outside the global cache lock. At capacity, callers wait for a build slot;
+    same-key waiters share even a result too large to retain in the cache.
     """
-    for path in index.entries[index.indexed_files:]:
-        candidate = path[0]
-        if prefix and not candidate.startswith(prefix):
-            continue
-        directory = _looks_like_a_directory(candidate)
-        if directory and (not prefix or directory != prefix):
-            return directory
-    return ""
+    address = (id(store), key)
+    with _INDEX_READY:
+        while True:
+            index = store.get(key)
+            if index is not None:
+                return index
+            pending = _INDEX_BUILDING.get(address)
+            if pending is not None:
+                owner = False
+                break
+            if len(_INDEX_BUILDING) < max(1, INDEX_BUILD_MAX_ACTIVE):
+                pending = Future()
+                _INDEX_BUILDING[address] = pending
+                owner = True
+                break
+            _INDEX_READY.wait()
+    if not owner:
+        return pending.result()
+    try:
+        index = build()
+        _publish_index(store, key, index)
+        pending.set_result(index)
+        return index
+    except BaseException as exc:
+        # Include cancellation/interrupt failures: no waiter may be stranded.
+        pending.set_exception(exc)
+        raise
+    finally:
+        with _INDEX_READY:
+            _INDEX_BUILDING.pop(address, None)
+            _INDEX_READY.notify_all()
 
 
 def _coverage_lines(result: IndexedSearchResult, *, frozen: Any, index: Any) -> list:
@@ -287,15 +366,14 @@ def _coverage_lines(result: IndexedSearchResult, *, frozen: Any, index: Any) -> 
             f"- {result.undecodable} 个既不是 utf-8 也不是 gbk（**没索引**）"
         )
     if result.unindexed:
-        cursor = _next_cursor(index, result.prefix)
         lines.append(
-            f"- **{result.unindexed} 个还没索引**（一次只索引一页，避免首次查询被拖死）"
-            + (f"；按目录分页的下一页起点：把 `path` 前缀写成 `{cursor}` 再搜一次" if cursor else "")
+            f"- **{result.unindexed} 个本页还没索引**（含前序页范围，一次只索引一页；继续使用回执里的 cursor，"
+            "不要把本页无命中当成全范围无引用）"
         )
     if result.truncated_hits:
         lines.append(
             f"- **命中数到了上限**（共 {result.matched} 处，这一页列了 {len(result.hits)} 处）："
-            "要看得更全就给一个更具体的前缀（`path`）再搜一次"
+            "继续使用回执里的 cursor 获取未显示命中"
         )
     return lines
 
@@ -363,6 +441,8 @@ def search_frozen_repositories(
     query: str,
     *,
     prefix: str = "",
+    cursor: str = "",
+    max_output_chars: int = 7_800,
     **kwargs: Any,
 ) -> Optional[str]:
     """在**每一个**冻结仓库里各搜一次，结果**分开写**。一个都没有时返回 `None`。
@@ -378,20 +458,59 @@ def search_frozen_repositories(
     范围声明）—— **绝不写成「没有命中」**。
     """
     blocks: list[str] = []
+    receipts: list[str] = []
     failures: list[str] = []
-    for reader in readers or ():
+    readers = tuple(readers or ())
+    address = decode_cursor(cursor) if cursor else {}
+    owner = address.get("repo")
+    group = hashlib.sha256(repr(tuple(
+        (getattr(getattr(reader, "frozen", None), "repository_id", None),
+         getattr(getattr(reader, "frozen", None), "tip", ""),
+         _allowed_paths_key(getattr(reader, "allowed_paths", None))) for reader in readers
+    )).encode()).hexdigest()[:24]
+    if "after" in address and address.get("group") != group:
+        raise ValueError("检索游标 cursor 不属于当前多仓库冻结范围")
+    active = [reader for reader in readers or () if owner is None
+              or str(getattr(getattr(reader, "frozen", None), "repository_id", None)) == owner]
+    if owner is not None and not active:
+        raise ValueError("检索游标 cursor 所属仓库不在当前冻结范围内")
+    capacity = max(1, max_output_chars // 1_800)
+    queue_after = address.get("after")
+    if owner is None and len(active) > capacity:
+        active = active[:capacity]
+        queue_after = capacity
+    per_repository = max(1_200, (max_output_chars - 600) // max(1, len(active)) - 150)
+    queued_cursor = ""
+    last_outcome = None
+    for reader in active:
         frozen = getattr(reader, "frozen", None)
-        label = repository_label(frozen)
-        outcome = search_frozen_repository(reader, query, prefix=prefix, **kwargs)
+        if owner is not None and str(getattr(frozen, "repository_id", None)) != owner:
+            continue
+        label = repository_label(getattr(frozen, "repository_id", None), getattr(frozen, "name", ""))
+        outcome = search_frozen_repository(reader, query, prefix=prefix, cursor=cursor,
+                                          max_output_chars=per_repository, **kwargs)
+        last_outcome = outcome
         if outcome is None:
             failures.append(
                 f"{label}：对象库里读不到 "
                 f"{str(getattr(frozen, 'tip', ''))[:12]} 的跟踪文件"
             )
             continue
-        blocks.append(
-            f"### 仓库 {label}\n{outcome.text}" if len(readers) > 1 else outcome.text
-        )
+        receipt, _, body = outcome.text.partition("\n")
+        receipts.append(f"【仓库 {label}】{receipt}")
+        blocks.append(f"### 仓库 {label}\n{body}" if len(readers) > 1 else body)
+    if queue_after is not None:
+        if owner is not None and last_outcome is not None and last_outcome.next_cursor:
+            next_address = decode_cursor(last_outcome.next_cursor)
+            queued_cursor = encode_cursor(next_address["scope"], next_address["repo"],
+                                          next_address["start"], next_address["hit"],
+                                          after=queue_after, group=group)
+        elif queue_after < len(readers):
+            queued_cursor = _initial_cursor(readers[queue_after], query, prefix,
+                                            kwargs.get("max_files", MAX_REPO_INDEX_FILES),
+                                            after=queue_after + 1, group=group)
+        receipts.insert(0, f'[reference_repository_page] next_cursor="{queued_cursor}" '
+                           f'pending_repositories={max(0, len(readers) - queue_after)}')
     if not blocks and not failures:
         return None
     if not blocks:
@@ -405,7 +524,7 @@ def search_frozen_repositories(
             f"[范围说明] 还有 {len(failures)} 个仓库这次没能检索（{'；'.join(failures)}）——"
             "上面那份结果**不覆盖**它们，别据此说「仓库里没有引用」。"
         )
-    return "\n\n".join(blocks)
+    return "\n".join(receipts) + "\n\n" + "\n\n".join(blocks)
 
 
 def _skips(result: IndexedSearchResult) -> int:
@@ -423,7 +542,8 @@ _INDEX_CACHE: Dict[tuple, SnapshotReferenceIndex] = {}
 
 def reset_index_cache() -> None:
     """清空索引缓存（测试与「导入/强推之后强制重读」用；生产路径靠键里的 tip）。"""
-    _INDEX_CACHE.clear()
+    with _INDEX_LOCK:
+        _INDEX_CACHE.clear()
 
 
 __all__ = [

@@ -25,9 +25,12 @@ the_provider_emits` 扫源码核对每个前缀都还有发出方 —— 扫描�
 
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Optional, Sequence
 
-from services.ai.reference_search import render_result
+from services.ai.batch_reference import ReferenceBodies, bounded_git_reader, search_batch_references
+from services.ai.reference_cursor import decode_cursor, encode_cursor
 from services.ai.repo_reference import search_frozen_repositories
 from services.ai.repository_identity import attribution_map
 from services.ai.scope import normalize_path
@@ -36,10 +39,17 @@ from services.deployment_mode import is_agent_dispatch_mode
 from utils.logger import log_print
 
 
+def _relay_scope(repository_id, pairs, query, prefix, total_files):
+    from services.ai.reference_index import snapshot_digest
+    return hashlib.sha256(repr((repository_id, snapshot_digest(pairs), query,
+                               prefix, total_files)).encode()).hexdigest()[:24]
+
+
 class ReferenceSearchMixin:
     """`PlatformContextProvider` 的检索段（见模块 docstring）。"""
 
-    def _search_frozen_repo(self, query: str, prefix: str) -> Optional[str]:
+    def _search_frozen_repo(self, query: str, prefix: str, cursor: str = "",
+                            max_output_chars: int = 7_800) -> Optional[str]:
         """冻结版本的仓库范围检索（**每个仓库各搜一次**，见 `search_frozen_repositories`）。
 
         **不可用时返回 `None`** —— 调用方退回「只搜本批次」那条路，并补一句范围声明
@@ -53,7 +63,11 @@ class ReferenceSearchMixin:
             if self._repo_index_files
             else {}
         )
-        return search_frozen_repositories(readers, query, prefix=prefix, **extra)
+        try:
+            return search_frozen_repositories(readers, query, prefix=prefix, cursor=cursor,
+                                               max_output_chars=max_output_chars, **extra)
+        except ValueError as exc:
+            return f"[检索不到] {exc}。这不等于没有其它引用，请清空 cursor 重查。"
 
     def _narrow_scope_note(self) -> str:
         """退回「只搜本批次」时补在结果前面的一句**范围声明**（拿得到范围时为空串）。
@@ -99,22 +113,16 @@ class ReferenceSearchMixin:
         query: str,
         *,
         prefix: str,
+        cursor: str = "",
+        max_output_chars: int = 7_800,
     ) -> Optional[str]:
         """平台本地的工作副本。**单机模式**走这条；多节点模式返回 `None`（改问 Agent）。
 
         与 `_content_from_agent` 同一套记忆：同一个进程里同一份检索只做一次
         （模型可能对同一个词问两遍，而建索引是要真读文件的）。
 
-        ## 索引按**快照**缓存，按**前缀**过滤
-
-        索引只建一次（一次分析里批次是固定的），但**不能用带前缀的那份文件列表建** ——
-        前缀是**这次查询**的范围，不是批次的范围。拿它建索引会永久污染：
-        「先问 `path='scripts/'`，再问全局」时第二次查询只能看见 `scripts/` 下的文件，
-        而它报出来的 `files_total` / `scanned` / 命中全都是那个子集的，
-        **模型看不出这是上次查询的残留**（它只会读到一句「覆盖了 12/12 个文件」）。
-
-        所以：`pairs` 永远是整批，索引建在整批上，前缀进 `search()` 时再过滤；
-        缓存键里放**快照指纹**做校验（同一批 = 同一个索引，换了批次就重建）。
+        索引使用真实文件/命中分页；查询前缀改变时也能继续读取新范围。
+        同一冻结文件的正文由有界缓存复用，cursor 与输出额度同时进入结果缓存键。
 
         ## 每条路径按**自己的**仓库读
 
@@ -125,7 +133,7 @@ class ReferenceSearchMixin:
         """
         from services.vcs_content_service import get_file_content_from_git
 
-        key = (query, prefix)
+        key = (query, prefix, cursor, max_output_chars, tuple(pairs))
         if key in self._search_cache:
             return self._search_cache[key]
         # 一次就够的判断：没有本地工作副本时 `get_file_content_from_git` 会返回 None，
@@ -139,38 +147,30 @@ class ReferenceSearchMixin:
             return None
 
         attribution = self._attribution(pairs)
+        readers = {}
+        if not hasattr(self, "_batch_reference_bodies"):
+            self._batch_reference_bodies = ReferenceBodies()
 
         def reader(path: str, commit: str):
             repository = fallback
             repository_id = attribution.get((normalize_path(path), str(commit or "")))
             if repository_id is not None:
                 repository = self._repository_row(repository_id) or fallback
-            return get_file_content_from_git(repository, commit, path)
+            identity = getattr(repository, "id", None)
+            if identity not in readers:
+                readers[identity] = bounded_git_reader(
+                    repository, lambda item, revision, repo=repository: get_file_content_from_git(repo, revision, item))
+            return self._batch_reference_bodies.read((identity, path, commit),
+                                                     lambda: readers[identity](path, commit))
 
-        from services.ai.reference_index import (
-            MAX_INDEX_FILES,
-            SnapshotReferenceIndex,
-            snapshot_digest,
-        )
-
-        digest = snapshot_digest(pairs)
-        if self._reference_index is None or self._reference_index_key != digest:
-            # 预热门槛（`MAX_INDEX_FILES`）：整批顺序读 blob 会把首次查询从 240 个文件拖到
-            # 767 个，而 Agent 侧等检索只有 40 秒 —— 门槛之外的那些**如实算成缺口**
-            # （`search()` 报 `unindexed`，抬头写「文件数到了上限就停了，剩下的没搜」）。
-            self._reference_index = SnapshotReferenceIndex.build(
-                pairs, reader=reader, max_files=MAX_INDEX_FILES
-            )
-            self._reference_index_key = digest
-        result = self._reference_index.search(query, prefix=prefix)
-        text = render_result(
-            result,
-            scope_note=(
-                f"索引版本 `{result.index_version}`，快照 `{result.snapshot_digest[:12]}`；"
-                f"索引覆盖本批次的前 {self._reference_index.indexed_files} 个文件，"
-                "后续查询不重复读取 blob。"
-            ),
-        )
+        try:
+            result = search_batch_references(pairs, query, reader=reader,
+                                              repository_id=getattr(fallback, "id", None),
+                                              prefix=prefix, cursor=cursor,
+                                              max_output_chars=max_output_chars - len(self._narrow_scope_note()))
+            text = result.text
+        except ValueError as exc:
+            return f"[检索不到] {exc}。这不等于没有其它引用，请清空 cursor 重查。"
         self._search_cache[key] = text
         return text
 
@@ -181,6 +181,8 @@ class ReferenceSearchMixin:
         *,
         prefix: str,
         total_files: int,
+        cursor: str = "",
+        max_output_chars: int = 7_800,
     ) -> Optional[str]:
         """业务节点上的 Agent 拿它自己的工作副本搜（platform/agent 模式的唯一取数点）。
 
@@ -201,11 +203,32 @@ class ReferenceSearchMixin:
                 groups.setdefault(repository_id, []).append(pair)
         if not groups:
             return self._search_agent_one(
-                self._repository_of(pairs), pairs, query, prefix=prefix, total_files=total_files
+                self._repository_of(pairs), pairs, query, prefix=prefix, total_files=total_files,
+                cursor=cursor, max_output_chars=max_output_chars
             )
 
-        blocks: list[str] = []
-        for repository_id in sorted(groups):
+        blocks, receipts = [], []
+        group_ids = tuple(sorted(groups))
+        group_key = hashlib.sha256(repr((group_ids, pairs, query, prefix)).encode()).hexdigest()[:24]
+        try:
+            address = decode_cursor(cursor) if cursor else {}
+        except ValueError as exc:
+            return f"[检索不到] {exc}。请清空 cursor 重查。"
+        owner = address.get("repo")
+        if "after" in address and address.get("group") != group_key:
+            return "[检索不到] cursor 不属于当前多仓库批次，请清空 cursor 重查。"
+        active = [item for item in group_ids if owner is None or str(item) == owner]
+        if not active:
+            return "[检索不到] cursor 所属仓库不在当前批次里，请清空 cursor 重查。"
+        queue_after = address.get("after")
+        capacity = max(1, max_output_chars // 2_000)
+        if owner is None and len(active) > capacity:
+            active = active[:capacity]
+            queue_after = capacity
+        available = max_output_chars - len(self._narrow_scope_note()) - 600
+        budget = max(1_200, available // len(active) - 180)
+        own_next = ""
+        for repository_id in active:
             group = groups[repository_id]
             in_scope = sum(1 for item, _c in group if not prefix or item.startswith(prefix))
             block = self._search_agent_one(
@@ -214,14 +237,39 @@ class ReferenceSearchMixin:
                 query,
                 prefix=prefix,
                 total_files=in_scope,
+                cursor=cursor,
+                max_output_chars=budget,
             )
+            receipt_lines = [line for line in block.splitlines() if line.startswith("[reference_page]")]
+            for line in receipt_lines:
+                receipts.append(f"【仓库 {self._describe_repository(repository_id)}】{line}")
+                block = block.replace(line + "\n", "", 1)
+            if owner:
+                match = re.search(r'next_cursor="([^"]*)"', "\n".join(receipt_lines))
+                own_next = match.group(1) if match else ""
             if len(groups) > 1:
                 block = (
                     f"【仓库 {self._describe_repository(repository_id)}】"
                     f"本段只覆盖这个仓库里那 {len(group)} 个改动文件。\n{block}"
                 )
             blocks.append(block)
-        return "\n\n".join(blocks)
+        if queue_after is not None:
+            queued = ""
+            if own_next:
+                next_address = decode_cursor(own_next)
+                queued = encode_cursor(next_address["scope"], next_address["repo"], 0, 0,
+                                       remote=next_address.get("remote", ""), after=queue_after, group=group_key)
+                receipts = [line.replace(own_next, queued) for line in receipts]
+                blocks = [body.replace(own_next, queued) for body in blocks]
+            elif queue_after < len(group_ids):
+                target = group_ids[queue_after]
+                group = groups[target]
+                total = sum(1 for path, _commit in group if not prefix or path.startswith(prefix))
+                queued = encode_cursor(_relay_scope(target, group, query, prefix, total), target, 0, 0,
+                                       after=queue_after + 1, group=group_key)
+            receipts.insert(0, f'[reference_repository_page] next_cursor="{queued}" '
+                               f'pending_repositories={max(0, len(group_ids) - queue_after)}')
+        return "\n".join(receipts) + "\n\n" + "\n\n".join(blocks)
 
     def _search_agent_one(
         self,
@@ -231,6 +279,8 @@ class ReferenceSearchMixin:
         *,
         prefix: str,
         total_files: int,
+        cursor: str = "",
+        max_output_chars: int = 7_800,
     ) -> str:
         """向**一个**仓库的业务节点派一次检索（`_search_from_agent` 的分段实现）。"""
         from services.agent_file_content_dispatch import request_references
@@ -239,7 +289,18 @@ class ReferenceSearchMixin:
             return (
                 "[检索不到] 本批次的改动文件里找不到对应的仓库，无法确定去哪个节点上搜。"
             )
+        relay_scope = _relay_scope(getattr(repository, "id", None), pairs, query, prefix, total_files)
         try:
+            remote_cursor = decode_cursor(cursor, scope=relay_scope).get("remote", "") if cursor else ""
+            extra = {"cursor": remote_cursor, "max_output_chars": max(1_200, max_output_chars - 600)}
+            # Old provider test doubles may implement only the original optional
+            # parameters. A real continuation must never be silently discarded.
+            import inspect
+            parameters = inspect.signature(request_references).parameters
+            if not any(p.kind == p.VAR_KEYWORD for p in parameters.values()):
+                if remote_cursor and "cursor" not in parameters:
+                    raise ValueError("Agent 不支持检索游标，请升级后重查")
+                extra = {name: value for name, value in extra.items() if name in parameters}
             outcome = request_references(
                 repository,
                 query=query,
@@ -253,6 +314,7 @@ class ReferenceSearchMixin:
                 # 口径必须一样，否则同一个周版本在单机与多节点下印出互相矛盾的覆盖率，
                 # 而模型正是拿这个数决定能不能说「没有其它引用」。
                 total_files=total_files,
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 —— 取一次检索失败只该让这一条降级
             log_print(f"⚠️ AI 取数：向 Agent 检索失败 {query}: {type(exc).__name__}: {exc}")
@@ -262,6 +324,10 @@ class ReferenceSearchMixin:
         if status == "ready":
             rendered = str(outcome.get("text") or "")
             if rendered:
+                remote_next = str(outcome.get("next_cursor") or "")
+                if remote_next:
+                    relay = encode_cursor(relay_scope, getattr(repository, "id", None), 0, 0, remote=remote_next)
+                    rendered = rendered.replace(remote_next, relay)
                 return rendered
         reason = str(outcome.get("message") or "原因未知")
         # 两句的尾巴逐字相同 —— 用常量而不是抄两遍：`trace_evidence` 按**开头**认这几句，

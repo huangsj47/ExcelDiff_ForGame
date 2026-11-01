@@ -498,7 +498,7 @@ def test_the_planned_tool_limits_really_move_the_truncation_point():
     assert default_item.meta["limit"] == 11_000, default_item.meta
     assert planned_item.meta["limit"] == 30_333, planned_item.meta
     assert len(default_item.text) <= 11_000
-    assert 30_333 - 100 <= len(planned_item.text) <= 30_333, len(planned_item.text)
+    assert 30_333 - 4_500 <= len(planned_item.text) <= 30_333, len(planned_item.text)
     assert len(planned_item.text) > len(default_item.text) + 15_000
 
 

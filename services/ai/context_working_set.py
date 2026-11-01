@@ -60,17 +60,9 @@ def compact_working_set(messages, *, hard_chars: int, current_chars: int,
             if total <= hard_target:
                 return CompactionResult(messages=tuple(messages))
             safe, pinned, target = False, "", hard_target
-    directory = []
-    if callable(verify):
-        seen_ids = set()
-        for item in store.values():
-            eid = str(item.meta.get("evidence_id") or "")
-            if eid and eid not in seen_ids and verify(eid):
-                seen_ids.add(eid)
-                directory.append(f"- @evidence_id={eid} {item.label}")
-    archive = "\n## 可恢复证据目录\n" + "\n".join(directory) if directory else ""
+    archive = evidence_directory(store)
     result = compact_history(messages, target_chars=max(0, target-len(pinned)-len(archive)),
-                             keep_recent_turns=1, memos=() if directory else memos,
+                             keep_recent_turns=1, memos=() if archive else memos,
                              protect_head=protect_head)
     if result.compacted:
         from dataclasses import replace
@@ -88,3 +80,82 @@ def checkpoint_hint() -> str:
             "summary（已确认事实和暂定发现，不省略反证）、evidence_ids（支撑发现的全部证据地址）、"
             "completed_paths、open_questions（未决问题）。它不改变覆盖统计。平台仅在证据地址可恢复时"
             "据此整理历史，关键证据原文保留；需要归档正文时用 evidence 工具按地址回取。")
+
+
+def evidence_directory(store):
+    """Keep every verified address visible; a directory that cannot fit must fail closed."""
+    verify = getattr(store, "verify", None)
+    rows, seen = [], set()
+    if callable(verify):
+        for item in store.values():
+            eid = str(item.meta.get("evidence_id") or "")
+            if eid and eid not in seen and verify(eid):
+                seen.add(eid)
+                rows.append(f"- @evidence_id={eid} {item.label}")
+    return "\n## 可恢复证据目录\n" + "\n".join(rows) if rows else ""
+
+
+def restore_pending_pointers(items, store):
+    """A pointer into removed history must become the original evidence again."""
+    from dataclasses import replace
+
+    by_id, verify = getattr(store, "by_id", None), getattr(store, "verify", None)
+    result = []
+    for item in items:
+        if item.meta.get("repeat_pointer"):
+            eid = str(item.meta.get("evidence_id") or "")
+            original = by_id(eid) if callable(by_id) and callable(verify) and verify(eid) else None
+            item = original if original is not None else replace(item,
+                text=f"[归档证据恢复失败] evidence_id={eid}；正文不可用，不能据此认定事实。",
+                meta={"evidence_id": eid, "tool_failed": True})
+        result.append(item)
+    return tuple(result)
+
+
+def archived_brief(brief, store, note="旧对话已归档，以下地址可用 evidence 工具恢复原文。"):
+    from dataclasses import replace
+
+    return replace(brief, pending_items=restore_pending_pointers(brief.pending_items, store),
+                   recap=note + evidence_directory(store) + "\n" + brief.recap)
+
+
+def protected_history(messages, brief, protect_head, *, include_task=True):
+    """A seeded first-round retry has not appended its task to history yet."""
+    base = list(messages[:protect_head])
+    if include_task and protect_head >= 3 and len(base) < 3 and brief.task_message.strip():
+        base.append({"role": "user", "content": brief.task_message})
+    return base
+
+
+def _oldest_exchange_end(base, start):
+    # A protected task may leave its response at start. Remove that response
+    # alone; otherwise remove all user messages and their assistant response.
+    seen_assistant = base[start].get("role") == "assistant"
+    end = start + 1
+    while end < len(base):
+        role = base[end].get("role")
+        if role == "user" and seen_assistant:
+            break
+        seen_assistant = seen_assistant or role == "assistant"
+        end += 1
+    return end
+
+
+def fit_observed_window(brief, messages, prepare, *, protect_head=1, store=None):
+    """An observed rejection overrides the normal recent-turn preservation floor.
+
+    Archive the fewest whole exchanges needed, retaining system instructions and
+    current evidence. The immutable evidence store remains available for rereads.
+    Never repeatedly send a request larger than a window already observed to fail.
+    """
+    base = list(messages)
+    items, text = prepare(brief, base)
+    removed = 0
+    note = ""
+    while len(base) > protect_head and estimate_chars(base) + len(text) > brief.limits.prompt_char_budget:
+        del base[protect_head:_oldest_exchange_end(base, protect_head)]
+        removed += 1
+        note = ("上游已拒绝更大的上下文，旧对话按实测水位归档；此前证据可按 evidence_id 回取。"
+                "未保留正文不代表该问题已核实或可以忽略；需要完整清单时索取 change-manifest。")
+        items, text = prepare(archived_brief(brief, store, note), base)
+    return base, items, text, note, removed

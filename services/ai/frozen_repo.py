@@ -48,7 +48,9 @@ Git 取数与搜索索引可以跨运行复用（同一份快照上重复读同�
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -86,6 +88,9 @@ MAX_READ_BYTES = 1_500_000
 
 #: 进程内 blob 缓存的条目上限（防呆，见模块抬头）。
 BLOB_CACHE_MAX_ENTRIES = 600
+BLOB_CACHE_MAX_BYTES = 32 * 1024 * 1024
+MAX_BLOB_READ_BYTES = 5 * 1024 * 1024
+_CACHE_LOCK = threading.RLock()
 #: 跟踪文件清单的缓存条数（每个 (仓库, tip) 一条，正常只会有几条）。
 TREE_CACHE_MAX_ENTRIES = 8
 
@@ -415,9 +420,19 @@ def resolve_frozen_repository(
 
 def _bounded_put(cache: "Dict[Any, Any]", key: Any, value: Any, limit: int) -> None:
     """往有界缓存里放一条（超上限丢最早的）。**只做规模防呆**，不参与正确性。"""
-    cache[key] = value
-    while len(cache) > max(1, int(limit)):
-        cache.pop(next(iter(cache)), None)
+    with _CACHE_LOCK:
+        cache[key] = value
+        while len(cache) > max(1, int(limit)):
+            cache.pop(next(iter(cache)), None)
+
+
+def _locked_git_operation(method):
+    """Keep a reader's shared GitPython command exclusively through stream EOF."""
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._git_lock:
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class FrozenTreeReader:
@@ -444,6 +459,11 @@ class FrozenTreeReader:
         scope: Any = None,
     ):
         self.frozen = frozen
+        # GitCmdObjectDB reuses cat-file processes whose protocol streams are
+        # not thread-safe. Protect object resolution, tree traversal and the
+        # ENTIRE blob stream consumption; parsing returned bytes stays outside.
+        # Each reader owns its Repo/lock, so unrelated repositories remain parallel.
+        self._git_lock = threading.RLock()
         self._repo = repo
         self._repo_failed = False
         # 范围的三个来源，优先级从高到低：显式参数 → 冻结对象上那一份 → 传进来的范围对象。
@@ -485,6 +505,7 @@ class FrozenTreeReader:
 
     # -- 内部 ---------------------------------------------------------------
 
+    @_locked_git_operation
     def _repository(self):
         """惰性打开 gitpython 的仓库对象；失败返回 None（并记住，不反复重试）。"""
         if self._repo is not None:
@@ -503,6 +524,7 @@ class FrozenTreeReader:
             )
             return None
 
+    @_locked_git_operation
     def _commit(self):
         """冻结的那个提交对象；拿不到返回 None。"""
         repo = self._repository()
@@ -513,6 +535,7 @@ class FrozenTreeReader:
         except Exception:  # noqa: BLE001 —— 对象不在/坏了都算「读不到」
             return None
 
+    @_locked_git_operation
     def has_object(self, commit: Any) -> bool:
         """这个提交还在本地对象库里吗（解析不出来就算不在）。"""
         text = str(commit or "").strip()
@@ -550,6 +573,7 @@ class FrozenTreeReader:
             self._scoped_paths = tuple(path for path in paths if path in self.allowed_paths)
         return self._scoped_paths
 
+    @_locked_git_operation
     def all_tracked_paths(self) -> Optional[Tuple[str, ...]]:
         """冻结 tip 上**全部** Git 跟踪文件（**忽略 `allowed_paths`**）。
 
@@ -590,7 +614,8 @@ class FrozenTreeReader:
 
     # -- 读取 ---------------------------------------------------------------
 
-    def read_bytes(self, path: str) -> Optional[bytes]:
+    @_locked_git_operation
+    def read_bytes(self, path: str, *, max_bytes: int = MAX_BLOB_READ_BYTES) -> Optional[bytes]:
         """读冻结 tip 上这个路径的**原始字节**。不在跟踪树里 / 读不到都返回 `None`。
 
         ## 为什么是 `commit.tree[path]` 而不是读工作区文件
@@ -614,12 +639,16 @@ class FrozenTreeReader:
             # 是因为这个方法的契约只有字节 —— 要理由的调用方走 `read_within_limit`。
             return None
         key = (self.frozen.repository_id, self.frozen.tip, text)
-        cached = _BLOB_CACHE.get(key)
-        if cached is not None:
-            return cached
+        limit = max(1, int(max_bytes))
         commit = self._commit()
         if commit is None:
+            with _CACHE_LOCK:
+                _BLOB_CACHE.pop(key, None)
             return None
+        with _CACHE_LOCK:
+            cached = _BLOB_CACHE.get(key)
+        if cached is not None:
+            return cached if len(cached) <= limit else None
         try:
             blob = commit.tree[text]
         except KeyError:
@@ -628,12 +657,43 @@ class FrozenTreeReader:
             log_print(f"⚠️ AI 取数：读 {text}@{self.frozen.tip[:8]} 失败：{exc}")
             return None
         try:
-            data = blob.data_stream.read()
+            size = getattr(blob, "size", None)
+            if size is not None and int(size) > limit:
+                return None
+            # Metadata is an early rejection, not a substitute for bounding the stream.
+            stream = blob.data_stream
+            pieces, received = [], 0
+            while received <= limit:
+                piece = stream.read(min(1024 * 1024, limit + 1 - received))
+                if not piece:
+                    break
+                pieces.append(piece)
+                received += len(piece)
+            data = b"".join(pieces)
+            if len(data) > limit:
+                return None
         except Exception as exc:  # noqa: BLE001
             log_print(f"⚠️ AI 取数：读 blob 失败 {text}：{exc}")
             return None
-        _bounded_put(_BLOB_CACHE, key, data, BLOB_CACHE_MAX_ENTRIES)
+        with _CACHE_LOCK:
+            if len(data) <= BLOB_CACHE_MAX_BYTES:
+                _bounded_put(_BLOB_CACHE, key, data, BLOB_CACHE_MAX_ENTRIES)
+                while sum(map(len, _BLOB_CACHE.values())) > BLOB_CACHE_MAX_BYTES:
+                    _BLOB_CACHE.pop(next(iter(_BLOB_CACHE)), None)
         return data
+
+    @_locked_git_operation
+    def blob_size(self, path: str) -> Optional[int]:
+        """Read immutable blob metadata without materializing its contents."""
+        if self.out_of_scope(path):
+            return None
+        commit = self._commit()
+        if commit is None:
+            return None
+        try:
+            return int(commit.tree[path].size)
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return None
 
     def read_within_limit(self, path: str) -> Tuple[Optional[bytes], str]:
         """读一份正文，并**先说清限制**：`(字节, 理由)`。
@@ -647,7 +707,10 @@ class FrozenTreeReader:
         """
         if self.out_of_scope(path):
             return None, self.scope_refusal(path)
-        data = self.read_bytes(path)
+        size = self.blob_size(path)
+        if size is not None and size > MAX_READ_BYTES:
+            return None, f"这个文件有 {size:,} 字节，超过单文件读取上限 {MAX_READ_BYTES:,} 字节，本次不读"
+        data = self.read_bytes(path, max_bytes=MAX_READ_BYTES)
         if data is None:
             return None, "这个路径在本次冻结版本里读不到（不在跟踪树里，或对象库缺这个 blob）"
         if len(data) > MAX_READ_BYTES:
@@ -672,13 +735,16 @@ def reset_caches() -> None:
     生产路径不需要主动调用：键里含 tip，强推之后 tip 变了就再也命中不了旧条目。
     这个函数存在是为了让测试能在同一个进程里干净地重来一遍。
     """
-    _TREE_CACHE.clear()
-    _BLOB_CACHE.clear()
+    with _CACHE_LOCK:
+        _TREE_CACHE.clear()
+        _BLOB_CACHE.clear()
 
 
 def cache_sizes() -> Dict[str, int]:
     """当前缓存规模（测试与排查用）。"""
-    return {"trees": len(_TREE_CACHE), "blobs": len(_BLOB_CACHE)}
+    with _CACHE_LOCK:
+        return {"trees": len(_TREE_CACHE), "blobs": len(_BLOB_CACHE),
+                "blob_bytes": sum(map(len, _BLOB_CACHE.values()))}
 
 
 @dataclass(frozen=True)

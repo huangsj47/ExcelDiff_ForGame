@@ -287,11 +287,11 @@ def _meta_chars(item: ContextItem) -> int:
 #
 # 键里的每一项都必须是**决定返回内容**的字段。加字段时的判据就是这一条：
 # `protocol.ContextRequest` 上除了「模型自己看的说明」之外，没有一项可以漏。
-CacheKey = tuple[str, str, str, str, str, str, str]
+CacheKey = tuple[str, ...]
 
 
 def _cache_key(request: ContextRequest) -> CacheKey:
-    return (
+    base = (
         request.type,
         request.commit or "",
         normalize_path(request.path),
@@ -302,6 +302,8 @@ def _cache_key(request: ContextRequest) -> CacheKey:
         # 它进了「决定内容的字段」那一类的判据（见上面 CacheKey 的说明）。
         request.repository_id or "",
     )
+    return base + (request.cursor,) if request.cursor else base
+
 
 
 def _request_of_key(key: CacheKey) -> ContextRequest:
@@ -312,7 +314,7 @@ def _request_of_key(key: CacheKey) -> ContextRequest:
     一处定义（两处各写一遍必然漂移，而漂移的表现是记账里印出另一个文件的路径）。
     """
     parts = [str(part or "") for part in tuple(key)]
-    parts += [""] * (7 - len(parts))
+    parts += [""] * (8 - len(parts))
     return ContextRequest(
         type=parts[0],
         commit=parts[1],
@@ -321,6 +323,7 @@ def _request_of_key(key: CacheKey) -> ContextRequest:
         lines=parts[4],
         query=parts[5],
         repository_id=parts[6],
+        cursor=parts[7],
     )
 
 
@@ -1091,7 +1094,17 @@ class ContextTools:
             # 这个工具**没有 commit**：它搜整个批次（每份文件用各自最后那次提交的内容）。
             # `path` 在这里是**范围前缀**而不是某一条提交改过的某个文件 —— 见
             # `protocol.sanitize_requests` 里那一支的校验。
-            return self.provider.find_references(request.query, request.path)
+            import inspect
+            method = self.provider.find_references
+            params = inspect.signature(method).parameters
+            kwargs = {}
+            if "cursor" in params:
+                kwargs["cursor"] = request.cursor
+            elif request.cursor:
+                return "[检索不可用] 当前取数节点不支持cursor续页；请更新节点，不得将结果视为无引用"
+            if "max_output_chars" in params:
+                kwargs["max_output_chars"] = self._limit_for(request.type)
+            return method(request.query, request.path, **kwargs)
         # 走到这里说明 `sanitize_requests` 漏了一种类型。宁可如实报失败，也不要
         # 静默返回空——那会让模型以为拿到了内容。
         return None

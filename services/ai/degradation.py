@@ -49,6 +49,7 @@ DEGRADE_VERIFY = "subagent_verify"
 DEGRADE_BUDGET = "token_budget_exhausted"
 
 DEGRADATION_LABELS = {
+    "evidence_needs_unresolved": "可补取信息尚未闭环，已保留待核查结论",
     DEGRADE_COVERAGE: "本次输入差异未完整取证，已保留现有结论",
     DEGRADE_ROUNDS: "轮次用尽，基于已有证据出结论",
     DEGRADE_REQUESTS: "上下文索取额度用尽，基于已有证据出结论",

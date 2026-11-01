@@ -275,10 +275,22 @@ def render_manifest_reference(plan: ManifestPlan, *, page_size: int = 100) -> st
     """
     size = max(1, min(int(page_size or 100), 500))
     total = len(plan.entries)
+    # A row-count limit alone can create an unreadable page for long paths.
+    # Bound source pages before numbering them, so lines=N always means page N
+    # even when the downstream tool divides oversized document sections.
+    chunks, chunk, used = [], [], 512
+    for item in plan.entries:
+        shards = ",".join(item.assigned_shards)
+        row = f"- [{shards}] `{item.path}` @ `{item.commit[:12]}` source={item.source or 'delta'}"
+        if chunk and (len(chunk) >= size or used + len(row) + 1 > 8_500):
+            chunks.append(chunk)
+            chunk, used = [], 512
+        chunk.append(row)
+        used += len(row) + 1
+    chunks.append(chunk)
     lines: list[str] = []
-    for start in range(0, max(total, 1), size):
-        chunk = plan.entries[start : start + size]
-        page = start // size + 1
+    start = 0
+    for page, chunk in enumerate(chunks, 1):
         span = f"{start + 1}-{start + len(chunk)}" if chunk else "0"
         lines.extend((f"## 第 {page} 页（{span}）", ""))
         if page == 1:
@@ -290,11 +302,7 @@ def render_manifest_reference(plan: ManifestPlan, *, page_size: int = 100) -> st
                     "",
                 )
             )
-        for item in chunk:
-            shards = ",".join(item.assigned_shards)
-            lines.append(
-                f"- [{shards}] `{item.path}` @ `{item.commit[:12]}` "
-                f"source={item.source or 'delta'}"
-            )
+        lines.extend(chunk)
         lines.append("")
+        start += len(chunk)
     return "\n".join(lines).rstrip() + "\n"

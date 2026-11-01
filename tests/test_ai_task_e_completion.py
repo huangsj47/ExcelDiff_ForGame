@@ -115,6 +115,7 @@ def test_manifest_assigns_every_file_deterministically_and_pages_without_truncat
     # 「`lines` 写页号」是错的，模型点名第 3 页会拿到第 2 页。
     segments, _note = split_segments(render_manifest_reference(first), kind="read_reference")
     assert len(segments) == 11
+    assert "".join(segments) == render_manifest_reference(first)
     for page, segment in enumerate(segments, start=1):
         assert segment.lstrip().startswith(f"## 第 {page} 页"), page
     assert "共 1005 个文件" in segments[0] and "分配指纹" in segments[0], (
@@ -844,3 +845,19 @@ def test_evidence_store_keeps_one_body_and_supports_id_lookup():
         "unique_evidence": 1,
         "stored_chars": len(item.text),
     }
+
+
+def test_long_path_manifest_pages_remain_complete_and_numbers_match_tool_sections():
+    rows = [{"repository_id": 1, "commit_id": "a" * 40,
+             "file_path": f"config/{'long_directory/' * 15}table_{i:04d}.xlsx", "source": "delta"}
+            for i in range(250)]
+    plan = build_manifest(rows, shard_count=3)
+    source = render_manifest_reference(plan)
+    pieces, _ = split_segments(source, kind="read_reference")
+    assert "".join(pieces) == source
+    assert len(pieces) > 3
+    for number, piece in enumerate(pieces, 1):
+        assert piece.startswith(f"## 第 {number} 页")
+        assert len(piece) < 8500
+    for entry in plan.entries:
+        assert source.count(f"`{entry.path}`") == 1

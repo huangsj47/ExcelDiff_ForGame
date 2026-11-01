@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+
+from services.ai.evidence_rendering import FULL_EVIDENCE
 from typing import Any, Container, Mapping, Sequence
 
 # 单元格值的展示上限，防止某个字段里塞了一整段文本把行撑爆。
@@ -95,7 +97,7 @@ def _render_sheet(name: str, sheet: Any, *, max_rows: int) -> list[str]:
     # 列级变更先算：它同时决定 rows / header_rows 里哪些 `cell_changes` 只是「列被删」
     # 的连带结果（多行表头的仓库里，表头块会为同一列再报一遍）。
     column_changes = _header_changes(sheet)
-    removed_columns = _removed_column_names(column_changes)
+    removed_columns = {} if FULL_EVIDENCE.get() else _removed_column_names(column_changes)
     removed_evidence = _removed_column_evidence(rows, removed_columns)
     header_lines = _render_header_block(sheet, skip_columns=removed_columns)
 
@@ -143,6 +145,8 @@ def _render_sheet(name: str, sheet: Any, *, max_rows: int) -> list[str]:
     # 表头行紧跟在统计之后、数据行之前 —— 与页面上的位置一致（表头块在最上面）。
     head.extend(header_lines)
 
+    if FULL_EVIDENCE.get():
+        max_rows = len(shown)
     for row in shown[:max_rows]:
         rendered = _render_row(row, skip_columns=removed_columns)
         if rendered:
@@ -175,7 +179,7 @@ def _render_header_block(sheet: Mapping, *, skip_columns: Container[str] = ()) -
     if not changed:
         return []
     lines = [f"- 表头 {len(rows)} 行中有 {len(changed)} 处改动。"]
-    for row in changed[:_MAX_HEADER_ROWS]:
+    for row in changed if FULL_EVIDENCE.get() else changed[:_MAX_HEADER_ROWS]:
         rendered = _render_row(row, skip_columns=skip_columns)
         if rendered:
             lines.append(rendered)
@@ -344,9 +348,9 @@ def _render_column_changes(
     if breakdown:
         first += f"：{breakdown}"
     lines = [first + "。这是列结构变化，不是行数据改动。"]
-    for change in changes[:_MAX_COLUMN_CHANGES]:
+    for change in changes if FULL_EVIDENCE.get() else changes[:_MAX_COLUMN_CHANGES]:
         lines.append(_column_change_line(change, evidence))
-    if len(changes) > _MAX_COLUMN_CHANGES:
+    if not FULL_EVIDENCE.get() and len(changes) > _MAX_COLUMN_CHANGES:
         lines.append(f"- （另有 {len(changes) - _MAX_COLUMN_CHANGES} 处列变更未列出。）")
     lines.extend(_render_sheet_columns(sheet, has_removed=bool(counts.get("removed"))))
     if dropped_rows:
@@ -393,8 +397,8 @@ def _render_sheet_columns(sheet: Mapping, *, has_removed: bool = False) -> list[
     if not isinstance(headers, Sequence) or isinstance(headers, (str, bytes)) or not headers:
         return []
     names = [str(name) for name in headers]
-    text = "、".join(names[:_MAX_COLUMN_NAMES])
-    if len(names) > _MAX_COLUMN_NAMES:
+    text = "、".join(names if FULL_EVIDENCE.get() else names[:_MAX_COLUMN_NAMES])
+    if not FULL_EVIDENCE.get() and len(names) > _MAX_COLUMN_NAMES:
         text += f"…（另有 {len(names) - _MAX_COLUMN_NAMES} 列未列出）"
     # 顺序与 `diff_excel_compare` 的 `ordered_columns` 一致：当前列在前，被删掉的追加在后。
     suffix = "；按当前表顺序，已删除的列排在最后" if has_removed else "，按当前表顺序"
@@ -402,7 +406,7 @@ def _render_sheet_columns(sheet: Mapping, *, has_removed: bool = False) -> list[
 
 
 def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit] + "…"
+    return text if FULL_EVIDENCE.get() or len(text) <= limit else text[:limit] + "…"
 
 
 def _row_status(row: Any) -> str:
@@ -508,6 +512,8 @@ def _cell(value: Any) -> str:
     if not text.strip():
         return "（空）"
     text = text.replace("\n", " ").strip()
+    if FULL_EVIDENCE.get():
+        return str(value).replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
     if len(text) > _MAX_CELL_CHARS:
         return text[:_MAX_CELL_CHARS] + "…"
     return text

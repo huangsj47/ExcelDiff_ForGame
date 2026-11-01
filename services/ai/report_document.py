@@ -1195,3 +1195,15 @@ def build_report_markdown(
     lines.append(RENDER_FOOTER.format(version=RENDER_VERSION))
 
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def append_analysis_notices(report_markdown, normalized, dimension_ids):
+    """Single-agent and family paths use identical classification/cap notices."""
+    from services.ai.subagent import build_cap_section, build_unclassified_section
+
+    sections = (build_unclassified_section(normalized.anomalies, dimension_ids),
+                build_cap_section(normalized.dropped))
+    for section in sections:
+        if section:
+            report_markdown = (report_markdown.rstrip() + "\n\n" + section).strip() + "\n"
+    return report_markdown

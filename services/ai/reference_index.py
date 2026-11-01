@@ -1,82 +1,15 @@
-"""Reusable inverted index for reference queries within a frozen snapshot.
+"""Bounded, reusable matching indexes for a frozen file snapshot.
 
-## 它替换掉了什么
+Text queries use case-insensitive substring matching. Token postings accelerate
+identifier queries without changing the candidate set. Workbooks are matched
+across all sheets and complete cell values; only hit previews are shortened.
 
-以前每次 `find_references` 都**重新逐个文件读 blob**（`reference_search.search_files`），
-而一次分析里同一个词常被问两遍、不同词各问一次 —— 一次周版本 767 个文件就是几十秒的
-重复劳动。这里把「读一遍」与「问很多次」分开：`build()` 读一次，`search()` 只查内存。
-
-## 命中集合必须与穷举搜索**逐条相等**
-
-这是本模块**唯一的正确性判据**（`tests/test_ai_find_references.py::test_index_hits_equal_exhaustive_search`
-把两份实现放在同一份语料上逐条比）。索引漏一条命中不是「不完整」，是**「这里没有引用」这条
-错误结论** —— 模型据此删掉一个真正的耦合点。所以这里的加速**只能是**候选集的裁剪，
-不能是判据的换法。
-
-具体做法（曾经错过一次，见下）：
-
-* token 桶的 key 是**行里的每个 token**。查 `target_id` 时不能只看 `hits_by_token["target_id"]`
-  那一个桶 —— 只要**任何一处**把标识符当独立词用过，桶就存在，于是 `target_id_extra`
-  / `x_target_id` / `target_ids` 这些「query 在更长 token 内部」的行**全被漏掉**。
-  正确做法是并上**所有「key 里包含 query」的桶**。
-* 这个并集**恰好**等于子串匹配的结果集（不多不少）当且仅当 query 本身是一个合法 token：
-  * 不多：桶 key 是行里真实出现过的 token，key 含 query ⇒ 那一行含 query；
-  * 不少：query 合法（`_TOKEN_RE` 全匹配）时，它在任何一行的**每一次出现都落在某个 token
-    内部** —— 分词是「从行首贪心吃下来」的，`[A-Za-z_][A-Za-z0-9_]*` 会把整个词吃成一个
-    token，`\\d{3,}` 会把整段数字吃掉。反例只可能出现在「query 自身不是 token」的时候
-    （`item.id`、`2abc`、中文），那时走逐行兜底（`_scan_lines`），判据仍是子串匹配。
-* 一行里可能有**两个**不同的 token 都含 query（`local target_id = target_id_extra`），
-  所以并集要按行去重；顺序按「文件在本批次里的次序 → 行号」，与穷举搜索的产出顺序一致。
-
-## 编码：索引这里**比 `file_content` 严格**
-
-`file_content` 那条路的契约是「任何字节都要出文本、绝不返回 None」
-（`utils.text_decoding.decode_text_bytes`，五档兜底到 `latin-1`/`replace`）。但
-`latin-1` 能解**任意**字节序列，拿它当判据就永远判不出「这份内容解不出文本」——
-索引一份乱码进来，抬头却写「搜过了」，而中文标识符在乱码里一个都匹配不上：**又一处
-「没搜到」被写成了「不存在」**。所以索引只认 utf-8 与 gbk（`INDEX_ENCODINGS`，与
-`utils.text_decoding.TEXT_ENCODINGS` 的前两档同序），解不出的**跳过并计入
-`undecodable_paths`** —— 宽松留给 `file_content`，缺口留给模型看。
-
-## 配表（xlsx/xlsm）：给「二进制」开一条**定向**豁免
-
-`find_references` 原先对配表只有一个答案：**没搜**。xlsx 的字节是 zip 容器，`is_binary`
-必判真 → 进 `binary_paths`，`repo_reference` 的覆盖账把它写在「配表/生成物等，没搜」
-那一行里。于是「`Item_1001` 还被哪张表引用」这个问题只能靠 `file_content` 一张张表去猜
-（而配表的单条上限只有 11,000 字符）。
-
-可它的**内容**是单元格文本。所以这里按扩展名（`excel_source._is_openpyxl_workbook`，
-与 `file_content` 的表格分支同一份判定，不另写第三份清单）在**二进制判定之前**解析
-前 3 张表的前 200 行，把每行建成 `[第k张表 表名 第r行] 单元格 ｜ …` 这样一行 ——
-行号取表里的**物理行号**，命中之后模型要能回到那张表核对（`file_content` 的 `lines`
-对配表表示「第几张表」，所以表序号也写进同一行）。
-
-三道限制都是为了让首次查询别被拖死（理由同 `MAX_INDEX_FILES`）：单文件 ≤ 5 MB
-（`XLSX_MAX_INDEX_BYTES`）、前 3 张表、每张表前 200 行；超限的进 `oversized_paths`、
-打不开的退回 `binary_paths` —— **两类仍然记账**，抬头照样说「这些没索引」。
-
-真正的二进制（图片/音频/压缩包）与 `.xls`/`.xlsb`（OLE，openpyxl 打不开）一个字都没变。
-
-（与穷举基准 `reference_search.search_files` 的差异是**有意**的：基准仍把配表当二进制跳过，
-索引这一侧更宽，宽出来的这一档正是本工作包要补的召回。既有那条「索引 == 穷举」的用例
-语料全是代码文本，不受影响。）
-
-## 三处「读了但没索引」都要记账
-
-`missing_paths`（blob 取不到）/ `binary_paths`（不是文本，含**打不开**的工作簿）/
-`oversized_paths`（超过 `MAX_INDEX_FILE_BYTES`，配表则超过 `XLSX_MAX_INDEX_BYTES`）/
-`undecodable_paths`（解不出文本）与 `indexed_files` 之后的那些（超过
-`MAX_INDEX_FILES` 的**预热门槛**，见下）必须能加起来等于本批次的总数 ——
-`search()` 把这几个数原样交给 `render_result`，模型靠它们分清「没搜到」与「没搜完」。
-
-## `MAX_INDEX_FILES`：首次查询的成本上限
-
-`build()` 在一个线程里顺序读每个文件的 blob，而 Agent 侧等检索回来只有
-`REFERENCES_WAIT_SECONDS = 40` 秒（`services/agent_file_content_dispatch.py`）。索引
-**一次读完全部**会让首次查询从 240 个文件涨到 767 个（Run 22 实测就是 767 次 `git show`），
-大概率落成 `pending`（模型这一轮的额度白花，下一轮还要再要一次）。所以索引只预热门槛内的
-前 N 个文件，剩下的**如实算成缺口**（`search()` 的 `files_total` 仍是本批次的总数、
-`unindexed > 0` 时 `truncated_files` 为真），绝不静默当成本批次已经搜全。
+A file that exceeds a compressed, expanded, cell-count or decoded-text bound
+is a whole-file coverage gap. Page-wide byte/text bounds stop BEFORE the next
+file is accounted as indexed; indexed_files is the next real scan offset.
+The repository layer exposes opaque file/hit continuations rather than asking
+the model to guess directory prefixes. UTF-8 and GBK are the supported index
+encodings; unrecognized encodings remain explicit gaps.
 """
 
 from __future__ import annotations
@@ -84,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+import zipfile
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional, Sequence
 
@@ -110,25 +44,24 @@ INDEX_ENCODINGS = ("utf-8", "gbk")
 # `XLSX_MAX_INDEX_BYTES` 单独限。
 MAX_INDEX_FILE_BYTES = 1_500_000
 
-# -- 配表（xlsx/xlsm）的索引上限 -------------------------------------------
-#
-# 为什么值得为配表单独开一条路：`Item_1001` 还被哪张表引用，答案就在配表里，而在此之前
-# 它整类被判成二进制跳过（见模块 docstring）。但配表也不能整份读进来 —— 一张万行表就是
-# 几十 MB 的字符串，而「首次查询要快」这条约束（见 `MAX_INDEX_FILES`）对表比对代码更紧。
-#
-# * `XLSX_MAX_INDEX_BYTES`：5 MB。配表比代码大是常态，但 5 MB 之上基本是嵌入的图片、
-#   导出的全量数据备份 —— 那份东西本来也不该进检索。
-# * `XLSX_MAX_INDEX_SHEETS` / `XLSX_MAX_INDEX_ROWS`：前 3 张表、每张前 200 行。
-#   索引要回答的是「这个 id 在哪儿出现过」，不是「这张表长什么样」；前三张表 + 前 200 行
-#   覆盖了配表里绝大多数 id 所在的位置（主表在前，附表在后）。
-# * `XLSX_MAX_CELL_CHARS` / `XLSX_MAX_ROW_CHARS`：单格与单行的字符上限（与
-#   `excel_view._MAX_CELL_CHARS` 同一量级）。超出的基本是备注/描述这类长文本列 ——
-#   id 不会有 160 个字符，而宽表几行长文本就能吃掉几十 MB 内存。
+# Workbook resource bounds; the four legacy sampling constants below are
+# retained for import compatibility only and no longer truncate matching.
 XLSX_MAX_INDEX_BYTES = 5 * 1024 * 1024
 XLSX_MAX_INDEX_SHEETS = 3
 XLSX_MAX_INDEX_ROWS = 200
 XLSX_MAX_CELL_CHARS = 160
 XLSX_MAX_ROW_CHARS = 2_000
+# These are resource bounds, not silent row/cell sampling. An over-limit
+# workbook is excluded as a whole and remains an explicit coverage gap.
+XLSX_MAX_EXPANDED_BYTES = 64 * 1024 * 1024
+MAX_INDEX_TOTAL_CHARS = 8 * 1024 * 1024
+MAX_INDEX_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_INDEX_TOTAL_EXPANDED_BYTES = 128 * 1024 * 1024
+XLSX_MAX_CELLS = 2_000_000
+
+
+class IndexReadLimit(ValueError):
+    """A reader rejected a blob before reading it because it exceeded its bound."""
 
 # 一次 `build()` 最多索引多少个文件 —— **这是调用方的策略，不是 `build()` 的默认值**。
 #
@@ -202,6 +135,14 @@ def _cell_text(value) -> str:
     return " ".join(str(value).split())
 
 
+def _xlsx_expanded_bytes(content) -> int:
+    try:
+        with zipfile.ZipFile(io.BytesIO(bytes(content))) as archive:
+            return sum(entry.file_size for entry in archive.infolist())
+    except zipfile.BadZipFile:
+        return 0
+
+
 def _xlsx_lines(content, *, path: str = "") -> Optional[tuple[str, ...]]:
     """工作簿字节 → 按行索引的文本行；打不开返回 `None`（由调用方落进 `binary` 那本账）。
 
@@ -214,18 +155,24 @@ def _xlsx_lines(content, *, path: str = "") -> Optional[tuple[str, ...]]:
     且它按字符额度收敛、不做「前几张表」的上限。共同的读取口径（openpyxl 的
     `read_only=True, data_only=True`、能读哪些扩展名）两边是一致的。
 
-    `data_only=True` 与 `excel_source` 同口径：公式取缓存值。配表里用公式算 id 的情形极少，
-    而把这个口径分叉会让「正文里的值」与「检索到的值」对不上。
+    缓存值与公式表达式都匹配；公式追加显式标记，避免没有计算缓存的公式静默变成空格。
     """
     if not isinstance(content, (bytes, bytearray, memoryview)):
         return None
+    if _xlsx_expanded_bytes(content) > XLSX_MAX_EXPANDED_BYTES:
+        raise IndexReadLimit("workbook expanded size exceeds indexing bound")
     try:
         from openpyxl import load_workbook
     except ImportError:  # pragma: no cover —— openpyxl 是平台的既有依赖
         return None
+    book = formulas = None
     try:
         book = load_workbook(io.BytesIO(bytes(content)), data_only=True, read_only=True)
+        formulas = load_workbook(io.BytesIO(bytes(content)), data_only=False, read_only=True)
     except Exception as exc:  # noqa: BLE001 —— 打不开就退回「不是文本」，不能炸掉整批索引
+        for opened in (book, formulas):
+            if opened is not None:
+                opened.close()
         # 这一行是「为什么没搜」的现场记录：账本里它只会变成一个 `binary` 计数。
         log_print(
             f"⚠️ AI 检索：配表解析失败，按二进制跳过 {path or '<未知路径>'} "
@@ -235,26 +182,45 @@ def _xlsx_lines(content, *, path: str = "") -> Optional[tuple[str, ...]]:
 
     lines: list[str] = []
     try:
-        for sheet_index, name in enumerate(book.sheetnames[:XLSX_MAX_INDEX_SHEETS], start=1):
+        text_chars = 0
+        dimensions = sum((book[name].max_row or 0) * (book[name].max_column or 0)
+                         for name in book.sheetnames)
+        if dimensions > XLSX_MAX_CELLS:
+            raise IndexReadLimit("workbook cell dimensions exceed indexing bound")
+        visited_cells = 0
+        for sheet_index, name in enumerate(book.sheetnames, start=1):
             sheet = book[name]
-            for physical, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                if physical > XLSX_MAX_INDEX_ROWS:
-                    # 只停**正文累积**这一侧：`read_only` 的流式读取不会为此多读后面那些行。
-                    break
-                cells = [
-                    text[:XLSX_MAX_CELL_CHARS]
-                    for value in (row or ())
-                    if (text := _cell_text(value))
-                ]
+            formula_sheet = formulas[name]
+            # Streaming readers trust the producer's <dimension> by default.
+            # Some exporters underreport it, silently hiding real cells outside
+            # that range. Read the XML to its end and bound actual traversal too.
+            sheet.reset_dimensions()
+            formula_sheet.reset_dimensions()
+            from itertools import zip_longest
+            rows = zip_longest(sheet.iter_rows(values_only=True),
+                               formula_sheet.iter_rows(values_only=True), fillvalue=())
+            for physical, (row, formula_row) in enumerate(rows, start=1):
+                visited_cells += max(1, len(row or ()), len(formula_row or ()))
+                if visited_cells > XLSX_MAX_CELLS:
+                    raise IndexReadLimit("workbook cell traversal exceeds indexing bound")
+                cells = []
+                for value, formula in zip_longest(row or (), formula_row or (), fillvalue=None):
+                    text = _cell_text(value)
+                    if isinstance(formula, str) and formula.startswith("=") and formula != value:
+                        text += f" [公式 {formula}]"
+                    if text:
+                        cells.append(text)
                 if not cells:
                     # 整行空：不占一行索引（它本来也搜不到任何词），但物理行号照旧往上走。
                     continue
                 body = " ｜ ".join(cells)
-                if len(body) > XLSX_MAX_ROW_CHARS:
-                    # 宽表 × 长文本列：单行不封顶就有几十 MB 的量级。截断只影响这一行的
-                    # **右端**（通常是备注/描述列），id 不会长到 2,000 字之后。
-                    body = body[:XLSX_MAX_ROW_CHARS] + "…"
-                lines.append(f"[第{sheet_index}张表 {name} 第{physical}行] {body}")
+                line = f"[第{sheet_index}张表 {name} 第{physical}行] {body}"
+                text_chars += len(line)
+                if text_chars > MAX_INDEX_TOTAL_CHARS:
+                    raise IndexReadLimit("workbook text exceeds indexing bound")
+                lines.append(line)
+    except IndexReadLimit:
+        raise
     except Exception as exc:  # noqa: BLE001 —— 读到一半坏掉，整份按「没索引」算，不给半份
         log_print(
             f"⚠️ AI 检索：配表读取中断，整份不索引 {path or '<未知路径>'} "
@@ -262,10 +228,11 @@ def _xlsx_lines(content, *, path: str = "") -> Optional[tuple[str, ...]]:
         )
         return None
     finally:
-        try:
-            book.close()
-        except Exception:  # noqa: BLE001
-            pass
+        for opened in (book, formulas):
+            try:
+                opened.close()
+            except Exception:  # noqa: BLE001
+                pass
     return tuple(lines)
 
 
@@ -341,6 +308,8 @@ class SnapshotReferenceIndex:
         version: str = "reference-index/v1",
         max_files: Optional[int] = None,
         max_file_bytes: int = MAX_INDEX_FILE_BYTES,
+        max_total_chars: int = MAX_INDEX_TOTAL_CHARS,
+        max_total_bytes: int = MAX_INDEX_TOTAL_BYTES,
     ) -> "SnapshotReferenceIndex":
         """读一遍这批 `(路径, 提交)` 并建索引。
 
@@ -350,7 +319,7 @@ class SnapshotReferenceIndex:
         `XLSX_MAX_INDEX_BYTES` 单独限**：它是压缩容器，字节数天然比文本大）；
         `INDEX_ENCODINGS` 都解不出 → 跳过。**四者都记账**（见模块 docstring）。
 
-        配表（`_is_openpyxl_workbook`）多一条前置分支：按前 3 张表的前 200 行抽成文本行
+        配表（`_is_openpyxl_workbook`）多一条前置分支：完整读取全部工作表与单元格值
         再进同一条分词（见 `_xlsx_lines`）；抽不出来（打不开 / 超 `XLSX_MAX_INDEX_BYTES`）
         就退回上面那四态，**不会**变成「静默消失」。
 
@@ -367,14 +336,26 @@ class SnapshotReferenceIndex:
         binary: set[str] = set()
         oversized: set[str] = set()
         undecodable: set[str] = set()
+        total_chars = 0
+        total_bytes = 0
+        expanded_bytes = 0
         for position, (path, commit) in enumerate(indexed):
             try:
                 content = reader(path, commit)
+            except IndexReadLimit:
+                oversized.add(path)
+                continue
             except Exception:  # a missing blob is an index gap, not an index failure
                 content = None
             if content is None:
                 missing.add(path)
                 continue
+            cost_bytes = (len(content) if isinstance(content, (bytes, bytearray, memoryview))
+                          else 4 * len(str(content)))
+            if max_total_bytes and total_bytes + cost_bytes > max_total_bytes and position:
+                limit = position
+                break
+            total_bytes += cost_bytes
             # 配表**在二进制判定之前**：xlsx 的字节是 zip 容器，`is_binary` 必判真，但它的
             # 内容是可读的单元格文本（见模块 docstring 那一节）。抽不出行时落回下面那条路，
             # 于是「打不开的工作簿」仍然进 `binary`、超 5 MB 的进 `oversized` —— 都记账。
@@ -382,8 +363,27 @@ class SnapshotReferenceIndex:
                 if len(content) > XLSX_MAX_INDEX_BYTES:
                     oversized.add(path)
                     continue
-                table_lines = _xlsx_lines(content, path=path)
+                # Cached values and formula expressions are both searchable;
+                # count both streaming passes in the page expansion budget.
+                expanded = 2 * _xlsx_expanded_bytes(content)
+                if expanded_bytes + expanded > MAX_INDEX_TOTAL_EXPANDED_BYTES and position:
+                    limit = position
+                    break
+                expanded_bytes += expanded
+                try:
+                    table_lines = _xlsx_lines(content, path=path)
+                except IndexReadLimit:
+                    oversized.add(path)
+                    continue
                 if table_lines is not None:
+                    cost = sum(map(len, table_lines))
+                    if max_total_chars and total_chars + cost > max_total_chars:
+                        if position:
+                            limit = position
+                            break
+                        oversized.add(path)
+                        continue
+                    total_chars += cost
                     lines_by_path[path] = table_lines
                     _index_lines(table_lines, position, token_lines)
                     continue
@@ -400,6 +400,14 @@ class SnapshotReferenceIndex:
                 undecodable.add(path)
                 continue
             lines = tuple(text.splitlines())
+            cost = len(text)
+            if max_total_chars and total_chars + cost > max_total_chars:
+                if position:
+                    limit = position
+                    break
+                oversized.add(path)
+                continue
+            total_chars += cost
             lines_by_path[path] = lines
             _index_lines(lines, position, token_lines)
         return cls(
@@ -448,7 +456,7 @@ class SnapshotReferenceIndex:
         matched = len(candidates)
         start = max(0, int(cursor or 0))
         page = candidates[start:start + max_hits]
-        hits = tuple(self._hit_at(position, number) for position, number in page)
+        hits = tuple(self._hit_at(position, number, needle) for position, number in page)
         end = start + len(page)
 
         missing = len(self.missing_paths & allowed)
@@ -504,11 +512,23 @@ class SnapshotReferenceIndex:
                     found.append((position, number))
         return found
 
-    def _hit_at(self, position: int, number: int) -> Hit:
+    def _hit_at(self, position: int, number: int, needle: str = "") -> Hit:
         """`(entries 下标, 行号)` → 给模型看的那一条命中（截断口径与穷举搜索逐字一致）。"""
         path = self.entries[position][0]
         line = self.lines_by_path[path][number - 1]
-        return Hit(path=path, line=number, text=line.strip()[:MAX_LINE_CHARS])
+        text = line.strip()
+        if len(text) > MAX_LINE_CHARS:
+            # Truncate the preview AFTER matching, keeping both workbook
+            # coordinates and the match even when it lies in a far-right cell.
+            location = ""
+            if _is_openpyxl_workbook(path) and text.startswith("[") and "] " in text:
+                location, text = text.split("] ", 1)
+                location += "] "
+            room = max(20, MAX_LINE_CHARS - len(location) - 2)
+            offset = text.lower().find(needle) if needle else 0
+            start = max(0, offset - min(40, room // 3))
+            text = location + ("…" if start else "") + text[start:start + max(room, len(needle))] + "…"
+        return Hit(path=path, line=number, text=text)
 
 
 __all__ = [
