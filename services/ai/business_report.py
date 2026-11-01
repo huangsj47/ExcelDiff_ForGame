@@ -23,6 +23,33 @@ def evidence_label(item):
     return "依据待补，影响待确认"
 
 
+def risk_brief(item):
+    """Reuse canonical facts/causal fields, never a second model-written title.
+
+    These are display excerpts only. Keep the tail (often a counterexample or
+    exceptional value) and mark omissions; full statements remain in the card.
+    """
+    def excerpt(value, limit):
+        value = " ".join(str(value or "").split()).rstrip("。；; ")
+        if len(value) <= limit:
+            return value
+        head = (limit - 1) * 2 // 3
+        return value[:head] + "…" + value[-(limit - head - 1):]
+
+    fact = excerpt(item.get("change_fact"), 80)
+    impact = excerpt(item.get("impact_hypothesis"), 80)
+    conditions = excerpt("；".join(item.get("impact_conditions") or ()), 60)
+    question = excerpt(item.get("decision_question"), 60)
+    brief = f"变化：{fact}；风险假设：{impact}"
+    if conditions:
+        brief += f"；触发前提（待确认）：{conditions}"
+    else:
+        brief += "；前提未核实"
+        if question:
+            brief += f"，待确认：{question}"
+    return brief
+
+
 def render(items, sections, *, confirmed_blocker_ids=()):
     from services.ai.report_document import _business_text as text
     from services.ai.report_document import severity_label
@@ -50,7 +77,7 @@ def render(items, sections, *, confirmed_blocker_ids=()):
         lines.extend(["**风险速览**（等级表示关注优先级，业务影响仍需验证）", ""])
         for label, item in labelled:
             lines.append(f"- **{label} · {severity_label(item['severity'])} · {text(item['business_area'])}**："
-                         f"关注标题：{text(item.get('title') or item['change_fact'])}")
+                         f"{text(risk_brief(item))}")
         lines.append("")
     for label, item in labelled:
         lines.extend([f"## {label} · {severity_label(item['severity'])} · {text(item['business_area'])}"
@@ -107,11 +134,15 @@ def render(items, sections, *, confirmed_blocker_ids=()):
                               + text(action["model_expected"]), ""])
         refs = list(item.get("evidence_refs", ())) + list(item.get("impact_refs", ()))
         refs.extend(ref for action in item["test_actions"] for ref in action.get("expected_refs", ()))
+        seen_coordinates = set()
         for reference in refs:
             coordinate = " / ".join(text(reference.get(key)) for key in (
                 "evidence_id", "repository_id", "repository", "commit", "path", "lines",
             ) if reference.get(key))
             available = "（未取回或不可用）" if reference.get("available") is False else ""
+            if (coordinate, available) in seen_coordinates:
+                continue
+            seen_coordinates.add((coordinate, available))
             lines.extend([f"- 证据：{coordinate}{available}", ""])
         if not refs:
             lines.extend(["尚未绑定本轮取证回执；下列原异常坐标未重新核验。" if item.get("evidence_notes")
