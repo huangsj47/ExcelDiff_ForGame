@@ -139,11 +139,8 @@
                 + '（省下约 ' + num(compaction.dropped_chars) + ' 字），最近几轮原文保留。'
             );
         }
-        // 窗口那条说明由服务端下发（含「窗口是按默认值算的」这种必须说清的事）。
-        var budgetNote = str(context.budget_note);
-        if (budgetNote) {
-            lines.push(budgetNote);
-        }
+        // 窗口来源和字符水位属于运行诊断（context.budget_note / budget_plan），
+        // 不拼进业务报告。降级、证据丢失与压缩告警仍在上面明确展示。
         // **空行分隔，不是单换行**：这几句是**互不相干的三件事**（降级 / 压过历史 /
         // 窗口是按默认值算的），而报告渲染器把段落内的单换行当软换行、用空格接起来
         // （见 `ai-report-markdown.js` 的 `flushPara`）—— 用单换行的话它们会连成一大句，
@@ -219,7 +216,9 @@
         var body = str(responseText);
         // 覆盖段（读之前的前提）→ 正文 → 告警（读完之后紧接着要判断的那句）。
         var before = [coverageNotice(payload)].filter(function (one) { return one; });
-        var after = [contextNotice(payload)].filter(function (one) { return one; });
+        var notice = contextNotice(payload);
+        // 独立章节让阅读器保持降级告警展开，避免落入最后一章的折叠正文。
+        var after = notice ? ['## 运行提示（平台）\n\n' + notice] : [];
         if (!before.length && !after.length) { return body; }
         return before.concat(body ? [body] : [], after).join('\n\n');
     }

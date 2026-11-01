@@ -121,6 +121,9 @@ def with_observability(record: Any, entry: dict | None) -> dict | None:
         return None
     return {
         **entry,
+        **{key: getattr(record, key, None) for key in (
+            "requested_max_tokens", "effective_max_tokens", "gateway_max_tokens", "max_tokens_adjustment",
+        )},
         # 未上报存 `None`（不存 0）：见模块 docstring 的口径那一条。
         "visible_response_chars": getattr(record, "visible_response_chars", None),
         "reasoning_tokens": getattr(record, "reasoning_tokens", None),
@@ -158,6 +161,9 @@ def round_usage_fields(
         "duration_ms": duration_ms,
         "response_text": text,
         "finish_reason": usage["finish_reason"],
+        **{key: usage.get(key) for key in (
+            "requested_max_tokens", "effective_max_tokens", "gateway_max_tokens", "max_tokens_adjustment",
+        )},
         # 「这一次的输出撞上了单次输出上限」——**可观测**（E4）。两个信号取并集：
         # 上游明说的 `finish_reason == "length"`，以及我们自己看出来的括号不配平。
         # 落成 RoundRecord 上的一个 bool 而不是让读的人自己去比 `finish_reason`：

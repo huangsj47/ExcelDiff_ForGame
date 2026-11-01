@@ -10,6 +10,7 @@
     <link href="{{ url_for('static', filename='css/style.css') }}?v=1.2" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/excel-diff-new.css') }}?v=2.1">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/commit-colors-patch.css') }}?v=1.0">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/ai-report-reader.css') }}?v=1">
     {% block head %}{% endblock %}
     <style>
         html, body {
@@ -558,7 +559,7 @@
     <!-- 渲染器的版本查询串：浏览器会缓存这个文件，而它的行为会直接影响**报告读起来
          是什么样**（2026-09-25 改过段落换行）。没有 `?v=` 时，用户看到的仍是旧渲染，
          会以为改动没生效 —— CSS 那几行一直是这么做的，这里补齐。 -->
-    <script src="{{ url_for('static', filename='js/ai-report-markdown.js') }}?v=2"></script>
+    <script src="{{ url_for('static', filename='js/ai-report-markdown.js') }}?v=3"></script>
     {% if is_admin() and deployment_mode in ['platform', 'agent'] %}
     <script>
     (function() {

@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
@@ -40,7 +41,7 @@ from services.ai.family_ledger import (
     _markdown_excerpt,
     evidence_refs_for,
 )
-from services.ai.prompt import build_system_prompt, build_user_message
+from services.ai.prompt import _wrap_untrusted, build_system_prompt, build_user_message
 from services.ai.prompt_cache import mark_cache_breakpoint
 from services.ai.protocol import Anomaly, DroppedItem, unclassified_anomalies
 from services.ai.report_document import demote_headings
@@ -292,10 +293,20 @@ class FamilyPlan:
     # 直接手搓 `FamilyPlan` 的调用方（测试）—— `run_family` 会按 `limits × 成员数`
     # 重建一份，行为退回「名义额即池」。
     quota: FamilyQuota | None = None
+    shared_paths: tuple[str, ...] = ()
+    dependency_notes: tuple[str, ...] = ()
 
     @property
     def all_steps(self) -> tuple[MemberPlan, ...]:
         return (*self.members, self.synthesis)
+
+def attach_execution_context(plan: FamilyPlan, execution_plan: Any) -> FamilyPlan:
+    """Carry the frozen plan's actual shared dependencies into member tasks."""
+    relations = execution_plan.thresholds.get("split_cluster_dependencies", ())
+    notes = tuple(str(relation.get("note") or "") if isinstance(relation, Mapping) else str(relation)
+                  for relation in relations)
+    return replace(plan, shared_paths=tuple(execution_plan.shared_paths), dependency_notes=notes)
+
 
 def build_seed_messages(
     *,
@@ -532,6 +543,10 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan, *, pool_note: str = 
             + "\n\n你读到了属于它们维度的问题也可以报（宁可多报，由主代理去重），"
             "但不要为了它们专门花索取额度。"
         )
+    if plan.shared_paths or plan.dependency_notes:
+        blocks.append("## 共享依赖与分簇边界\n\n" + _wrap_untrusted(
+            "\n".join((*plan.shared_paths, *plan.dependency_notes)), kind="shared-dependencies"
+        ) + "\n共享依赖保持同一冻结版本，按明确归属复用证据地址，发现跨簇关系时补查另一端。")
     # **确定性分工 → 确定性取证**（P1b）。分片是平台按 `(仓库, 路径, 提交)` 定下来的，
     # 而取证此前完全靠模型自主：平台只预取 `DEFAULT_MAX_FILES` 个 diff，剩下的没有任何
     # 机制要求「分到这个文件的人」去读它 —— 实测 run 58 分配 120 个、取到证据的只有 63 个，
@@ -574,11 +589,11 @@ def build_member_task(member: MemberPlan, plan: FamilyPlan, *, pool_note: str = 
             (
                 "## 输出要求\n\n"
                 "与常规分析**完全一样**：走同一套 JSON 协议、同样的精度要求。"
-                "唯一的差别是 `report_markdown` 只写**你这几个维度的发现与依据**"
-                "（不必写整版报告，主代理会把它们汇总成最终报告）。\n\n"
+                "`report_items` 交付你负责维度的全部四档发现与依据；`report_sections` 简述业务结论，"
+                "平台生成报告，不同时输出 `report_markdown` 长文。\n\n"
                 f"**条数额度：`anomalies` 最多 {cap} 条。** 这是额度不是目标 —— 按严重度"
-                f"从高到低取前 {cap} 条，**低风险与小问题不用写**（它们本来也会被汇总那道"
-                "按严重度挡在外面，写出来只是白花时间）。上面那句「宁可多报，由主代理去重」"
+                f"从高到低取前 {cap} 条；该限制仅用于高风险处置 `anomalies`，"
+                "`report_items` 不受此上限影响，中低风险与待确认事项完整保留。上面那句「宁可多报，由主代理去重」"
                 f"是**在这 {cap} 条之内**说的：越出自己维度的要报，但别拿它把额度撑满。\n\n"
                 "每条的 `evidence` 写到**看得懂就行**，不要为了显得严谨把整段文件贴进去。\n\n"
                 "`dimensions` 里**系统提示词那份「本项目适用的维度清单」上的每一个维度"
@@ -641,7 +656,7 @@ def build_synthesis_task(
             f"3. **各分片负责的维度必须都有交代**：系统提示词那份「本项目适用的维度清单」"
             f"上的 {len(plan.synthesis.dimensions)} 个维度一个都不能空着；"
             "某个维度没人报出问题，也要写 `hit: false` 与理由。\n"
-            "4. **报告是最终报告**：七个章节写全，长度不受分片影响。"
+            "4. **交付最终结构化报告**：完整给出 `report_items` 和 `report_sections`，平台生成七章；不复写长文。"
             "你还可以用工具去核对候选里可疑的地方（文件、行号、提交），"
             "也可以补充分片漏掉的发现。"
             "候选的「证据」那一栏给的是**地址**（`@evidence_id=…`，后面写着那份原件的字数）："
@@ -651,7 +666,7 @@ def build_synthesis_task(
             "5. **篇幅要收着写**：单次输出有硬上限，写超了会被**截断**，"
             "整份 JSON 作废、你的结论一条都留不下。所以同类候选合并成一条写，"
             "只写能改变结论的内容；候选很多时按后果排序写透前几条，"
-            "其余用一行列出来即可 —— 但 `dimensions` 与 `anomalies` 必须完整。"
+            "其余保持结构化事实、假设和行动齐全 —— `dimensions`、`anomalies`、`report_items` 必须完整。"
         ),
         # 分工表**无论有没有候选都要给**：纪律第 2 条要求「维度都有交代」，而主代理
         # 只有知道每个成员负责哪几个维度，才知道该有哪些维度的交代 —— 一个成员没报出
@@ -666,6 +681,14 @@ def build_synthesis_task(
     candidates_block = _render_candidates(plan, steps, evidence_index)
     if candidates_block:
         blocks.append(candidates_block)
+    from services.ai.report_family import business_candidates_prompt
+    business_rows = business_candidates_prompt(steps)
+    if business_rows:
+        blocks.append("## 各分片完整业务发现（四档，不受异常清单条数上限影响）\n\n"
+                      + _wrap_untrusted(json.dumps(business_rows, ensure_ascii=False), kind="business-candidates")
+                      + "\n逐项保留原稳定身份（change_fact/impact_hypothesis及已有finding_fingerprint），"
+                      "每个 candidate_id 都写 candidate_dispositions。拒绝或合并重复时给出理由；"
+                      "未完成核实的保留原项并在gaps说明，不省略中低风险和验证动作。")
 
     gaps = _gap_lines(steps)
     if gaps:
@@ -976,11 +999,12 @@ def build_verify_task(
                 for evidence in anomaly.evidence[:3]:
                     lines.append(f"- 它的证据：{truncate_text(str(evidence), CANDIDATE_TEXT_MAX_CHARS)[0]}")
         blocks.append("## 待核对结论（逐条回答）\n\n" + "\n".join(lines))
-        blocks.append(verdict_instructions())
+        blocks.append(verdict_instructions(structured=True))
     blocks.append(
         "## 输出\n\n"
-        "走同一套 JSON 协议（`status` / `report_markdown` / `anomalies` 都一样）。"
-        "对账结论写在 `report_markdown` 里，**一条一段**，形如 "
+        "走同一套结构化 JSON 协议（status / report_items / report_sections / anomalies）。"
+        "上面裁决示例的 verdicts 数组直接放在 final JSON 顶层，禁止藏入正文或代码围栏。"
+        "对账的人类说明写在 report_sections.gaps 中，一条一段，形如 "
         "「第 1 条 ××：反证成立 —— <哪个文件哪一行说明了什么>」或 "
         "「第 1 条 ××：未找到反证（查了 <文件/行>）」；"
         "`anomalies` 只放**你在找反证的过程中新发现的**问题，没有就给空数组"

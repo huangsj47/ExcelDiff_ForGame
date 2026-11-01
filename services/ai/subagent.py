@@ -67,6 +67,7 @@ from services.ai.engine import (
     run_analysis,
 )
 from services.ai.evidence_store import EvidenceStore
+from services.ai.review_delivery import review_verdicts_of
 
 # 数据模型（`MemberPlan`/`MemberOutcome`/`Candidate`/`FamilyResult`）与「平台侧对账 +
 # 谁没交回结论」的文字搬到 `services/ai/family_ledger.py`（那个文件的 docstring 写了
@@ -135,6 +136,7 @@ from services.ai.subagent_tasks import (
     _percent_of,
     _pool_note,  # noqa: F401 —— 测试按属性名取用
     _render_candidates,  # noqa: F401 —— 测试按属性名取用
+    attach_execution_context,  # noqa: F401 -- service runtime wiring
     attach_seed,
     build_cap_section,
     build_member_task,
@@ -153,8 +155,8 @@ from services.ai.verdict import (
     evidence_gaps_of,
     parse_verdicts,
     reduce_findings,
-    render_ruling,
     render_review_skipped,
+    render_ruling,
     render_ruling_summary,
 )
 from utils.logger import log_print
@@ -333,7 +335,7 @@ def plan_family(
         )
 
     dimension_ids = tuple(str(item).strip() for item in dimensions if str(item or "").strip())
-    if len(dimension_ids) < 2:
+    if len(dimension_ids) < 2 and sizing is None:
         # 见 docstring「清单太短时不硬拆」：这是一次**明确的**不拆，写日志交出去。
         log_print(
             "⚠️ AI 分析：项目声明的检查维度只有 "
@@ -355,7 +357,8 @@ def plan_family(
         limits, max_rounds=member_rounds, max_tool_requests=member_requests
     )
 
-    groups = group_dimensions(size, dimension_ids)
+    groups = (tuple(dimension_ids for _ in range(size)) if sizing is not None
+              else group_dimensions(size, dimension_ids))
     # 清单比配置的分片数短时**少开几个成员**（而不是开出空成员）。旧实现没有这一档，
     # 它只有「按表分」与「一个成员全看完」两条路，后者是静默的。这里的差别是显式的：
     # 成员数少一个都写在 `plan.count` 上（面板的「分片代理」表按它列），而且任务书里
@@ -437,7 +440,8 @@ def apply_dimensions(plan: FamilyPlan, dimensions: Sequence[str]) -> FamilyPlan:
         member.dimensions for member in plan.members
     ):
         return plan
-    groups = group_dimensions(len(plan.members), dimension_ids)
+    groups = (tuple(dimension_ids for _ in plan.members) if any(m.assigned_files for m in plan.members)
+              else group_dimensions(len(plan.members), dimension_ids))
     members = tuple(
         replace(member, dimensions=group)
         for member, group in zip(plan.members, groups)
@@ -849,7 +853,8 @@ def _salvage_failed_synthesis(
             f"{demote_headings(body).strip()}{note}"
         )
 
-    return replace(
+    from services.ai.report_family import reconcile_business_reports
+    return reconcile_business_reports(replace(
         synthesis,
         status=STATUS_DEGRADED,
         anomalies=normalized.anomalies,
@@ -857,7 +862,7 @@ def _salvage_failed_synthesis(
         report_markdown=_assemble_report(sections[0], sections[1:]),
         degradation=DEGRADE_SUBAGENT,
         error_message=reason,
-    )
+    ), usable)
 
 
 def run_family_with_seed(*, plan: FamilyPlan, limits: EngineLimits | None = None, **engine_args: Any) -> EngineOutcome:
@@ -1373,7 +1378,7 @@ def _reduce_with_verify(
     return reduce_findings(
         synthesis.anomalies,
         new=outcome.anomalies,
-        verdicts=parse_verdicts(outcome.report_markdown),
+        verdicts=review_verdicts_of(outcome),
         limit=limit,
         body_text=synthesis.report_markdown,
         gaps=gaps,
@@ -1418,11 +1423,16 @@ def aggregate_outcomes(
     任一成员没上报就是 `None`（**不是 0**）：一轮报了 900/1000、另一个没报，只把报了的那几
     个加起来会得出一个偏高、且看起来完全正常的命中率。
     """
+    from services.ai.report_family import apply_business_rulings, reconcile_business_reports
+    synthesis = reconcile_business_reports(synthesis, steps)
     report_source = synthesis.report_markdown or ""
     report = report_source
     # **复核裁决先算**：后面那几节（未归类、条数上限、信息缺口）都要与它对齐，
     # 而且 `anomalies` 最终取的就是它算出来的活动清单（见文件末尾的 `anomalies=`）。
     reduction = _reduce_with_verify(synthesis, steps, threshold_limit=anomaly_limit)
+    synthesis = apply_business_rulings(synthesis, reduction)
+    report_source = synthesis.report_markdown or ""
+    report = report_source
     # 对账轮的整份原文**不再进报告正文**（AI-P1-01：同一件事在报告里出现三遍 ——
     # 模型稿一遍、平台裁决节一遍、对账轮原文一遍，读的人还得自己辨认哪一句已经失效）。
     # 它作为**独立存档**放进结论载荷（`verify_report_markdown`），报告只留平台那几节。
@@ -1522,6 +1532,7 @@ def aggregate_outcomes(
     )
     degradation = _worst(
         [
+            synthesis.degradation,
             *(step.outcome.degradation for step in steps if step.outcome),
             DEGRADE_VERIFY if _verify_missed(steps) else DEGRADE_NONE,
             DEGRADE_SUBAGENT if has_gap else DEGRADE_NONE,
@@ -1546,6 +1557,8 @@ def aggregate_outcomes(
     return EngineOutcome(
         status=status,
         payload=synthesis.payload,
+        report_items=synthesis.report_items,
+        report_sections=synthesis.report_sections,
         # **只有 `final_findings` 里的那些进这里**：被复核撤销的条目不在其中，于是
         # 异常表、下一轮基线（读的是异常表的行）、以及面板上那份活动清单都不会再把它
         # 当成「仍然成立的问题」。**这是这条链路上唯一的取舍点** —— 落库、读侧、导出

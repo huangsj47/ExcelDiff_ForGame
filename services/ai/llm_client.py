@@ -51,13 +51,13 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlparse, urlunparse
 
 import requests
 
-from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS
+from services.ai.output_budget import DEFAULT_OUTPUT_TOKENS
 from services.ai.prompt_cache import (
     DEFAULT_PROMPT_CACHE_FORMAT,
     DEFAULT_PROMPT_CACHE_MODE,
@@ -180,6 +180,7 @@ class LLMValueLimitError(LLMConfigError):
 #: （`endpoint_key`）。记了它，后续调用不再先发一个注定 400 的请求 —— 那是每轮多一次
 #: 延迟与日志噪音，而端点能力在同一进程里不会变。
 _MAX_TOKENS_REJECTED: dict[tuple[str, str], str] = {}
+_MAX_TOKENS_LIMITS: dict[tuple[str, str], int] = {}
 _MAX_TOKENS_LOCK = threading.Lock()
 
 # 端点拒绝时那句话长什么样：各家写法不同（`max_tokens` / `max tokens` / `max-tokens`），
@@ -331,6 +332,19 @@ def reset_max_tokens_rejections() -> None:
     """清空 `max_tokens` 黑名单。**给测试与「换了网关之后重试」用**。"""
     with _MAX_TOKENS_LOCK:
         _MAX_TOKENS_REJECTED.clear()
+        _MAX_TOKENS_LIMITS.clear()
+
+
+def known_max_tokens_limit(base_url: str, model: str) -> int | None:
+    """Numeric limit explicitly returned by this endpoint/model in this process."""
+    with _MAX_TOKENS_LOCK:
+        return _MAX_TOKENS_LIMITS.get(endpoint_key(base_url, model))
+
+
+def _remember_max_tokens_limit(base_url: str, model: str, limit: int) -> None:
+    with _MAX_TOKENS_LOCK:
+        key = endpoint_key(base_url, model)
+        _MAX_TOKENS_LIMITS[key] = min(limit, _MAX_TOKENS_LIMITS.get(key, limit))
 
 
 def redact_secret(text: str, secret: str | None = None) -> str:
@@ -474,6 +488,12 @@ class ChatResult:
     reasoning_tokens: int | None = None
     # 上面这个数是从哪个字段读到的；`""` = 没读到（见 `_extract_reasoning_usage`）。
     reasoning_source: str = ""
+    # Requested cap and the successful wire request can differ after a gateway
+    # rejection. None means the successful request omitted max_tokens.
+    requested_max_tokens: int | None = None
+    effective_max_tokens: int | None = None
+    gateway_max_tokens: int | None = None
+    max_tokens_adjustment: str = ""
 
     @property
     def total_tokens(self) -> int | None:
@@ -488,8 +508,8 @@ def _extract_message_text(payload: Any) -> str:
     """从响应体里取出正文。
 
     兼容几种真实存在的形态：标准 `choices[0].message.content`、以及部分网关只给
-    `choices[0].text`。取不到就报错，**不返回空字符串** —— 空字符串会被上层当成
-    「模型什么都没说」，从而去走协议纠错回路，把一个解析问题伪装成模型问题。
+    `choices[0].text`。取不到就报错。唯一例外是明确 length 停止且 content=null：
+    隐藏推理可能用完全部输出额度，此时保留空正文与 usage，供引擎执行有界恢复。
     """
     if not isinstance(payload, dict):
         raise LLMResponseError("响应体不是 JSON 对象")
@@ -517,6 +537,9 @@ def _extract_message_text(payload: Any) -> str:
     text = first.get("text")
     if isinstance(text, str):
         return text
+    if (isinstance(message, dict) and "content" in message and message["content"] is None
+            and str(first.get("finish_reason") or "").strip().lower() == "length"):
+        return ""
     raise LLMResponseError("响应体里找不到可用的正文（message.content / text 均为空）")
 
 
@@ -936,6 +959,10 @@ class LLMClient:
             return self._complete_with_max_tokens(
                 messages, temperature=temperature, marker=marker, max_tokens=wire_max_tokens
             )
+        except LLMValueLimitError:
+            # Numeric max_tokens errors already had their one bounded recovery.
+            # Removing a cache marker cannot fix them and repeats the same 400s.
+            raise
         except LLMError as exc:
             # 安全阀。未知字段被 4xx 拒绝是最常见的失败形态，而它的后果是**整个分析
             # 跑不起来** —— 用一个省钱的优化换掉一次分析，这笔账怎么算都是亏的。
@@ -994,19 +1021,26 @@ class LLMClient:
         兜底 —— 它抛的是 `LLMConfigError`，这里两个 `except` 都不接，原样向上，既不
         去掉字段重试（那会掩盖真正的错误），也不拉黑（那会永久撤掉封顶）。
         """
-        if max_tokens is None:
-            return self._complete_once(
-                messages, temperature=temperature, marker=marker
+        requested = max_tokens
+
+        def call(cap: int | None, adjustment: str = "") -> ChatResult:
+            result = self._complete_once(
+                messages, temperature=temperature, marker=marker, max_tokens=cap
             )
+            return replace(result, requested_max_tokens=requested, effective_max_tokens=cap,
+                           gateway_max_tokens=known_max_tokens_limit(self.base_url, self.model),
+                           max_tokens_adjustment=adjustment)
+
+        if max_tokens is None:
+            return call(None)
         if max_tokens_rejection_reason(self.base_url, self.model) is not None:
             # 本进程已知这个端点不接受它：不再发一个注定 400 的请求。
-            return self._complete_once(
-                messages, temperature=temperature, marker=marker
-            )
+            return call(None, "unsupported")
+        known_limit = known_max_tokens_limit(self.base_url, self.model)
+        if known_limit is not None:
+            max_tokens = min(max_tokens, known_limit)
         try:
-            return self._complete_once(
-                messages, temperature=temperature, marker=marker, max_tokens=max_tokens
-            )
+            return call(max_tokens, "gateway_limit" if max_tokens != requested else "")
         except LLMValueLimitError as exc:
             limit = int(getattr(exc, "limit", 0) or 0)
             if limit <= 0 or max_tokens <= limit:
@@ -1014,20 +1048,16 @@ class LLMClient:
                 # 的请求再吃一次 400。原样抛出，让用户/上层看到端点给的真实上限。
                 raise
             adjusted = min(max_tokens, limit)
+            _remember_max_tokens_limit(self.base_url, self.model, limit)
             # 只记一条日志、不写黑名单：数值问题是可调的，拉黑会让后续调用永久失去上限。
             log_print(
                 f"⚠️ AI 分析：{self.base_url} 的 max_tokens 上限为 {limit}，"
                 f"本次请求的 {max_tokens} 超过它，已自动降到 {adjusted} 重试一次；"
-                "后续调用仍会带上限（不拉黑该端点）。",
+                "后续调用直接按已知数值上限钳制（仍保留该字段）。",
                 "AI",
                 force=True,
             )
-            return self._complete_once(
-                messages,
-                temperature=temperature,
-                marker=marker,
-                max_tokens=adjusted,
-            )
+            return call(adjusted, "gateway_limit")
         except LLMUnsupportedParameterError as exc:
             reason = redact_secret(f"{type(exc).__name__}: {exc}", self._api_key)
             mark_max_tokens_rejected(self.base_url, self.model, reason)
@@ -1038,9 +1068,7 @@ class LLMClient:
                 "AI",
                 force=True,
             )
-            return self._complete_once(
-                messages, temperature=temperature, marker=marker
-            )
+            return call(None, "unsupported")
 
     def _complete_once(
         self,
@@ -1094,6 +1122,7 @@ class LLMClient:
             cache_source=cache_source,
             reasoning_tokens=reasoning_tokens,
             reasoning_source=reasoning_source,
+            effective_max_tokens=max_tokens,
         )
 
     def stream(

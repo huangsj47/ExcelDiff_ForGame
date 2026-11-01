@@ -724,5 +724,14 @@ def _recap_for(
     items = [item for memo in memos[:dropped] for item in memo.items]
     if items:
         lines.append("")
-        lines.append(build_continuation_summary(items))
+        lines.append("已归档证据目录（正文未附上；按 evidence 地址可恢复，不表示证据已核实）：")
+        seen = set()
+        for item in items:
+            eid = str(item.meta.get("evidence_id") or "")
+            key = eid or item.label
+            if key in seen:
+                continue
+            seen.add(key)
+            address = f"@evidence_id={eid} " if eid else ""
+            lines.append(f"- {address}{item.label}")
     return "\n".join(lines)

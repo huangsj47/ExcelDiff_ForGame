@@ -239,6 +239,42 @@ def test_a_single_round_final_returns_the_report_and_anomalies():
     assert outcome.prompt_tokens == 10 and outcome.completion_tokens == 5
 
 
+def test_prompt_character_accounting_includes_replayed_history_and_wrap_up():
+    """正常轮与收尾轮均记录完整请求，才能识别重复发送证据带来的成本。"""
+    for limits in (EngineLimits(max_rounds=3), EngineLimits(max_rounds=1)):
+        client = ScriptedClient(
+            _requests({"type": "file_diff", "commit": COMMIT, "path": TABLE}),
+            _final(),
+        )
+        outcome = _run(client, limits=limits)
+        assert len(client.calls) == len(outcome.rounds) == 2
+        for record, messages in zip(outcome.rounds, client.calls):
+            assert record.prompt_chars == sum(len(m["content"]) for m in messages)
+
+
+def test_default_output_limit_recovers_once_but_explicit_limit_is_respected():
+    class Client(ScriptedClient):
+        def __init__(self):
+            super().__init__()
+            self.caps = []
+
+        def complete(self, messages, *, temperature=None, max_tokens=8192):
+            self.calls.append(messages)
+            self.caps.append(max_tokens)
+            return ChatResult(
+                text="" if len(self.calls) == 1 else _final(), model="fake",
+                finish_reason="length" if len(self.calls) == 1 else "stop",
+                effective_max_tokens=max_tokens, prompt_tokens=100, completion_tokens=8192,
+            )
+
+    for explicit, expected in ((False, [8192, 16384]), (True, [8192, 8192])):
+        client = Client()
+        outcome = _run(client, limits=EngineLimits(max_rounds=3,
+                                                  max_output_tokens_explicit=explicit))
+        assert outcome.status == STATUS_SUCCEEDED
+        assert client.caps == expected
+
+
 def test_the_model_can_ask_for_context_and_gets_it_back():
     """**多轮的核心断言**：模型要的内容必须真的到达它。
 
@@ -1252,6 +1288,7 @@ def test_a_big_baseline_squeezes_the_context_items():
     _run(
         tight_client,
         FakeProvider(contents),
+        baseline_digest="已有结论" * 40_000,
         limits=EngineLimits(
             prompt_char_budget=200_000, baseline_char_budget=196_000, tool_limits=_FAT_TOOL_LIMITS
         ),
@@ -1296,13 +1333,13 @@ def test_the_cache_short_circuit_still_counts_against_the_budget():
     outcome = _run(client, provider)
 
     assert outcome.requests_used == 2, "重复索要没有计入额度"
-    assert outcome.cache_hits == 1, "第二次应当命中缓存"
+    assert outcome.cache_hits == 2, "预取原件可恢复；两次模型索取均应复用证据仓"
     # 「同一份内容不重复取数」这条性质现在要在**两本账**上读（P3）：预取取一次（平台
     # 发起，不占模型的额度），模型自己那两次里第二次命中缓存 —— 所以同一个文件一共
     # 只执行 2 次，而**模型侧只执行了 1 次**。只数 `provider.seen` 里 TABLE 的条数
     # 会把平台那次也算进去，断言里的「1」就变成了一句空话（数的不是同一件事）。
     table_runs = [key for key in provider.seen if key[0] == "file_diff" and key[2] == TABLE]
-    assert len(table_runs) == 2, "预取一次 + 模型第一次索取一次；第二次必须走缓存"
+    assert len(table_runs) == 1, "预取一次后应复用原件，不再重复访问仓库"
 
 
 # ==========================================================================

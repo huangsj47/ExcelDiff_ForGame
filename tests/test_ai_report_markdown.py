@@ -346,7 +346,7 @@ def _code(src: str) -> str:
 def test_the_success_report_goes_through_the_markdown_renderer(template):
     """成功报告必须交给渲染器；这条拦的是「渲染器写好了但没接上」。"""
     src = (PROJECT_ROOT / template).read_text(encoding="utf-8")
-    assert "AiReportMarkdown.render(" in src, f"{template} 没有调用渲染器"
+    assert "AiReportMarkdown.renderReader(" in src, f"{template} 没有调用共用阅读器"
     assert _REPORT_CALL_RE.search(_code(src)), (
         f"{template} 的整体报告没有走 Markdown 路径（仍在用纯文本 set*Output）"
     )

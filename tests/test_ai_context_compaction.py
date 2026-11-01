@@ -353,7 +353,8 @@ def test_the_model_is_told_the_history_was_compressed():
     notice = client.calls[-1][-1]["content"]
     assert "已压缩的历史" in notice
     assert "重新索取" in notice
-    assert "第 1 轮：索取了上下文" in notice, "没有说清被压掉的是哪一轮"
+    assert "可恢复证据目录" in notice, "归档的正文必须留下可回取地址"
+    assert "@evidence_id=" in notice
     assert TABLE in notice, "被压掉的那一轮取到了什么，必须留在记录里"
 
 

@@ -694,7 +694,9 @@ def _headline_row(
             if input_commits is not None
             else "（其中进了本次输入的条数未记录）"
         )
-    return head + tail_num + dedup + commit_part
+    pending = _count((ledger.get("counts") or {}).get("pending_files"))
+    gap = f"；未取证 {pending} 条" if pending is not None else "；未取证数未记录"
+    return head + tail_num + dedup + gap + "（取证按仓库/提交/路径计数）" + commit_part
 
 
 def _findings_row(findings: Mapping[str, Any]) -> Optional[tuple[str, str]]:

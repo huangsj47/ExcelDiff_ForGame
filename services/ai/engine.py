@@ -37,113 +37,27 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence
 
+from models.ai_analysis.project_config import DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
 from services.ai import round_events, trace_evidence
-from services.ai.baseline import DEFAULT_BASELINE_CHARS, digest_fingerprints
 from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS
+from services.ai.baseline import DEFAULT_BASELINE_CHARS, digest_fingerprints
 from services.ai.budget import (
     DEFAULT_MAX_ITEMS,
     DEFAULT_TOTAL_CHARS,
-    MIN_KEEP_TURNS,
     ContextItem,
     TurnMemo,
-    compact_history,
     enforce_budget,
     estimate_chars,
     looks_like_context_overflow,
 )
+from services.ai.budget_gate import SingleRunBudget
 from services.ai.context_tools import (
     DEFAULT_MAX_TOOL_REQUESTS,
     DEFAULT_TOOL_LIMITS,
     ContextProvider,
     ContextTools,
 )
-from services.ai.evidence_prefetch import (
-    PrefetchResult,
-    forget_unfitted,
-    prefetch_evidence,
-)
-from services.ai.frozen_repo import provider_repo_paths
-from services.ai.round_message import (
-    MIN_ITEM_BUDGET,
-)
-from services.ai.round_message import (
-    fit_items as _fit_items,
-)
-from services.ai.round_message import (
-    prepare_round as _prepare_round,
-)
-from services.ai.round_observability import (
-    CORRECTION_BASELINE_COVERAGE,
-    CORRECTION_CHANNEL_MISMATCH,
-    CORRECTION_TRUNCATED_OUTPUT,
-    CORRECTION_UNPARSABLE,
-    replay_chars as _replay_chars,
-    round_usage_fields,
-    truncation_reason as _truncation_reason,
-    with_observability as _merge_observability,
-)
-from services.ai.prompt import (
-    build_system_prompt,
-    build_user_message,
-    change_block,
-    render_context_items,
-)
-from services.ai.prompt_cache import (
-    mark_cache_breakpoint,
-    mark_current as _mark_current,  # noqa: F401
-)
-from services.ai.protocol import (
-    TRUNCATED_OUTPUT_HINT,
-    build_baseline_coverage_hint,
-    AnalysisPayload,
-    Anomaly,
-    DroppedItem,
-    ProtocolError,
-    build_channel_mismatch_hint,
-    build_correction_hint,
-    build_markdown_reemit_hint,
-    ground_payload,
-    looks_like_markdown_report,
-    looks_like_tool_call_envelope,
-    looks_like_truncated_json,
-    missing_baseline_statuses,
-    parse_payload,
-    repair_dsml_tool_calls_payload,
-    repair_split_string_payload,
-    repair_unescaped_quotes_payload,
-    salvage_report_markdown,
-    sanitize_requests,
-)
-from services.ai.budget_gate import SingleRunBudget
-# 一次调用周边的三件小事（请求参数 / 截断判据 / 这一笔账怎么算）也从引擎里搬走了:
-# 它们与「一轮怎么编排」无关，而本文件贴着 2000 行的 ERROR 闸门。
-from services.ai.model_call import (
-    complete_kwargs,
-    output_limit_hit,
-    tokens_for_budget,
-    usage_of as _usage_of,  # noqa: F401
-)
-from services.ai.request_fingerprint import RoundDiagnostics
-# 引擎侧的中文措辞（trace 备注 + 收尾提示词）：纯文本拼装，不碰引擎状态，搬出去让本文件
-# 离 2000 行 ERROR 闸门远一点。**仍按原名回导**，于是下面几十个调用点一个字都不用改。
-#
-# `# noqa: F401` 必须写在**每一行别名上**：写在 `from ... import (` 那一行时 ruff 认为
-# 整块是未使用导入，`ruff --fix` 会把这些刻意保留的回导直接删掉（真发生过）。
-from services.ai.wrap_up import build_wrap_up_entry, should_request_final_answer
-from services.ai.round_notes import (  # noqa: F401
-    batch_notes as _batch_notes,  # noqa: F401
-    combine_notes as _combine_notes,  # noqa: F401
-    join_recap as _join_recap,  # noqa: F401
-    rejected_note as _rejected_note,  # noqa: F401
-    request_labels,  # noqa: F401
-    salvage_user_message as _salvage_user_message,  # noqa: F401
-)
-from services.ai.rules import RuleThresholds, normalize_anomalies
-from services.ai.scope import AnalysisScope
-from services.ai.skill_contract import DIMENSION_IDS, DimensionSpec, dimension_ids_of
-from services.ai.skill_loader import LoadedSkills
-from models.ai_analysis.project_config import DEFAULT_MAX_ANOMALIES_PER_SUBAGENT
-from utils.logger import log_print
+from services.ai.context_working_set import compact_working_set
 
 # 退化（degradation）的取值域与中文标签：常量与文案，没有任何依赖，单独一层。
 # 搬到 `degradation.py` 是为了让本文件离 2000 行 ERROR 闸门远一点（本文件顶着那个闸门）。
@@ -162,6 +76,116 @@ from services.ai.degradation import (  # noqa: F401 —— 读侧与测试按属
     DEGRADE_SUBAGENT,
     DEGRADE_VERIFY,
 )
+from services.ai.evidence_prefetch import (
+    PrefetchResult,
+    forget_unfitted,
+    prefetch_evidence,
+)
+from services.ai.evidence_store import EvidenceStore
+from services.ai.frozen_repo import provider_repo_paths
+
+# 一次调用周边的三件小事（请求参数 / 截断判据 / 这一笔账怎么算）也从引擎里搬走了:
+# 它们与「一轮怎么编排」无关，而本文件贴着 2000 行的 ERROR 闸门。
+from services.ai.model_call import (
+    complete_kwargs,
+    output_limit_hit,
+    tokens_for_budget,
+)
+from services.ai.model_call import (
+    usage_of as _usage_of,  # noqa: F401
+)
+from services.ai.output_budget import suggest_output_recovery
+from services.ai.prompt import (
+    build_system_prompt,
+    build_user_message,
+    change_block,
+    render_context_items,
+)
+from services.ai.prompt_cache import (
+    mark_cache_breakpoint,
+)
+from services.ai.prompt_cache import (
+    mark_current as _mark_current,  # noqa: F401
+)
+from services.ai.protocol import (
+    TRUNCATED_OUTPUT_HINT,
+    AnalysisPayload,
+    Anomaly,
+    DroppedItem,
+    ProtocolError,
+    build_baseline_coverage_hint,
+    build_channel_mismatch_hint,
+    build_correction_hint,
+    build_markdown_reemit_hint,
+    ground_payload,
+    looks_like_markdown_report,
+    looks_like_tool_call_envelope,
+    looks_like_truncated_json,
+    missing_baseline_statuses,
+    parse_payload,
+    repair_dsml_tool_calls_payload,
+    repair_split_string_payload,
+    repair_unescaped_quotes_payload,
+    salvage_report_markdown,
+    sanitize_requests,
+)
+from services.ai.request_fingerprint import RoundDiagnostics
+from services.ai.round_message import (
+    MIN_ITEM_BUDGET,
+)
+from services.ai.round_message import RoundBrief as _RoundBrief
+from services.ai.round_message import (
+    fit_items as _fit_items,  # noqa: F401 -- 现有调用方从 engine 导入此预算函数
+)
+from services.ai.round_message import (
+    prepare_round as _prepare_round,
+)
+from services.ai.round_notes import (  # noqa: F401
+    batch_notes as _batch_notes,  # noqa: F401
+)
+from services.ai.round_notes import (
+    combine_notes as _combine_notes,  # noqa: F401
+)
+from services.ai.round_notes import (
+    join_recap as _join_recap,  # noqa: F401
+)
+from services.ai.round_notes import (
+    rejected_note as _rejected_note,  # noqa: F401
+)
+from services.ai.round_notes import (
+    request_labels,  # noqa: F401
+)
+from services.ai.round_notes import (
+    salvage_user_message as _salvage_user_message,  # noqa: F401
+)
+from services.ai.round_observability import (
+    CORRECTION_BASELINE_COVERAGE,
+    CORRECTION_CHANNEL_MISMATCH,
+    CORRECTION_TRUNCATED_OUTPUT,
+    CORRECTION_UNPARSABLE,
+    round_usage_fields,
+)
+from services.ai.round_observability import (
+    replay_chars as _replay_chars,
+)
+from services.ai.round_observability import (
+    truncation_reason as _truncation_reason,
+)
+from services.ai.round_observability import (
+    with_observability as _merge_observability,
+)
+from services.ai.rules import RuleThresholds, normalize_anomalies
+from services.ai.scope import AnalysisScope
+from services.ai.skill_contract import DIMENSION_IDS, DimensionSpec, dimension_ids_of
+from services.ai.skill_loader import LoadedSkills
+
+# 引擎侧的中文措辞（trace 备注 + 收尾提示词）：纯文本拼装，不碰引擎状态，搬出去让本文件
+# 离 2000 行 ERROR 闸门远一点。**仍按原名回导**，于是下面几十个调用点一个字都不用改。
+#
+# `# noqa: F401` 必须写在**每一行别名上**：写在 `from ... import (` 那一行时 ruff 认为
+# 整块是未使用导入，`ruff --fix` 会把这些刻意保留的回导直接删掉（真发生过）。
+from services.ai.wrap_up import build_wrap_up_entry, should_request_final_answer
+from utils.logger import log_print
 
 # 结果状态。`degraded` 是「有产出，但流程没走完」——必须与 `succeeded` 分开，
 # 否则用户分不出「模型看完说没问题」和「模型没答上来我们拿旧内容凑了一份」。
@@ -252,6 +276,7 @@ class EngineLimits:
     # 谁该看多少上下文、该报几条结论，与这个数字无关（`EngineLimits` 里其余那些才管
     # 那些事）。撞上上限时的处理见 `run_analysis` 里 `finish_reason == "length"` 那一支。
     max_output_tokens: int | None = DEFAULT_OUTPUT_TOKENS
+    max_output_tokens_explicit: bool = False
     tool_limits: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_TOOL_LIMITS))
 
     @classmethod
@@ -260,6 +285,9 @@ class EngineLimits:
         source = dict(config or {})
         known = {item.name for item in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         payload = {key: source[key] for key in known if key in source and source[key] is not None}
+        if "max_output_tokens" in source:
+            payload["max_output_tokens"] = source["max_output_tokens"]
+            payload["max_output_tokens_explicit"] = True
         return cls(**payload)
 
 
@@ -315,6 +343,10 @@ class RoundRecord:
     correction_hint: str = ""
     # 上游停止原因（stop / length / content_filter…）。`length` 是输出被硬截断的直接证据。
     finish_reason: str = ""
+    requested_max_tokens: int | None = None
+    effective_max_tokens: int | None = None
+    gateway_max_tokens: int | None = None
+    max_tokens_adjustment: str = ""
     # **这一轮的输出撞上了单次输出上限**。
     #
     # 判据是两个信号的并集：上游明说的 `finish_reason == "length"`，以及我们自己看出来的
@@ -462,6 +494,8 @@ class EngineOutcome:
     # 它同时是 `ai_analysis_run.response_text`（落库）与结论载荷的 `report_markdown`，
     # **一个字节都不许有机器 JSON**（AI-P0-05，见 `verdict` 那段说明）。
     report_markdown: str = ""
+    report_items: tuple[dict, ...] = ()
+    report_sections: dict | None = None
     # 复核裁决的**结构化**那一份（`verdict.Reduction.as_dict()` 的产物，见
     # `services/ai/verdict.py`）。承载它的不再是报告正文末尾那行 HTML 注释 ——
     # 那个做法在安全 Markdown 渲染器下会变成一段可见的乱码（实测 run 20 的
@@ -699,6 +733,7 @@ def run_analysis(
     与「轮次用尽」「索取额度用尽」并列成三件不同的事：那两条是额度，这条是钱。
     """
     limits = limits or EngineLimits()
+    prompt_hard_budget = limits.prompt_char_budget
     thresholds = thresholds or RuleThresholds()
 
     # 逐请求指纹（诊断「缓存为什么没命中」）+ 三类耗时。**一次运行（一个成员）一个**：
@@ -717,6 +752,7 @@ def run_analysis(
     # 适用范围就是模型看到的那份清单，而只有那段文本知道 `_fit_groups` 丢掉了哪几条。
     baseline_fingerprints = digest_fingerprints(baseline_digest)
 
+    body_cache = body_cache if body_cache is not None else EvidenceStore()
     tools = ContextTools(
         provider=provider,
         max_tool_requests=limits.max_tool_requests,
@@ -966,6 +1002,9 @@ def run_analysis(
     format_retry_granted = False
     # 上一轮**开始时**的账（用来量「上一轮真的花了多少」，见下面那个前瞻）。`None` =
     # 还没有跑过任何一轮。
+    checkpoint = None
+    output_recoveries = 0
+    output_recovery_active = False
     round_start_spent: int | None = None
     for round_index in range(1, limits.max_rounds + 2):
         if round_index > limits.max_rounds and not format_retry_granted:
@@ -997,7 +1036,8 @@ def run_analysis(
         reported_max_rounds = (
             round_index if format_retry_granted else limits.max_rounds
         )
-        exhausted = tools.requests_remaining <= 0
+        restore_note = tools.archive_restore_note()
+        exhausted = tools.requests_remaining <= 0 and not restore_note
         # 这一轮的诊断状态重置（耗时与指纹都只属于这一轮，见 `RoundDiagnostics`）。
         diagnostics.begin_round()
         # 这一轮要写进 trace 的补充说明：压过历史、被上游拒过、走了收尾 —— 都是「这次分析
@@ -1036,7 +1076,7 @@ def run_analysis(
         # 那个列表的生命周期是「本轮执行完之后由 `_batch_notes(batch)` 整体替换」，
         # 往里塞一条会在任何一条「本轮提前 continue」的路径上留下来，下一轮再塞一次
         # 就成了重复的一条。
-        mandatory_note = tools.mandatory_note()
+        mandatory_note = "\n".join(filter(None, (tools.mandatory_note(), restore_note)))
         brief = _RoundBrief(
             round_index=round_index,
             max_rounds=reported_max_rounds,
@@ -1062,39 +1102,23 @@ def run_analysis(
             # 要用 `forget_unfitted` 摘掉，否则后面的「见上文那一节」是一句假话。
             forget_unfitted(prefetch.items, items, tools)
 
-        # **整份提示词**（系统提示词 + 变更清单 + 历史 + 本轮上下文）超出预算时压历史。
-        #
-        # 这一步补的是一个真窟窿：以前只有「本轮取回的上下文」受预算约束（`_fit_items`
-        # 按剩余额度压条目），**历史不受任何约束** —— 每一轮都把上一轮的整条消息再发一遍，
-        # 于是提示词随轮次单调增长，最后撞上模型窗口被上游拒绝，一次已经跑了几轮的分析
-        # 连结论一起作废。压掉的是重复，不是信息：被压的轮次会留下一条记录（见
-        # `budget.compact_history`），而且可以重新索取。
-        if estimate_chars(messages) + len(user_message) > limits.prompt_char_budget:
-            # 目标里**先扣掉本轮消息自己的位置**：只按总预算压历史的话，压到刚好等于预算、
-            # 再把本轮消息加上去就又超了。而且条目的额度有下限（`MIN_ITEM_BUDGET`）——
-            # 压到负数它也会给 4,000 字，那 4,000 字必须有地方放。
-            compacted = compact_history(
-                messages,
-                target_chars=max(0, limits.prompt_char_budget - len(user_message)),
-                keep_recent_turns=MIN_KEEP_TURNS,
-                memos=round_memos,
-                # 子代理的**任务书**在第 3 条，必须一起钉住：被压掉之后它会忘了自己的分工
-                # 而开始自由发挥，且不报任何错（见 `compact_history` 的说明）。
-                protect_head=protect_head,
-            )
-            if compacted.compacted:
-                messages[:] = list(compacted.messages)
-                recap_text = _join_recap(recap_text, compacted.recap)
-                compaction_events += 1
-                compaction_turns += compacted.dropped_turns
-                compaction_chars += compacted.dropped_chars
-                round_notes.extend(compacted.notes)
-                diagnostics.mark_compacted()
-                log_print(f"ℹ️ AI 分析：{compacted.notes[0]}", "AI", force=True)
-                # 重算一遍：条目额度取决于「除条目之外占了多少」，压历史正是为了把它腾出来。
-                # 少算这一步，压出来的空间就白压了（条目仍按旧额度被裁）。
-                brief = replace(brief, recap=recap_text)
-                items, user_message = _prepare_round(brief, messages)
+        # 有可恢复检查点时提前整理工作集；其余只在硬水位压历史。
+        compacted = compact_working_set(
+            messages, hard_chars=limits.prompt_char_budget, current_chars=len(user_message),
+            memos=round_memos, protect_head=protect_head, checkpoint=checkpoint, store=body_cache,
+        )
+        if compacted.compacted:
+            messages[:] = list(compacted.messages)
+            tools.archive_history()
+            recap_text = _join_recap(recap_text, compacted.recap)
+            checkpoint = None  # 一份检查点只用于一次压缩，避免反复钉住相同正文
+            compaction_events += 1
+            compaction_turns += compacted.dropped_turns
+            compaction_chars += compacted.dropped_chars
+            round_notes.extend(compacted.notes)
+            diagnostics.mark_compacted()
+            brief = replace(brief, recap=recap_text)
+            items, user_message = _prepare_round(brief, messages)
 
         # 断点 ②：**第一轮** user 消息的末尾。变更清单（全量列出，顶到上限时约 87,000
         # 字符）、历史结论基线、首轮指引这三段在一批变更里是恒定的，而且占了整份提示词的
@@ -1117,6 +1141,12 @@ def run_analysis(
         if round_index > 1 or seed_messages:
             movable_breakpoint = entry
 
+        if estimate_chars(messages) + len(user_message) > prompt_hard_budget:
+            reason = "固定输入和必须保留的证据已超过提示词字符水位，请提高水位或缩小分析范围；未继续调用模型。"
+            _emit(RoundRecord(round_index, "prompt_budget_exceeded", note=reason))
+            return EngineOutcome(status=STATUS_FAILED, rounds=tuple(rounds), dropped=tuple(dropped),
+                                 error_message=reason, requests_used=tools.requests_seen,
+                                 cache_hits=tools.cache_hits, **_totals(), **_usage_fields())
         round_started = time.monotonic()
         try:
             result = diagnostics.model_call(
@@ -1328,7 +1358,7 @@ def run_analysis(
         # 平台花掉的一笔，见 `wrap_up`）。
         round_extra = round_usage_fields(
             usage,
-            prompt_chars=len(user_message),
+            prompt_chars=estimate_chars(messages) + len(user_message),
             context_chars=round_context_chars,
             duration_ms=int((time.monotonic() - round_started) * 1000),
             text=text,
@@ -1344,25 +1374,28 @@ def run_analysis(
             single_run_budget.note_usage(spent, estimated=estimated)
         messages.append(entry)
         messages.append({"role": "assistant", "content": text})
+        if output_recovery_active:
+            limits = replace(limits, max_output_tokens=DEFAULT_OUTPUT_TOKENS)
+            output_recovery_active = False
 
-        # **上游说「你写超了」，这句话比我们自己猜形状准。**
-        #
-        # 判据放在 `parse_payload` **之前**，因为这一支要处理的正是「解析得通、内容残缺」
-        # 那一种：断点恰好落在一个仍然合法的 JSON 上（`requests` 数组已闭合、后面的字段
-        # 整段没写）时，`json.loads` 成功、括号也配平 —— 只看形状的话，这份**半句话**会
-        # 被当成正常结果收下，而它是残缺的（该要的上下文没要全、该写的字段一个没写）。
-        # 原先 `finish_reason` 只被**存储**（→ trace），从来没有人读它。
-        #
-        # 只在「还有下一轮可借」时才花这次纠正（`round_index < limits.max_rounds`）：
-        # 最后一轮要求它重发是白花一次纠正额度 —— 那句话永远发不出去，而这份额度本该留给
-        # 别处。额度用完/没有下一轮时下面的解析照常进行（**一份能解析的结论不许被丢掉**：
-        # 收下它并让 `output_budget_hit` 如实记着这件事，比丢掉它强得多）。
+        # 上游length优先于JSON形状判断；残缺结果不能作为完整结论收下。
         if (
             output_limit_hit(usage)
             and limits.max_corrections > 0
             and round_index < limits.max_rounds
         ):
             limits = replace(limits, max_corrections=limits.max_corrections - 1)
+            recovery = suggest_output_recovery(
+                usage=usage, configured_cap=limits.max_output_tokens,
+                explicit_cap=limits.max_output_tokens_explicit, recovery_attempts=output_recoveries,
+                budget=single_run_budget,
+                prompt_chars=estimate_chars(messages) + len(user_message) + len(TRUNCATED_OUTPUT_HINT),
+            )
+            if recovery.cap:
+                output_recoveries += 1
+                output_recovery_active = True
+                limits = replace(limits, max_output_tokens=recovery.cap)
+                round_notes.append(f"默认输出预算恢复一次：{recovery.cap} tokens（仍受运行预算约束）")
             correction_hint = TRUNCATED_OUTPUT_HINT
             salvaged_report = salvage_report_markdown(text)
             if salvaged_report is not None:
@@ -1596,6 +1629,7 @@ def run_analysis(
                 continue
 
         correction_hint = ""
+        checkpoint = parsed.checkpoint or checkpoint
         if parsed.is_final:
             # **历史清单没有逐条交代时，当场要一次。**
             #
@@ -1758,6 +1792,7 @@ def run_analysis(
         ):
             wrap_started = time.monotonic()
             entry = _mark_current(build_wrap_up_entry(), movable_breakpoint)
+            wrap_prompt_chars = estimate_chars(messages) + len(entry["content"])
             wrap_extra: dict[str, Any] = {}
             try:
                 result = diagnostics.model_call(
@@ -1784,7 +1819,7 @@ def run_analysis(
                 messages.append({"role": "assistant", "content": text})
                 wrap_extra = round_usage_fields(
                     usage,
-                    prompt_chars=len(entry["content"]),
+                    prompt_chars=wrap_prompt_chars,
                     context_chars=0,  # 这一次没有带任何上下文条目
                     duration_ms=int((time.monotonic() - wrap_started) * 1000),
                     text=text,
@@ -1864,6 +1899,12 @@ def run_analysis(
         )
 
     grounded = ground_payload(payload, scope)
+    if grounded.report_sections is not None:
+        from services.ai.report_document import render_structured_report
+        from services.ai.report_items import ground_report_items
+        report_items = ground_report_items(grounded.report_items, body_cache, anomalies=grounded.anomalies)
+        grounded = replace(grounded, report_items=report_items,
+                           report_markdown=render_structured_report(report_items, grounded.report_sections))
     normalized = normalize_anomalies(grounded.anomalies, thresholds)
     dropped.extend(grounded.dropped)
     dropped.extend(normalized.dropped)
@@ -1898,6 +1939,8 @@ def run_analysis(
         status=STATUS_DEGRADED if degradation else STATUS_SUCCEEDED,
         payload=grounded,
         anomalies=normalized.anomalies,
+        report_items=grounded.report_items,
+        report_sections=grounded.report_sections,
         dropped=tuple(dropped),
         report_markdown=report_markdown,
         rounds=tuple(rounds),
@@ -1918,46 +1961,6 @@ def run_analysis(
 # --------------------------------------------------------------------------
 # 一轮消息的组装
 # --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class _RoundBrief:
-    """一轮里「与历史无关」的那些输入。
-
-    攒成一包是因为**同一轮可能要组装两次**：压掉历史之后条目额度会变大，必须重算一遍
-    （见 `_prepare_round`）。散着传十几个参数，两次调用之间漏传一个就是一条静默的错
-    —— 而它表现为「分析结果说不清哪里不对」。
-    """
-
-    round_index: int
-    max_rounds: int
-    change_summary: str
-    baseline_digest: str
-    correction_hint: str
-    budget_exhausted: bool
-    budget_notes: tuple[str, ...]
-    pending_items: tuple[ContextItem, ...]
-    recap: str
-    requests_remaining: int
-    # 本次运行的总额度（`limits.max_tool_requests`）。**必须与 `requests_remaining` 一起
-    # 给模型**：只报剩余数时，第 2 轮起那句「总共可索取 N 次」会把剩余说成总额 ——
-    # 模型会把它原样抄进报告的信息缺口（见 `prompt._budget_line` 的 docstring）。
-    requests_total: int
-    limits: EngineLimits
-    # 子代理模式下的**任务书**（第 1 轮的 user 消息原文，见 `run_analysis`）。空串 = 常规路径。
-    task_message: str = ""
-    # 本次生效的维度清单（id 那一份）。只给第一轮的开场指令用：清单里没有
-    # `config_data` / `value_sanity` 的项目不该读到「按配表数值看」那两步
-    # （见 `prompt._first_round_hint`）。默认是平台出厂那一份 —— 与这段改动之前
-    # 逐字相同（`run_analysis` 每次都会按 `loaded.dimensions` 传真的那份进来）。
-    dimension_ids: tuple[str, ...] = DIMENSION_IDS
-    # 「钱只够这一轮了」——`SingleRunBudget.next_round_affordable` 的估算结果（见 `round_hints
-    # .build_token_budget_final_hint`）。与 `budget_exhausted`（索取**次数**额度）是两条
-    # 不同的额度：那一条是硬事实，这一条是估算，所以 `prompt.build_user_message` 里把它
-    # 排在最后 —— 硬事实成立时它不说话。
-    #
-    # 带默认值所以放在这一组（dataclass 的非默认字段必须排在前面）。
-    token_budget_low: bool = False
 
 
 

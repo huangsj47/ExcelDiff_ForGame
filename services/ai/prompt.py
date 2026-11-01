@@ -59,7 +59,7 @@ from services.ai.skill_contract import DIMENSION_IDS
 from services.ai.skill_loader import LoadedSkills
 
 # 参与提示词版本哈希的源文件。
-PROMPT_SOURCE_FILES = ("prompt.py",)
+PROMPT_SOURCE_FILES = ("prompt.py", "context_working_set.py")
 
 # 第一轮与后续轮次的开场指令。
 #
@@ -489,6 +489,8 @@ def _platform_sections(loaded: LoadedSkills) -> list[str]:
     每份 SKILL.md 自带 `# 标题`，所以直接接在下面就是可读的分节。
     """
     # `platform_skills` 为空 = 调用方直接构造的 `LoadedSkills`（测试里的写法）→ 退回单数。
+    from services.ai.context_working_set import checkpoint_hint
+
     platform_bodies = [
         document.text
         for document in (loaded.platform_skills or (loaded.platform_skill,))
@@ -496,6 +498,7 @@ def _platform_sections(loaded: LoadedSkills) -> list[str]:
     return [
         _PRIMACY_NOTICE,
         _UNTRUSTED_DATA_NOTICE,
+        checkpoint_hint(),
         "# 角色与方法（强制）",
         *platform_bodies,
     ]

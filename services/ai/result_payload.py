@@ -36,6 +36,7 @@ from services.ai.anomaly_scope import claims_touch as _claims_touch  # noqa: F40
 from services.ai.anomaly_scope import out_of_scope as _out_of_scope
 from services.ai.anomaly_scope import ref_path as _ref_path  # noqa: F401
 from services.ai.engine import EngineOutcome
+from services.ai.report_items import sort_report_items
 from services.ai.rules import anomaly_fingerprint
 from services.ai.scope import normalize_path
 from services.ai.subagent import WEEKLY_MODE
@@ -311,6 +312,15 @@ def risk_level_from_outcome(outcome: EngineOutcome, summary: dict) -> Tuple[str,
     mid_high，不会因为文件多就顶格 high。越界（`out_of_scope=True`）的条目由调用方
     先滤掉 —— `result_payload` 传进来的这一份已经是 in-scope 的。
     """
+    if outcome.report_sections is not None and (outcome.report_items or outcome.anomalies):
+        severities = {item["severity"] for item in outcome.report_items}
+        severities.update(item.severity for item in outcome.anomalies)
+        level = next((level for severity, level in (("critical", "high"), ("high", "mid_high"),
+                     ("medium", "medium"), ("low", "low")) if severity in severities), "low")
+        reasons = [f"结构化业务报告保留 {len(outcome.report_items)} 条风险与待确认事项；影响仍需验证"]
+        if outcome.degradation:
+            reasons.append(outcome.degradation_label or outcome.degradation)
+        return level, reasons
     if outcome.anomalies:
         severities = {item.severity for item in outcome.anomalies}
         # 沿用原规则：critical → high，其余一律 mid_high。不按 high 的条数再抬一档 ——
@@ -400,6 +410,13 @@ def result_payload(
     被看见的一类降级。
     """
     summary = payload.get("summary") or {}
+    ruling = outcome.verdict if isinstance(outcome.verdict, dict) and outcome.verdict else None
+    retracted = retracted_fingerprints(ruling)
+    business_items = sort_report_items(tuple(
+        item for item in outcome.report_items
+        if item.get("finding_fingerprint") not in suppressed
+        and item.get("finding_fingerprint") not in retracted
+    ))
     # **范围外 / 关联不足的结论照常进 `anomalies`（带 `out_of_scope=True`），但不参与
     # 定级与计数**（契约 1.8 + WP27）。两条判据都在 `_out_of_scope` 里：
     #
@@ -413,6 +430,11 @@ def result_payload(
     change_paths = _change_paths_of(payload)
     scoring = replace(
         outcome,
+        report_items=tuple(item for item in business_items if any(
+            ref.get("available") is True and bool(ref.get("path")) and not _out_of_scope(
+                ref["path"], allowed_paths, change_paths=change_paths,
+            ) for ref in item.get("evidence_refs", ())
+        )),
         anomalies=tuple(
             item
             for item in outcome.anomalies
@@ -425,6 +447,9 @@ def result_payload(
         ),
     )
     risk_level, risk_reasons = risk_level_from_outcome(scoring, summary)
+    pending_business = len(business_items) - len(scoring.report_items)
+    if pending_business:
+        risk_reasons.append(f"另有 {pending_business} 条业务发现待核查：证据未绑定或与本次差异关联不足，未据此上调等级")
     # 只按 in-scope 计数的代价：如果模型只报了单列的结论，上面会落到「模型未报出达门槛的
     # 问题」那一支 —— 而它其实报了，只是平台不采纳。不说明这一点，「平台不采纳」会被
     # 读成「模型觉得没问题」，这两件事的处理方式完全相反（正是本模块开头那条口径）。
@@ -461,6 +486,11 @@ def result_payload(
     ]
     # 逐条裁决按**指纹**与结论对起来（不按下标：撤销之后的清单已经短了，按下标会整体错位）。
     rows = {str(row.get("fingerprint") or ""): row for row in ruling_rows(ruling)}
+    business_markdown = outcome.report_markdown
+    if outcome.report_sections is not None and business_items != outcome.report_items:
+        from services.ai.business_baseline import replace_business_body
+        business_markdown = replace_business_body(outcome.report_markdown, outcome.report_items,
+                                                  business_items, outcome.report_sections)
 
     return {
         "risk_level": risk_level,
@@ -496,7 +526,17 @@ def result_payload(
         #
         # **一个字节的机器 JSON 都不许有**：裁决走 `outcome.verdict`，正文只给人读
         # （AI-P0-05）。从前这里还会带一行 `<!-- ai-verify-ruling: {...} -->`。
-        "report_markdown": outcome.report_markdown,
+        "report_markdown": business_markdown,
+        "report_items": [dict(item) for item in business_items],
+        "report_sections": dict(outcome.report_sections) if outcome.report_sections is not None else None,
+        "report_summary": {
+            "highest_severity": business_items[0]["severity"] if business_items else None,
+            "pending_confirmation_count": sum(bool(item.get("decision_question")) or
+                                              item["evidence_status"] != "verified" for item in business_items),
+            "confirmed_high_risk_count": None,
+            "release_decision": "pending_human_review",
+            "degraded": bool(outcome.degradation),
+        },
         # **模型自己写的那份汇总草稿**：只有有复核结论时才另存这一份（没开对账轮的运行里
         # 它就是上面那份正文的开头，再存一份等于同一段字节在载荷里出现两次）。它是给外部
         # 读侧保留的**存档**（模型原始草稿、不含平台拼接），默认不渲染 —— 屏幕与导出读的
@@ -636,6 +676,11 @@ def failed_result(summary: dict, message: str) -> dict:
         # 没发起分析 / 跑到一半失败的那次没有「模式裁决」可言，空串 = 界面不显示这一行。
         "mode_decision": "",
         "report_markdown": "",
+        "report_items": [],
+        "report_sections": None,
+        "report_summary": {"highest_severity": None, "pending_confirmation_count": 0,
+                           "confirmed_high_risk_count": None, "release_decision": "pending_human_review",
+                           "degraded": True},
         # 形状与 `result_payload` 一致（读侧只写一处 `payload.get("report_markdown")`）。
         # 没发起分析当然没有草稿与对账轮原文，但**键必须在** —— 少一个键与空串在界面上
         # 的区别是「这一块永远空着」与「这次没有这两份存档」。

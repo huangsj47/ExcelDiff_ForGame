@@ -205,16 +205,8 @@ class Anomaly:
     file_path: str = ""
     impact: str = ""
     suggestion: str = ""
-    # 这条结论**来源于哪几条分片候选**（`family_ledger.Candidate.id`，形如 `S1-3`）。
-    #
-    # 汇总那一次的任务书要求每条结论把来源编号原样带回来（一对多、多对一都允许）。
-    # 平台据此对账：**编号对不上才是真缺口**。在这之前，平台是从标题、文件路径、
-    # 证据文本里**反推**血缘的（`family_ledger` 那三手），而在真机上它产生的全是假缺口
-    # ——run 20 的 `S3-3` 与最终结论 `F5` 讨论的是同一个问题（同名协议拆在两个文件里），
-    # 三条启发式一条都没对上，于是被报成「找不到去向」，而那 4 条假缺口又是
-    # `subagent_gap` 降级的唯一触发源。显式血缘把这一整类误判整个删掉。
-    #
-    # 单代理路径永远是空的：没有分片，也就没有候选编号可言。
+    finding_ref: str = ""
+    # 显式血缘避免从报告标题或路径猜候选去向。
     source_candidate_ids: tuple[str, ...] = ()
     # 这条结论**由哪些可以逐项核实的原子断言组成**（P0-01，见 `Claim`）。
     #
@@ -319,12 +311,13 @@ class AnalysisPayload:
     reason_code: str = ""
     requests: tuple[ContextRequest, ...] = ()
     report_markdown: str = ""
+    report_items: tuple[dict, ...] = ()
+    report_sections: dict | None = None
+    checkpoint: dict | None = None
     anomalies: tuple[Anomaly, ...] = ()
     dimensions: tuple[DimensionReview, ...] = ()
     candidate_dispositions: tuple[CandidateDisposition, ...] = ()
-    # 模型对**上一轮结论**的收口声明（哪几条修好了 / 被推翻了）。语义与边界写在
-    # `baseline_closures` 的模块 docstring 里 —— 一句话：它只把「模型说过什么」如实
-    # 记下来，**平台不据此认定问题真的没了**。
+    verdicts: tuple[dict, ...] = ()
     baseline_closures: tuple[BaselineClosure, ...] = ()
     dropped: tuple[DroppedItem, ...] = field(default_factory=tuple)
 
@@ -515,6 +508,7 @@ def _coerce_anomalies(
                 file_path=normalize_path(_as_str(entry.get("file_path"))),
                 impact=_as_str(entry.get("impact")),
                 suggestion=_as_str(entry.get("suggestion")),
+                finding_ref=_as_str(entry.get("finding_ref")),
                 # 候选血缘（AI-P0-06）：汇总按任务书把来源编号带回来，平台按它核对
                 # 「这条候选有没有去向」。解析不做任何合法性判断（编号集合是
                 # `family_ledger` 那边的事），只负责把形状读成一组字符串。
@@ -719,6 +713,11 @@ def parse_payload(
         raise ProtocolError(f"回答里没有可解析的 JSON。原文开头：{preview}")
 
     raw = _select_payload_object(parsed)
+    from services.ai.context_working_set import parse_checkpoint
+    try:
+        checkpoint = parse_checkpoint(raw.get("checkpoint"))
+    except ValueError as exc:
+        raise ProtocolError(str(exc)) from exc
 
     status = _as_str(raw.get("status")).lower()
     if status not in STATUSES:
@@ -740,6 +739,8 @@ def parse_payload(
     # 收窄**只管中间轮**：`final` 那一支必须照旧拿到全部字段，差一点就是整份结论丢掉。
     dropped_mid: tuple[DroppedItem, ...] = ()
     report_markdown = ""
+    report_items: tuple[dict, ...] = ()
+    report_sections: dict | None = None
     anomalies: tuple[Anomaly, ...] = ()
     dimensions: tuple[DimensionReview, ...] = ()
     dispositions: tuple[CandidateDisposition, ...] = ()
@@ -749,6 +750,12 @@ def parse_payload(
         dropped_mid = mid_round_drops(raw)
     else:
         report_markdown = _as_str(raw.get("report_markdown")) or _as_str(raw.get("report"))
+        if "report_items" in raw or "report_sections" in raw:
+            from services.ai.report_items import ReportValidationError, parse_structured_delivery
+            try:
+                report_items, report_sections, report_markdown = parse_structured_delivery(raw)
+            except ReportValidationError as exc:
+                raise ProtocolError(str(exc)) from exc
         anomalies, dropped_anomalies = _coerce_anomalies(
             raw.get("anomalies"), dimension_ids=dimension_ids
         )
@@ -776,13 +783,14 @@ def parse_payload(
         )
 
     if status == STATUS_FINAL:
+        from services.ai.review_delivery import parse_review_delivery
+        try:
+            verdicts = parse_review_delivery(raw.get("verdicts"))
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from exc
         if not report_markdown:
             raise ProtocolError("status 为 final 时必须给出非空的 report_markdown")
         if not dimensions:
-            # dimensions 是「每个维度都过了一遍」的证据（清单 = `DIMENSION_IDS`，也就是
-            # SKILL.md 的「九个检查维度」）。允许为空等于允许模型只挑好说的说，这正是它
-            # 要防的事。条数不写死在这里 —— 写死的那一版曾经写着「六个」，而过了一年没人
-            # 发现（`tests/test_ai_dimension_count_stays_in_sync.py` 现在钉住这一条）。
             raise ProtocolError("status 为 final 时必须给出非空的 dimensions（未命中的也要写）")
 
     return AnalysisPayload(
@@ -791,9 +799,13 @@ def parse_payload(
         reason_code=reason_code,
         requests=requests,
         report_markdown=report_markdown,
+        report_items=report_items,
+        report_sections=report_sections,
+        checkpoint=checkpoint,
         anomalies=anomalies,
         dimensions=dimensions,
         candidate_dispositions=dispositions,
+        verdicts=verdicts if status == STATUS_FINAL else (),
         baseline_closures=closures,
         dropped=dropped_entries + dropped_mid + dropped_reason + dropped_reason_code,
     )
@@ -850,6 +862,7 @@ def ground_payload(payload: AnalysisPayload, scope: AnalysisScope) -> AnalysisPa
                 file_path=file_path,
                 impact=anomaly.impact,
                 suggestion=anomaly.suggestion,
+                finding_ref=anomaly.finding_ref,
                 # 血缘原样带过去：这一层校验的是 commit / file_path 是否真实，
                 # 与「这条结论来源于哪几条候选」无关（漏传等于把血缘静默丢掉）。
                 source_candidate_ids=anomaly.source_candidate_ids,
@@ -1971,7 +1984,8 @@ def build_correction_hint(
         "1. 只返回一个可被 json.loads 解析的 JSON 对象；\n"
         "2. 不要输出 <think> 块、不要用代码围栏包住 JSON、不要写 JSON 之外的说明文字；\n"
         "3. status 只能是 need_more_context 或 final；\n"
-        "4. final 必须同时给出非空的 report_markdown 和 dimensions"
+        "4. final 必须给出 report_items 数组、report_sections 对象和非空 dimensions；"
+        "旧格式可给出非空 report_markdown 和 dimensions"
         "（系统提示词里那份**本项目适用的维度清单**上的每一个维度都要写，"
         "未命中的写 hit 为 false 并说明理由）；\n"
         "5. 所有自然语言内容使用中文。"

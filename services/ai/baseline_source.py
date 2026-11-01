@@ -697,9 +697,11 @@ def baseline_digest(
     """
     if run_ignores_history(baseline_account) or has_scope_mismatch(baseline_account):
         return ""
+    from services.ai.business_baseline import business_digest
+    business = business_digest(previous_run(target_type, target_key, scope_signature=scope_signature))
     findings = baseline_findings(target_type, target_key, scope_signature=scope_signature)
     if not findings:
-        return ""
+        return business
     skipped = skipped_unstructured_runs(
         target_type,
         target_key,
@@ -723,7 +725,8 @@ def baseline_digest(
             "——模型没按协议输出，只留下一份 markdown 报告。所以上面的清单是更早那次"
             "留下的，**不代表这中间没有问题**。）"
         )
-    return build_baseline_digest(classify(findings, changed_paths=change.paths), note=note)
+    return "\n\n".join(filter(None, (
+        build_baseline_digest(classify(findings, changed_paths=change.paths), note=note), business)))
 
 
 def suppressed(

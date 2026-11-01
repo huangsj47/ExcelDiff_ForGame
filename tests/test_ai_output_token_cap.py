@@ -304,12 +304,56 @@ def test_a_numeric_limit_is_clamped_and_kept_for_later_calls(monkeypatch):
         "数值超限不是「不支持字段」；拉黑会把输出上限永久撤掉（P2）"
     )
 
-    # 第三次调用仍然从调用方给的值开始（字段**在**），再被降到上限 —— 关键是它没有
-    # 因为上一轮的黑名单而永久不带 `max_tokens`。
+    assert result.requested_max_tokens == 8192
+    assert result.effective_max_tokens == result.gateway_max_tokens == 4096
+    assert result.max_tokens_adjustment == "gateway_limit"
+    # 数值能力已知后直接钳制；仍然带字段，不再每轮先吃一次相同的 400。
     calls.clear()
-    client.complete(MESSAGES, max_tokens=8192)
-    assert calls[0]["json"]["max_tokens"] == 8192, "上一轮的数值超限把上限永久撤掉了"
-    assert calls[-1]["json"]["max_tokens"] == 4096
+    next_result = client.complete(MESSAGES, max_tokens=8192)
+    assert [call["json"]["max_tokens"] for call in calls] == [4096]
+    assert next_result.requested_max_tokens == 8192
+    assert next_result.effective_max_tokens == next_result.gateway_max_tokens == 4096
+
+
+def test_numeric_limit_fallback_is_not_retried_as_a_cache_marker_failure(monkeypatch):
+    calls = _patch(monkeypatch, lambda *_: _Response(status_code=400, body=_NUMERIC_LIMIT_BODY))
+    client = _client()
+    monkeypatch.setattr(client, "_cache_marker", lambda: {"type": "ephemeral"})
+    with pytest.raises(LLMValueLimitError):
+        client.complete(MESSAGES, max_tokens=8192)
+    assert [call["json"]["max_tokens"] for call in calls] == [8192, 4096]
+
+
+def test_unsupported_cap_records_that_successful_request_had_no_cap(monkeypatch):
+    calls = _patch(monkeypatch, lambda body, _n: (
+        _Response(status_code=400, body=_REJECT_BODY)
+        if "max_tokens" in body else _Response(payload=_completion_payload())))
+    result = _client().complete(MESSAGES, max_tokens=8192)
+    assert len(calls) == 2
+    assert result.requested_max_tokens == 8192
+    assert result.effective_max_tokens is None
+    assert result.max_tokens_adjustment == "unsupported"
+
+
+def test_length_stop_with_null_content_keeps_hidden_reasoning_usage(monkeypatch):
+    payload = _completion_payload()
+    payload["choices"][0] = {"message": {"content": None}, "finish_reason": "length"}
+    payload["usage"]["completion_tokens"] = 8192
+    payload["usage"]["completion_tokens_details"] = {"reasoning_tokens": 8192}
+    _patch(monkeypatch, lambda *_: _Response(payload=payload))
+    result = _client().complete(MESSAGES)
+    assert result.text == ""
+    assert result.finish_reason == "length"
+    assert result.completion_tokens == result.reasoning_tokens == 8192
+    assert result.effective_max_tokens == 8192
+
+
+def test_null_content_without_length_evidence_is_still_a_response_error(monkeypatch):
+    payload = _completion_payload()
+    payload["choices"][0]["message"]["content"] = None
+    _patch(monkeypatch, lambda *_: _Response(payload=payload))
+    with pytest.raises(llm.LLMResponseError):
+        _client().complete(MESSAGES)
 
 
 def test_a_limit_at_or_above_the_requested_value_is_not_retried(monkeypatch):

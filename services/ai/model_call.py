@@ -81,7 +81,7 @@ def tokens_for_budget(
     if completion is None:
         # 没配输出上限时退到这一轮实际写回来的正文长度 —— 那是**下界**（推理 token 不算在
         # 里面），但比当 0 强；这一档本来就是「别把它当 0」。
-        completion_est = limits.max_output_tokens or estimate_chars(
+        completion_est = usage.get("effective_max_tokens") or limits.max_output_tokens or estimate_chars(
             [{"role": "assistant", "content": text}]
         )
     else:
@@ -146,4 +146,8 @@ def usage_of(result: Any) -> dict[str, Any]:
         # `llm_client._extract_reasoning_usage`）。**上游没报就是 `None`**，不是 0。
         "reasoning_tokens": non_negative_int(getattr(result, "reasoning_tokens", None)),
         "reasoning_source": str(getattr(result, "reasoning_source", "") or ""),
+        "requested_max_tokens": non_negative_int(getattr(result, "requested_max_tokens", None)),
+        "effective_max_tokens": non_negative_int(getattr(result, "effective_max_tokens", None)),
+        "gateway_max_tokens": non_negative_int(getattr(result, "gateway_max_tokens", None)),
+        "max_tokens_adjustment": str(getattr(result, "max_tokens_adjustment", "") or ""),
     }

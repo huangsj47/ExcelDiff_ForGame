@@ -1114,7 +1114,7 @@ _VERDICT_SCHEMA_SAMPLE = (
 )
 
 
-def verdict_instructions() -> str:
+def verdict_instructions(*, structured: bool = False) -> str:
     """任务书里那一段「结构化裁决」（`subagent.build_verify_task` 拼进去）。
 
     **这一段是整条链路的前提**：平台只按这个 json 块决定某条结论是保留、降级还是撤销。
@@ -1128,10 +1128,13 @@ def verdict_instructions() -> str:
     「其中一条没核实」变成「整条已核实」—— 实测 run 58 的 F3 就是这么被标成 confirmed 的。
     """
     return (
-        "## 结构化裁决（**必须给**，平台按它改结论）\n\n"
+        "## 结构化裁决（**必须给**，平台按它改结论）\n\n" +
+        ("裁决直接放在 final JSON 顶层的 verdicts 数组中，不写进正文，不加代码围栏。示例字段：\n"
+         + _VERDICT_SCHEMA_SAMPLE + "\n\n" if structured else
         "上面每一条都带一个编号（`F1`…）。除了写在正文里的那段话，**还要在 "
         "`report_markdown` 末尾单独给一个 json 代码块**，形如：\n\n"
-        "```json\n" + _VERDICT_SCHEMA_SAMPLE + "\n```\n\n"
+        "```json\n" + _VERDICT_SCHEMA_SAMPLE + "\n```\n\n")
+        +
         "`verdict` 只能取这四个值：\n\n"
         "* `confirmed`：反证不成立，维持原结论；\n"
         "* `downgraded`：反证部分成立，**必须同时给 `final_severity`**（只允许 "

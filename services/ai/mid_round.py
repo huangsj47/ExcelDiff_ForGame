@@ -1,4 +1,4 @@
-"""中间轮的**字段收窄**：那一轮只认四个字段，其余的一律丢弃并逐条记账。
+"""中间轮的**字段收窄**：那一轮接受取证字段和可选检查点，其余的一律丢弃并逐条记账。
 
 ## 为什么要收窄
 
@@ -27,14 +27,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # 只在类型标注里用；运行时的那一份在函数体内导入（见模块 docstring）。
     from services.ai.protocol import DroppedItem
 
-# 中间轮**只认这四个字段**。其余的一律解析后丢弃并逐条记账（见 `mid_round_drops`）。
+# 中间轮**只认这些取证与检查点字段**。其余的一律解析后丢弃并逐条记账（见 `mid_round_drops`）。
 #
 # 为什么中间轮要收窄：那一轮存在的意义只有一个 —— 把「我还需要什么」交回来并开始下一轮。
 # 而 `report_markdown` / `anomalies` / `dimensions` / `candidate_dispositions` 这四个
 # 字段**在中间轮没有任何读者**（引擎只在 `is_final` 那一支读它们）。模型顺手在中间轮
 # 写一整份报告时，平台原先**不拦不丢**：白花输出 token，还让那一轮的输出更容易撞上
 # 单次输出上限（撞上就是整轮作废）。现在丢弃并记账 —— 丢弃是**有账**的，不是静默消失。
-MID_ROUND_FIELDS = ("status", "reason", "reason_code", "requests")
+MID_ROUND_FIELDS = ("status", "reason", "reason_code", "requests", "checkpoint")
 
 # 中间轮里**不该出现**的那四个字段，以及它们在文档里的别名。别名（`report`）只记一条账：
 # 记两条会让人以为模型交了两份报告。

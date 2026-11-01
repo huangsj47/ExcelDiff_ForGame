@@ -55,7 +55,7 @@
  *    按钮再长出来（实测里那一下闪动很容易被当成「这条不能导出」）。
  * 4. **列表只有一次结论时说实话**（「还没有可对比的历史」），不摆一张只有一行的表；
  *    一条都没有时说「还没跑过分析」。
- * 5. 报告正文走 `AiReportMarkdown.render`（先整体转义再套白名单），**不在这里拼 HTML**。
+ * 5. 报告正文走共用 `AiReportMarkdown.renderReader`（安全渲染 + 章节阅读），**不在这里拼 HTML**。
  * 6. 报告下面还挂着**结构化结论 + 处置**（`static/js/ai_anomaly_disposition.js`）：
  *    处置是「读某一次的报告」时做的事，而这个面板已经知道看的是哪一次。这里只负责
  *    建容器 `#aiAnomalyPanel` 并把运行号交给它 —— 清单怎么画、状态名怎么取，全在那个
@@ -512,7 +512,10 @@
             if (global.AiContextNotice && global.AiContextNotice.withContextNotice) {
                 reportBody = global.AiContextNotice.withContextNotice(reportBody, payload.result);
             }
-            if (global.AiReportMarkdown && global.AiReportMarkdown.render) {
+            if (global.AiReportMarkdown && global.AiReportMarkdown.renderReader) {
+                report.innerHTML = global.AiReportMarkdown.renderReader(reportBody);
+                global.AiReportMarkdown.bindReader(report);
+            } else if (global.AiReportMarkdown && global.AiReportMarkdown.render) {
                 report.innerHTML = global.AiReportMarkdown.render(reportBody);
             } else {
                 report.textContent = reportBody;

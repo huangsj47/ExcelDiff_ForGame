@@ -195,8 +195,13 @@ def _digest(entries: Sequence[ManifestEntry]) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def build_manifest(rows: Iterable[Mapping[str, Any]], *, shard_count: int) -> ManifestPlan:
+def build_manifest(rows: Iterable[Mapping[str, Any]], *, shard_count: int, analysis_plan=None) -> ManifestPlan:
     count = max(1, int(shard_count or 1))
+    ownership = {}
+    if analysis_plan is not None and analysis_plan.mode == MODE_FAMILY:
+        for member in analysis_plan.members:
+            for path in member.paths:
+                ownership.setdefault(normalize_path(path), []).append(member.label)
     canonical: dict[tuple[int, str, str], Mapping[str, Any]] = {}
     for row in rows or ():
         path = normalize_path(str(row.get("file_path") or row.get("path") or ""))
@@ -222,9 +227,8 @@ def build_manifest(rows: Iterable[Mapping[str, Any]], *, shard_count: int) -> Ma
                 directory=str(PurePosixPath(path).parent),
                 source=source,
                 risk_features=features,
-                assigned_shards=_shards(
-                    key, shard_count=count, critical="critical_path" in features
-                ),
+                assigned_shards=tuple(ownership[path]) if path in ownership else _shards(
+                    key, shard_count=count, critical="critical_path" in features),
             )
         )
     return ManifestPlan(

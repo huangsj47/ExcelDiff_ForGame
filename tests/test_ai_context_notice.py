@@ -142,15 +142,7 @@ def test_a_compaction_reports_the_numbers(results):
 
 
 def test_each_warning_is_its_own_paragraph():
-    """**这几句要分成三段，不能连成一句。**
-
-    报告渲染器把段落内的单换行当软换行、用空格接起来（`ai-report-markdown.js` 的
-    `flushPara`）—— 用单换行的话，「轮次用尽」+「压掉了 2 轮历史」+「窗口是按默认值算的」
-    会连成一大句，而这是**互不相干的三件事**。一整块读起来像免责声明，用户一眼就跳过 ——
-    而这一块的全部意义就是别被跳过。
-
-    判据：两段之间恰好一个空行，不多不少（多一个空行渲染出来是双倍行距）。
-    """
+    """降级和压缩告警各自成段；窗口配置不应拼进业务报告。"""
     blank = chr(10) * 2
     mixed = _run([{"name": "降级 + 压缩 + 默认窗口", "payload": {
         "status": "degraded", "degradation": "rounds_exhausted",
@@ -164,9 +156,10 @@ def test_each_warning_is_its_own_paragraph():
         },
     }}])[0]["notice"]
 
-    assert mixed.count(blank) == 2, f"三段之间各要一个空行：{mixed!r}"
+    assert mixed.count(blank) == 1, f"两段业务告警之间各要一个空行：{mixed!r}"
     assert blank * 2 not in mixed, "别多给空行（渲染出来是双倍行距）"
-    assert mixed.count(chr(10)) == 4, f"只有两处空行，没有多余换行：{mixed!r}"
+    assert mixed.count(chr(10)) == 2, f"只有一处空行，没有多余换行：{mixed!r}"
+    assert "1,000,000" not in mixed
 
     # 反向：只有一句的时候不该出现空行（一个孤零零的段落分隔看着像漏了内容）。
     single = _run([{"name": "只降级", "payload": {
@@ -188,9 +181,9 @@ def test_zero_compaction_never_prints_a_zero(results):
         assert "0 字" not in results[name], f"{name} 里出现了凭空的数量"
 
 
-def test_the_window_note_is_passed_through_verbatim(results):
-    """窗口说明由服务端下发（含「窗口是按默认值算的」这种必须说清的事），前端只负责显示。"""
-    assert "端点未声明窗口，按默认值" in results["窗口按默认值"]
+def test_technical_window_settings_do_not_enter_the_business_report(results):
+    """预算诊断保留在结果数据和运行详情；业务报告只展示影响结论的告警。"""
+    assert results["窗口按默认值"] == ""
 
 
 @pytest.mark.parametrize("name", ["缺字段", "空载荷"])
@@ -310,7 +303,8 @@ def test_an_empty_body_still_carries_the_notice(composed):
 
     这时提示**更不能丢**：屏幕上只有那句「暂无分析结果」，而真相是「这次没跑成」。
     """
-    assert composed["降级 + 空正文"].strip().startswith("⚠️")
+    assert "⚠️ 本次分析未完整跑完" in composed["降级 + 空正文"]
+    assert "## 运行提示（平台）" in composed["降级 + 空正文"]
 
 
 def test_a_non_string_body_does_not_leak_null(composed):

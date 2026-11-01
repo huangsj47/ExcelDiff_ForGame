@@ -22,10 +22,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from services.ai.engine import EngineLimits
 
 from services.ai.budget import ContextItem, enforce_budget, estimate_chars
 from services.ai.prompt import build_user_message, change_block, render_context_items
+from services.ai.skill_contract import DIMENSION_IDS
 
 #: 第一轮里那批**预取**条目前面的说明（见 `_prepare_round` 末尾）。
 #:
@@ -49,6 +54,7 @@ def fit_items(
     messages: Sequence[Mapping[str, str]],
     change_summary: str,
     limits: EngineLimits,
+    overhead_chars: int | None = None,
 ) -> tuple[tuple[ContextItem, ...], list[str]]:
     """把上下文条目压进「除条目之外还剩多少」的额度里。
 
@@ -57,7 +63,8 @@ def fit_items(
     而模型分不出「文件就这么大」和「预算不够」——正是 `budget.py` 要解决的那个问题。
     """
     notes: list[str] = []
-    overhead = estimate_chars(messages) + len(change_summary) + limits.baseline_char_budget
+    overhead = (estimate_chars(messages) + len(change_summary) + limits.baseline_char_budget
+                if overhead_chars is None else overhead_chars)
     residual = limits.prompt_char_budget - overhead
     if residual < MIN_ITEM_BUDGET:
         notes.append(
@@ -89,11 +96,23 @@ def prepare_round(
         # （那条路上不预取，见 `run_analysis` 里 `prefetch` 那一段）。
         return (), brief.task_message
     block = change_block(brief.change_summary, round_index=brief.round_index)
+    # 与实际模板同源计量，检查点现在包含关键证据原文，不能漏算它。
+    base_message = build_user_message(
+        change_summary=brief.change_summary, round_index=brief.round_index,
+        max_rounds=brief.max_rounds, items=(), baseline_digest=brief.baseline_digest,
+        budget_notes=brief.budget_notes, requests_remaining=brief.requests_remaining,
+        requests_total=brief.requests_total, correction_hint=brief.correction_hint,
+        budget_exhausted=brief.budget_exhausted, token_budget_low=brief.token_budget_low,
+        history_recap=brief.recap, dimension_ids=brief.dimension_ids,
+    )
     items, item_notes = fit_items(
         brief.pending_items,
         messages=messages,
         change_summary=block,
         limits=brief.limits,
+        overhead_chars=estimate_chars(messages) + len(base_message)
+            + (len(PREPATCHED_NOTICE) if brief.round_index <= 1 else 0)
+            + 500 + 300 * len(brief.pending_items),
     )
     message = build_user_message(
         change_summary=brief.change_summary,
@@ -124,5 +143,47 @@ def prepare_round(
             (message, "", PREPATCHED_NOTICE, "", render_context_items(items))
         )
     return items, message
+
+
+
+
+@dataclass(frozen=True)
+class RoundBrief:
+    """一轮里「与历史无关」的那些输入。
+
+    攒成一包是因为**同一轮可能要组装两次**：压掉历史之后条目额度会变大，必须重算一遍
+    （见 `_prepare_round`）。散着传十几个参数，两次调用之间漏传一个就是一条静默的错
+    —— 而它表现为「分析结果说不清哪里不对」。
+    """
+
+    round_index: int
+    max_rounds: int
+    change_summary: str
+    baseline_digest: str
+    correction_hint: str
+    budget_exhausted: bool
+    budget_notes: tuple[str, ...]
+    pending_items: tuple[ContextItem, ...]
+    recap: str
+    requests_remaining: int
+    # 本次运行的总额度（`limits.max_tool_requests`）。**必须与 `requests_remaining` 一起
+    # 给模型**：只报剩余数时，第 2 轮起那句「总共可索取 N 次」会把剩余说成总额 ——
+    # 模型会把它原样抄进报告的信息缺口（见 `prompt._budget_line` 的 docstring）。
+    requests_total: int
+    limits: EngineLimits
+    # 子代理模式下的**任务书**（第 1 轮的 user 消息原文，见 `run_analysis`）。空串 = 常规路径。
+    task_message: str = ""
+    # 本次生效的维度清单（id 那一份）。只给第一轮的开场指令用：清单里没有
+    # `config_data` / `value_sanity` 的项目不该读到「按配表数值看」那两步
+    # （见 `prompt._first_round_hint`）。默认是平台出厂那一份 —— 与这段改动之前
+    # 逐字相同（`run_analysis` 每次都会按 `loaded.dimensions` 传真的那份进来）。
+    dimension_ids: tuple[str, ...] = DIMENSION_IDS
+    # 「钱只够这一轮了」——`SingleRunBudget.next_round_affordable` 的估算结果（见 `round_hints
+    # .build_token_budget_final_hint`）。与 `budget_exhausted`（索取**次数**额度）是两条
+    # 不同的额度：那一条是硬事实，这一条是估算，所以 `prompt.build_user_message` 里把它
+    # 排在最后 —— 硬事实成立时它不说话。
+    #
+    # 带默认值所以放在这一组（dataclass 的非默认字段必须排在前面）。
+    token_budget_low: bool = False
 
 

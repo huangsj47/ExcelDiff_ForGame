@@ -64,6 +64,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional, Sequence
 
 from services.ai.pricing import BudgetWeights, equivalent_tokens
+from services.ai.output_budget import (
+    DEFAULT_OUTPUT_TOKENS as DEFAULT_OUTPUT_TOKENS,
+    MAX_OUTPUT_RECOVERIES, RECOVERY_OUTPUT_TOKENS, output_cap_for,
+)
 
 # 分片数的**预算档目标**。2026-09-23（工作包 B）起它的角色变了：以前它是「本周开几片」
 # 的答案（于是 3 个文件也开 5 片），现在**只是 `derive_family_sizing` 给出的预算上限**
@@ -108,7 +112,7 @@ ANOMALY_RUN_CAP = 20
 #:
 #: 2026-11-01：单次输出上限从 `None`（端点默认）改成 `DEFAULT_OUTPUT_TOKENS`，计划的
 #: 「本轮保守预留」与请求体里的 `max_tokens` 都跟着变 —— 额度口径变了，所以进版本号。
-PLAN_VERSION = "2026-11-01.1"
+PLAN_VERSION = "2026-11-01.2"
 
 # --- 小批次门槛（**初值，待基准校准**）---
 #
@@ -187,7 +191,6 @@ SINGLE_RUN_TOKEN_CAP_LARGE = 8_000_000
 #: 项目配置**没有**这一列（`models/ai_analysis/project_config.py` 里没有
 #: `max_output_tokens`），所以这里只给常量；`EngineLimits.from_config` 仍然认同名键，
 #: 将来加列时不用改引擎那一层。
-DEFAULT_OUTPUT_TOKENS = 8192
 
 #: 预留给报告收尾的额度占单次上限的比例（下限见下）。收尾 = 汇总那一次调用 + 报告正文，
 #: 它是**一次完整的模型调用**，不能被前面的探索吃掉 —— 没有它，预算耗尽时连「有哪些没查」
@@ -1019,11 +1022,7 @@ def _output_cap_for(mode: str, output_tokens: Optional[int]) -> int:
     计划里记这个数，是为了让「这一轮最多能写多少」在账上可查，而不是由网关的隐性默认值
     决定 —— 后者既看不见，也会随部署环境漂移。
     """
-    if output_tokens and int(output_tokens) > 0:
-        return int(output_tokens)
-    # 保守值：run 45 各阶段输出 24k~52k token 是**累计**，一次调用远用不完；
-    # 4,096 是「完整结论 JSON」的硬下限，8192 留出一倍余量（见 `DEFAULT_OUTPUT_TOKENS`）。
-    return DEFAULT_OUTPUT_TOKENS
+    return output_cap_for(output_tokens)
 
 
 def _round_reserve(requests_per_member: int, rounds_per_member: int, *, list_chars: int, output_cap: int) -> int:
@@ -1092,6 +1091,51 @@ def _merge_groups(groups: Sequence[Sequence[str]], count: int) -> tuple[tuple[st
         merged.append(tuple(bucket))
         start += take
     return tuple(merged)
+
+
+def _split_oversized_clusters(
+    clusters: Sequence[Sequence[str]], facts: SnapshotFacts,
+) -> tuple[tuple[tuple[str, ...], ...], list[dict]]:
+    """Split oversized directory/commit groups by evidence, retaining relation metadata.
+
+    A directory plus a commit is a grouping heuristic, not an indivisible
+    dependency. Same-stem table/generated units remain atomic. A single file
+    is never split between analyzers; that case requires paged evidence reads.
+    """
+    sizes = {str(item["path"]): max(0, _int(item.get("chars"))) for item in facts.entries}
+    fallback = facts.diff_payload_chars // max(1, facts.file_count)
+    result: list[tuple[str, ...]] = []
+    relations: list[dict] = []
+    for cluster in clusters:
+        paths = tuple(sorted(cluster))
+        volume = sum(sizes.get(path) or fallback for path in paths)
+        units: dict[str, list[str]] = {}
+        for path in paths:
+            parsed = PurePosixPath(path)
+            # 导出文件通常在另一目录；同名源表/生成物仍是同一原子，不因目录不同拆散。
+            units.setdefault(parsed.stem, []).append(path)
+        count = min(FAMILY_MAX_MEMBERS, len(units), -(-volume // MEMBER_EVIDENCE_CHARS))
+        if volume <= MEMBER_EVIDENCE_CHARS or count < FAMILY_MIN_MEMBERS:
+            result.append(paths)
+            continue
+        # Largest atomic units first; ties by path, then the lightest bucket.
+        # Stable even when DB/query entry order changes.
+        weighted = [(sum(sizes.get(path) or fallback for path in unit), tuple(sorted(unit)))
+                    for unit in units.values()]
+        buckets: list[list[str]] = [[] for _ in range(count)]
+        loads = [0] * count
+        for chars, unit in sorted(weighted, key=lambda item: (-item[0], item[1])):
+            target = min(range(count), key=lambda index: (loads[index], index))
+            buckets[target].extend(unit)
+            loads[target] += chars
+        partitions = [tuple(sorted(bucket)) for bucket in buckets if bucket]
+        result.extend(partitions)
+        relations.append({"source_paths": list(paths),
+                          "partitions": [list(part) for part in partitions],
+                          "chars": volume,
+                          "relation": "same_commit_directory",
+                          "note": "同一业务簇按证据体量拆分；保留跨分片引用、共同约束与联动检查"})
+    return tuple(result), relations
 
 
 def plan_analysis(
@@ -1183,6 +1227,7 @@ def plan_analysis(
     # 规划建议里每个组的 `objective` / `qa_dimensions` 是**它给出的分工理由**，
     # 平台校验通过之后要真的用上（只用它的分簇、丢掉它的目标是白问一次模型）。
     declared: list[tuple[frozenset, str, tuple[str, ...]]] = []
+    shared_paths: tuple[str, ...] = ()
     planner: dict = {"consulted": False, "accepted": False, "problems": [], "reason": ""}
     if proposal is not None:
         # 调用方已经把建议拿回来了（它才是发起那次调用的地方 —— 本函数是纯函数，
@@ -1194,6 +1239,7 @@ def plan_analysis(
         planner["problems"] = list(validation.problems)
         if validation.accepted:
             clusters = groups_from_proposal(proposal)
+            shared_paths = tuple(sorted(set(str(path) for path in (proposal.get("shared_paths") or ()))))
             declared = [
                 (
                     frozenset(str(path).strip() for path in (row.get("paths") or ())),
@@ -1204,7 +1250,8 @@ def plan_analysis(
                 if isinstance(row, Mapping)
             ]
 
-    # 成员数由**证据体积与独立簇数**推导：既不是维度数，也不是预算反解出来的片数。
+    clusters, split_dependencies = _split_oversized_clusters(clusters, facts)
+    # 成员数由**证据体积与独立工作单元数**推导；超大业务簇按证据体量拆分。
     needed = max(
         FAMILY_MIN_MEMBERS,
         -(-max(1, facts.diff_payload_chars) // MEMBER_EVIDENCE_CHARS),
@@ -1216,7 +1263,7 @@ def plan_analysis(
     # 3 个维度给 3 个成员 —— 上一版就是从这里漏进来的）。
     #
     # 成员是**按变更簇切出来的工作量**，每个成员都要覆盖**全部**维度清单，所以维度数
-    # 不是它的上界。真正的上界是 `len(clusters)`（没东西可分就不拆）与
+    # 不是它的上界。真正的上界是 `len(clusters)`（同源原子没法拆就不拆）与
     # `FAMILY_MAX_MEMBERS`。`ceiling` 仍然管每个成员**能分到多少额度**（下面用到）。
     member_count = _clamp(
         min(needed, len(clusters), FAMILY_MAX_MEMBERS),
@@ -1275,6 +1322,8 @@ def plan_analysis(
             f"负责第 {position} 个变更簇（{len(paths)} 个文件，"
             f"≈{evidence:,} 字差异）：逐条核对该簇的改动与它的跨文件影响"
         )
+        if any(own & set(relation["source_paths"]) for relation in split_dependencies):
+            objective += "；该业务簇已按证据体量拆分，须核对跨分片引用、共同约束与联动影响"
         declared_dims = tuple(
             name for item in declared_here for name in item[2] if name in set(dims)
         )
@@ -1336,7 +1385,7 @@ def plan_analysis(
         synthesis=synthesis,
         dims=dims,
         clusters=clusters,
-        shared_paths=(),
+        shared_paths=shared_paths,
         family=family,
         planner=planner,
         user_chars=user_chars,
@@ -1349,7 +1398,8 @@ def plan_analysis(
             f"超过小批次门槛（{exceeded}）→ 按 {len(members)} 个变更簇分工；"
             f"每片额度由该簇证据体积推导，预算（{ceiling.requests_per_shard} 次/片）只作上限"
         ),
-        thresholds_extra={"small_batch_exceeded_by": exceeded, "forced_single": False},
+        thresholds_extra={"small_batch_exceeded_by": exceeded, "forced_single": False,
+                          "split_cluster_dependencies": split_dependencies},
     )
 
 
@@ -1505,6 +1555,8 @@ def _assemble_plan(
             # （`DEFAULT_OUTPUT_TOKENS` / 配置覆盖）：计划上写多少，模型一次就只能写多少 ——
             # 两个数各写一份时，「计划说 8k、端点按 64k 收钱」这种账没人对得出来。
             "output_tokens": output_cap,
+            "output_recovery_cap": RECOVERY_OUTPUT_TOKENS,
+            "max_output_recoveries": MAX_OUTPUT_RECOVERIES,
             "cost_limit": str(cost_limit or ""),
             **dict(thresholds_extra),
         },

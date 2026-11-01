@@ -490,6 +490,8 @@ class ContextTools:
     # 累计请求数。**必须是跨轮次的累计值**：预算按「一次分析总共能要几次」计，
     # 如果按每一轮的下标判断，第二轮又从 0 开始，预算永远不会触发（第一版就是这样）。
     _requests_seen: int = field(default=0, init=False, repr=False)
+    _archived_ids: set[str] = field(default_factory=set, init=False, repr=False)
+    _restored_ids: set[str] = field(default_factory=set, init=False, repr=False)
     # 按工具类型的记账。与上面几个总数分开：总数是给预算逻辑用的，这份是给「这次分析把
     # 索取额度花在哪了、取回了多少字」用的（消耗面板按类型展示）。
     _stats: dict[str, dict[str, int]] = field(default_factory=dict, init=False, repr=False)
@@ -678,9 +680,13 @@ class ContextTools:
         truncated = 0
 
         for index, request in enumerate(requests):
+            # 平台主动整理历史后，已取证原文允许免费恢复一次；不去仓库取新数据。
+            archive_restore = (request.type == EVIDENCE_REQUEST_TYPE
+                               and request.name in self._archived_ids
+                               and request.name not in self._restored_ids)
             # 预取**不查也不占**索取额度：它不是模型要的（见 `_count_call`）。其余一切
             # 照旧 —— 缓存、记账、失败降级走的都是同一段代码，这正是「同一本账」。
-            if not self._prefetching:
+            if not self._prefetching and not archive_restore:
                 if self._requests_seen >= self.max_tool_requests:
                     refused += 1
                     # 被拒的请求**不算 calls** —— 它没有消耗额度（额度由下面那行
@@ -704,7 +710,10 @@ class ContextTools:
                 item, note = self._evidence_item(request, index)
                 if note is not None:
                     dropped.append(note)
-                self._count_call(request.type)
+                if archive_restore:
+                    self._restored_ids.add(request.name)
+                else:
+                    self._count_call(request.type)
                 if item.meta.get("tool_failed"):
                     self._bump(request.type, "failed")
                 else:
@@ -715,6 +724,9 @@ class ContextTools:
                     self._bump(request.type, "cache_hits")
                     self._bump(request.type, "source_chars", _meta_chars(item))
                     self._bump(request.type, "produced_chars", len(item.text))
+                    key = item.meta.get("cache_key")
+                    if key:
+                        self._cache[tuple(key)] = item
                     if item.meta.get("truncated"):
                         # 口径是**交付**（模块 docstring 第 6 条）：交出去的确实是截断正文。
                         truncated += 1
@@ -891,6 +903,22 @@ class ContextTools:
             # 不能让 `_prefetching` 一直开着 —— 那会把**之后模型自己的索取**全记成预取。
             self._prefetching = False
         return replace(batch, items=tuple(_mark_prefetched(item) for item in batch.items))
+
+    def archive_history(self) -> None:
+        """历史被移除后不能再回一条指向不存在上文的指针；原文仍在证据仓。"""
+        verify = getattr(self.body_cache, "verify", None)
+        self._restored_ids.clear()
+        for item in self._cache.values():
+            eid = str(item.meta.get("evidence_id") or "")
+            if eid and callable(verify) and verify(eid):
+                self._archived_ids.add(eid)
+        self._cache.clear()
+
+    def archive_restore_note(self) -> str:
+        available = len(self._archived_ids - self._restored_ids)
+        return (f"已归档原文可恢复 {available} 份：用 evidence 工具按地址读取，每份本代可恢复一次，"
+                "不占新取证额度；仍受轮次和运行token预算限制。恢复后才能依据原文下结论。"
+                if available else "")
 
     def forget(self, items: Iterable[ContextItem]) -> int:
         """把**没能交付出去**的条目从本地缓存里摘掉，返回摘掉几条。

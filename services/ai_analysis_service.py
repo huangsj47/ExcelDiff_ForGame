@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-AI analysis service（真实执行器）。
-"""
+"""AI analysis service（真实执行器）。"""
 
 from __future__ import annotations
 
@@ -252,6 +250,7 @@ from services.ai.subagent import (
     MIN_MEMBER_ROUNDS,
     MIN_MEMBER_TOOL_REQUESTS,
     apply_manifest,
+    attach_execution_context,
     plan_family,
     run_family_with_seed,
     subagent_mode_of,
@@ -581,7 +580,7 @@ def build_weekly_payload(
     # 反过来也不行 —— 清单是计划的下游（`subagent.apply_manifest` 按它分文件）。
     plan = attach_weekly_plan(payload)
     payload["manifest"] = build_manifest(
-        delta_files, shard_count=shard_count_for_plan(plan)
+        delta_files, shard_count=shard_count_for_plan(plan), analysis_plan=plan
     ).to_dict()
     return payload, state, None
 
@@ -1532,6 +1531,7 @@ def _run_engine_and_persist(
     )
     if plan is not None:
         plan = apply_manifest(plan, change.manifest)
+        plan = attach_execution_context(plan, analysis_plan)
     # 有家族计划时报**每片的名义额**（保底）；池账与推导依据走 `family_pool` 那一节。
     #
     # 单代理那一路报的必须是 `engine_args["limits"]` —— **实际交给引擎的那一份**。
@@ -1616,8 +1616,7 @@ def _run_engine_and_persist(
     # 两件事不一样，判据与理由写在 `baseline_source.has_previous_conclusion` 里。
     if has_previous_conclusion(baseline_account):
         previous = _previous_run(target_type, target_key, scope_signature=scope)
-        # 行形状**不许在这里手抄**（`previous_anomaly_rows` 的 docstring 写着那次实测：
-        # 手抄的那份少了 `claims`，12 条继承项的断言清单在真机上全是空的）。
+        # 继承行形状由 baseline_source 统一恢复，不能在这里漏掉 claims 等字段。
         previous_rows = (
             previous_anomaly_rows(previous.id, scope_signature=scope)
             if previous is not None
@@ -1630,6 +1629,8 @@ def _run_engine_and_persist(
             previous_run_id=previous.id if previous is not None else None,
             scope_mismatch=baseline_account.get("scope_mismatch") is True,
         )
+        from services.ai.business_baseline import reconcile_business_result
+        result = reconcile_business_result(result, previous, changed_paths=change.paths, previous_rows=previous_rows)
     _persist_outcome(
         run, outcome, result, pricing_version=_price_version_for(project_config)
     )
