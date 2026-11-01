@@ -53,8 +53,8 @@ from services.ai.protocol import (
     parse_payload,
     sanitize_requests,
 )
-from services.ai.rules import RuleThresholds
 from services.ai.round_observability import CORRECTION_BASELINE_COVERAGE
+from services.ai.rules import RuleThresholds
 from services.ai.scope import AnalysisScope
 from services.ai.skill_loader import LoadedSkills, SkillDocument
 
@@ -299,7 +299,9 @@ class RecordingClient:
         self._replies = list(replies)
         self.calls: list[list[dict]] = []
 
-    def complete(self, messages, *, temperature=None):
+    def complete(self, messages, *, temperature=None, **kwargs):
+        # WP17 起引擎默认会带 `max_tokens`：假 client 必须能收下这个可选参数，
+        # 否则 TypeError 会被引擎记成「transport_error」，把参数透传测成调用失败。
         self.calls.append([dict(item) for item in messages])
         index = min(len(self.calls) - 1, len(self._replies) - 1)
         text, finish_reason = self._replies[index]
@@ -479,9 +481,19 @@ def test_a_parseable_final_is_still_accepted_when_corrections_are_gone():
 # --------------------------------------------------------------------------
 
 
-def test_engine_limits_carries_max_output_tokens_and_defaults_to_none():
-    assert EngineLimits().max_output_tokens is None
+def test_engine_limits_carries_max_output_tokens_and_defaults_to_the_platform_cap():
+    """2026-11-01（WP17）：默认值从 `None` 改成平台的输出上限。
+
+    旧断言钉的是「不传这个字段」；现在钉的是「**默认就封顶**」—— 输出占费用七成以上，
+    让网关那个看不见的默认值决定一次调用能写多长，成本不可控。`None` 仍然保留为
+    **显式**逃生口（不传字段），所以第三条断言反过来验它。
+    """
+    from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS
+
+    assert EngineLimits().max_output_tokens == DEFAULT_OUTPUT_TOKENS
+    assert DEFAULT_OUTPUT_TOKENS >= 4096, "低于 4096 会把结论 JSON 截成半份"
     assert EngineLimits(max_output_tokens=4096).max_output_tokens == 4096
+    assert EngineLimits(max_output_tokens=None).max_output_tokens is None
     assert EngineLimits.from_config({"max_output_tokens": 2048}).max_output_tokens == 2048
 
 
@@ -498,8 +510,12 @@ def test_max_output_tokens_reaches_the_client_when_configured():
     assert seen and all(item.get("max_tokens") == 4096 for item in seen), seen
 
 
-def test_no_max_tokens_is_sent_when_it_is_not_configured():
-    """不配就不发 —— 「默认行为逐字节不变」这条性质必须留着。"""
+def test_no_max_tokens_is_sent_when_it_is_explicitly_disabled():
+    """**显式** `None` = 不传字段（逃生口）。
+
+    WP17 之后「默认不配」不再等于「不传」：默认值就是平台上限（8192）。这里钉的是
+    「显式关掉封顶时，请求体里真的没有这个字段」—— 否则那个逃生口只是说说。
+    """
     seen: list[dict] = []
 
     class SpyClient:
@@ -507,9 +523,11 @@ def test_no_max_tokens_is_sent_when_it_is_not_configured():
             seen.append(kwargs)
             return ChatResult(text=FINAL_JSON, model="fake")
 
-    _run(SpyClient(), StubProvider())
+    _run(SpyClient(), StubProvider(), max_output_tokens=None)
 
-    assert seen and all("max_tokens" not in item for item in seen), seen
+    # 引擎层只送一个 None（客户端据此**不传字段**）；默认值不由引擎塞 ——
+    # 否则每一个测试假 client 都要跟着改签名（见 `complete_kwargs` 的说明）。
+    assert seen and all(item.get("max_tokens") is None for item in seen), seen
 
 
 def test_llm_client_puts_max_tokens_in_the_request_body():

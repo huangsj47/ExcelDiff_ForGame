@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -20,7 +21,7 @@ from app import app, create_tables, db
 from models.ai_analysis import AiAnalysisRun
 from services import ai_report_history_service as history
 from tests.test_ai_history_survives_restart import REPORT_TEXT, _setup_config
-from tests.test_ai_report_export_route import _run
+from tests.test_ai_report_export_route import _login, _run
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -320,6 +321,78 @@ def test_a_failed_row_without_a_reason_does_not_invent_one():
         )["runs"][0]
 
         assert row["summary"] == "失败：平台上没有留下原因"
+
+
+def test_the_conclusion_shape_carries_the_mode_decision_through():
+    """`mode_decision`（「模式裁决」那句话）**透传**，不在读侧重推一遍。
+
+    契约 1.9 要求结论形态与导出文档带同一个字段；读侧若按 run 的数据再推一次，等于把
+    判定逻辑抄成第二份 —— 阈值或字段一改，扫描同一份数据的两条路径就会给出两种说法，
+    而且都不会报错。所以只读 `response_payload.mode_decision`，没有就是空串。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        decision = "增量（平台建议整窗重跑：变更文件数多）"
+        run = _weekly_run(
+            project.id, cfg,
+            payload={"risk_level": "high", "mode_decision": decision},
+        )
+
+        one = history.get_run_report(run.id)
+        latest = ai_service.get_latest_weekly_result(cfg.id)
+
+        assert one["mode_decision"] == decision
+        assert latest["mode_decision"] == decision, "同一个形状的另一条读路径也要有"
+        # 既有语义不变：两条读路径的形状仍然逐字一致。
+        assert set(one) == set(latest)
+
+
+def test_a_missing_mode_decision_is_an_empty_string_and_never_invented():
+    """没有这个字段（老记录 / 那条链路还没写它）→ 空串，界面按「不显示」处理。
+
+    形状坏掉（不是字符串）时同样不许 `str()` 一个 dict 出来 —— 那会在界面上印出
+    `{'requested': ...}`，比不显示更糟。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        plain = _weekly_run(
+            project.id, cfg, payload={"risk_level": "high", "risk_reasons": ["r"]}
+        )
+        broken = _weekly_run(
+            project.id, cfg, payload={"mode_decision": {"requested": "incremental"}}
+        )
+
+        assert history.get_run_report(plain.id)["mode_decision"] == ""
+        assert history.get_run_report(broken.id)["mode_decision"] == ""
+
+
+def test_the_exported_document_carries_the_mode_decision(monkeypatch):
+    """导出路由把「模式裁决」传给报告文档（路由只做这一处接线，措辞在 report_document）。
+
+    这条放在本文件里：WP5 的所有权只覆盖这条链上的测试文件，而导出路由的接线是同一
+    变更的一部分（`ai_run_report_md` 只加这一处传参）。判据落在**下载下来的文件**上，
+    而不是函数被调过 —— 接线漏了的话，报告里就是没有那一行。
+    """
+    import routes.ai_analysis_routes as ai_routes
+
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        run = _weekly_run(
+            project.id, cfg,
+            scope="incremental",
+            request_payload=json.dumps({
+                "policy": {"reason": "delta_count_high", "suggested_full": True},
+            }),
+        )
+        # 只放开判权这一层：这条用例验的是「拼进文档了吗」，不是权限。
+        monkeypatch.setattr(ai_routes, "_has_project_access", lambda _pid: True)
+        with app.test_client() as client:
+            _login(client)
+            response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
+
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "| 模式裁决 | 增量（平台建议整窗重跑：变更文件数多） |" in body
 
 
 def test_a_degraded_row_says_so_up_front():

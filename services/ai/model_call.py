@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Mapping
 
-from services.ai.auto_sizing import conservative_tokens_for
+from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS, conservative_tokens_for
 from services.ai.budget import estimate_chars
 from services.ai.llm_client import non_negative_int
 from services.ai.pricing import BudgetWeights, equivalent_tokens
@@ -92,16 +92,28 @@ def tokens_for_budget(
 def complete_kwargs(limits: EngineLimits) -> dict[str, Any]:
     """发给 `client.complete` 的那些可选参数。
 
-    **不配就不传**（`max_output_tokens is None` 时不出现 `max_tokens` 这个键）：端点默认
-    行为必须逐字节不变，而「传一个 None 进去」在有些客户端实现里会被写成 `"max_tokens":
-    null` 发出去 —— 那是一个与默认值不同、且没人验证过的请求。
+    ## `max_tokens`：默认值由**客户端**补，这里只送「与默认不同」的那两档
+
+    `EngineLimits.max_output_tokens` 的默认值是 `DEFAULT_OUTPUT_TOKENS`（8192），而
+    `LLMClient.complete` 用**哨兵**区分「没传」与「显式 None」：没传 → 按同一个常量
+    在 **wire 层补齐** `max_tokens`；显式 `None` → 不传字段。于是引擎默认轮不必多传一个
+    与默认值相同的字段（否则每一个测试假 client 都要跟着改签名），而真实请求体照样带
+    `max_tokens=8192`。这一层只负责把**用户的决定**送出去：
+
+    * **显式 `None`** → 送 `max_tokens=None`：客户端据此**不传字段**（旧行为，逃生口）。
+      不送的话客户端会按默认值封顶，「显式关掉」就成了做不到的事；
+    * **与默认不同的整数** → 原样送出去（项目配了 4096 就按 4096）；
+    * **等于默认值** → 不送（客户端补同一个数）。
 
     集中一处是因为调用点有三个（正常轮、压小重发、收尾），而漏掉任何一处都表现为
     「这个参数只在某些轮生效」——那种不一致查起来最费劲。
     """
     kwargs: dict[str, Any] = {"temperature": limits.temperature}
-    if limits.max_output_tokens is not None:
-        kwargs["max_tokens"] = limits.max_output_tokens
+    cap = limits.max_output_tokens
+    if cap is None:
+        kwargs["max_tokens"] = None
+    elif cap != DEFAULT_OUTPUT_TOKENS:
+        kwargs["max_tokens"] = cap
     return kwargs
 
 

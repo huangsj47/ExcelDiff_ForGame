@@ -19,7 +19,22 @@ MRO 拿到它，但本模块 import `DiffService` 会成环）。这是全次拆
 import re
 from typing import Any, Dict
 
+from services.diff_excel_reader import (
+    CELL_TYPE_EMPTY,
+    WorkbookData,
+    raw_cell_type_code,
+)
 from services.excel_header_profiles import column_index
+
+# 原始类型编码 → 展示标签。**「空」故意不映射**：空格子的类型变化总是伴随着值的变化
+# （空 → 有值 / 有值 → 空），那时已经有取值变更可看，「类型：空→数值」只是噪音；
+# 而两侧都空时类型也相同，根本不会走到这里。
+_CELL_TYPE_LABELS = {
+    't': '文本',
+    'n': '数值',
+    'b': '布尔',
+    'd': '日期',
+}
 
 
 class DiffExcelCompareMixin:
@@ -43,9 +58,18 @@ class DiffExcelCompareMixin:
         因此这一步不会改变「文本/数字/日期怎么显示」的任何既有口径，只把这两种
         被推断改写过的形态还原。代价是每份 Excel 多一遍原始扫描（read_only 流式，
         实测与 pandas 那一遍同量级；diff 有缓存，一个 (文件, 版本) 只付一次）。
+
+        这一遍扫描同时干第二件事：把每个格子的**原始类型**记到
+        `WorkbookData.cell_types`（编码见 `diff_excel_reader` 的 `CELL_TYPE_*`）。
+        类型与取值必须来自同一次读文件 —— 分两遍读同一份字节，一是有可能读到不同的
+        缓存状态（公式 `data_only`），二是白白多付一遍 I/O。传进来的不是
+        `WorkbookData` 时（脚本/测试直接调本方法）不采集：没有地方挂这份表。
         """
         if not sheets:
             return sheets
+        # 只有 `_read_excel_data` 造的容器才带类型表；普通 dict 上挂不了属性，
+        # 也不该改变本方法「原样返回传入对象」的既有契约。
+        collect_types = isinstance(sheets, WorkbookData)
         try:
             import io
 
@@ -64,15 +88,19 @@ class DiffExcelCompareMixin:
                 except Exception:
                     continue
                 columns = list(df.columns)
+                type_rows = []
                 for row_offset, raw_row in enumerate(worksheet.iter_rows(values_only=True)):
                     if row_offset == 0:
                         continue                    # 第 1 行是表头，已经成了列名
                     row_index = row_offset - 1      # pandas 的行号从 0 起
                     if row_index >= len(df):
                         break
+                    type_row = []
                     for column_index, raw_value in enumerate(raw_row):
                         if column_index >= len(columns):
                             break
+                        if collect_types:
+                            type_row.append(raw_cell_type_code(raw_value))
                         if isinstance(raw_value, bool):
                             # 布尔被读成 1/0 → 还原成布尔
                             current = str(df.iat[row_index, column_index])
@@ -83,12 +111,128 @@ class DiffExcelCompareMixin:
                             current = str(df.iat[row_index, column_index])
                             if current in self._BOOL_TEXTS:
                                 df.iat[row_index, column_index] = str(raw_value)
+                    if collect_types:
+                        # openpyxl 正常会把一行补齐到 max_column，但列数是按 pandas 的
+                        # 列名行算的；两边不一致时补「空」，免得类型串与列下标错位。
+                        type_row.extend(CELL_TYPE_EMPTY * (len(columns) - len(type_row)))
+                        type_rows.append(''.join(type_row))
+                if collect_types:
+                    sheets.cell_types[sheet_name] = type_rows
         finally:
             try:
                 workbook.close()
             except Exception:
                 pass
         return sheets
+
+    # ------------------------------------------------------------------
+    #  原始单元格类型：读取层 → cell_changes 的那一段
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cell_type_at(type_rows, column_positions, row_number, column):
+        """某个格子的原始类型标签（`文本` / `数值` / `布尔` / `日期`）；取不到返回 None。
+
+        取不到指：这份文件没有类型信息（CSV、老格式、读取失败）、这一列只存在于另一版、
+        这一格是空的、或行号落在类型表之外。返回 None 而不是「空」字符串，是为了让
+        调用方一句 `if old_type and new_type` 就能把「没有类型信息」与「两侧都非空且
+        类型不同」分开 —— 只有后者需要报。
+        """
+        if not type_rows or not column_positions:
+            return None
+        position = column_positions.get(column)
+        if position is None:
+            return None
+        try:
+            row_index = int(row_number) - 2     # 物理行号 = 帧行号 + 2（`physical_row_number`）
+        except (TypeError, ValueError):
+            return None
+        if row_index < 0 or row_index >= len(type_rows):
+            return None
+        codes = type_rows[row_index]
+        if position >= len(codes):
+            return None
+        return _CELL_TYPE_LABELS.get(codes[position])
+
+    @staticmethod
+    def _cell_type_context(cell_types, current_columns, previous_columns):
+        """把读取层的类型表整理成「列名 → 列位置」的查表结构。
+
+        `cell_types` 是 `_compare_excel_data` 传下来的 `(当前版本, 上一版本)` 两份
+        类型表；任一侧缺失就返回 None —— 比较层据此完全保持原行为（没有类型信息时，
+        输出与改动前逐字相同）。
+
+        `previous_columns` 必须是**改写后**的列名（`_detailed_dataframe_comparison`
+        里的 `mapped`）：行字典的键是配对后改成的当前列名，拿上一版的旧名去查会一格
+        都查不到。
+        """
+        if not isinstance(cell_types, (tuple, list)) or len(cell_types) != 2:
+            return None
+        current_types, previous_types = cell_types
+        if not current_types or not previous_types:
+            return None
+        return {
+            'current': (current_types, {name: i for i, name in enumerate(current_columns)}),
+            'previous': (previous_types, {name: j for j, name in enumerate(previous_columns)}),
+        }
+
+    def _annotate_cell_changes_with_types(self, cell_changes, current_row_number,
+                                          previous_row_number, type_context):
+        """给已有的取值变更补上 `old_type` / `new_type`。
+
+        只补「两侧类型不同且都非空」的：两侧同类型（`100 → 200` 都是数值）时不写这两个
+        字段，`cell_changes` 与改动前**逐字相同** —— 这是本功能「不打扰既有输出」的落点。
+        """
+        if not type_context:
+            return cell_changes
+        current_types, current_positions = type_context['current']
+        previous_types, previous_positions = type_context['previous']
+        for change in cell_changes:
+            column = change.get('column')
+            old_type = self._cell_type_at(previous_types, previous_positions,
+                                          previous_row_number, column)
+            new_type = self._cell_type_at(current_types, current_positions,
+                                          current_row_number, column)
+            if old_type and new_type and old_type != new_type:
+                change['old_type'] = old_type
+                change['new_type'] = new_type
+        return cell_changes
+
+    def _row_type_only_changes(self, current_row, previous_row, current_row_number,
+                               previous_row_number, columns, type_context):
+        """值字面量相同、**原始类型不同**的格子 —— `dtype=str` 下唯一会漏掉的那类变更。
+
+        `_values_equal` 会把数值 `100` 与文本 `"100"` 判成相等，所以这类格子原先连
+        `cell_changes` 都进不来，整行还可能被判成「未变」。这里补一条
+        `old_value == new_value` 的记录：值没变，变的是类型，而客户端 `tonumber` /
+        `int.Parse` 恰恰是按类型决定行为的。
+        """
+        if not type_context:
+            return []
+        current_types, current_positions = type_context['current']
+        previous_types, previous_positions = type_context['previous']
+        changes = []
+        for column in columns:
+            old_type = self._cell_type_at(previous_types, previous_positions,
+                                          previous_row_number, column)
+            if not old_type:
+                continue
+            new_type = self._cell_type_at(current_types, current_positions,
+                                          current_row_number, column)
+            if not new_type or old_type == new_type:
+                continue
+            old_value = previous_row.get(column, '')
+            new_value = current_row.get(column, '')
+            if not self._values_equal(old_value, new_value):
+                continue        # 值也变了的由 `_row_cell_changes` 负责，不重复报
+            changes.append({
+                'column': column,
+                'old_value': old_value,
+                'new_value': new_value,
+                'old_type': old_type,
+                'new_type': new_type,
+            })
+        return changes
 
     def _compare_excel_data(self, current_data: Dict, previous_data: Dict, file_path: str,
                             key_columns: str = None, header_rows: int = None,
@@ -98,10 +242,17 @@ class DiffExcelCompareMixin:
         marker_column：「标记列」的列字母（如 `A`）。常规配表把这一列当**元数据**用 ——
         表头区放 `TYPE`/`DEFAULT`/`EXPORT` 这类标记，数据区放策划备注，两处都不是数据。
         配了它，该列在数据区就不产生任何变更（处理见 `_blank_marker_column`）。
+
+        原始单元格类型（`current_data.cell_types` / `previous_data.cell_types`）：
+        读取层把它挂在读取结果上（见 `diff_excel_reader.WorkbookData`），这里按工作表
+        取出来往下传，让「100（数值）↔ "100"（文本）」这种**字面量相同、类型不同**的
+        变更也能被报出来。取不到（CSV、手工构造的 dict）就是 None，比较行为不变。
         """
 
         header_count = self._header_row_count(header_rows)
         name_row = self._header_name_row(header_name_row, header_count)
+        current_cell_types = getattr(current_data, 'cell_types', None) or {}
+        previous_cell_types = getattr(previous_data, 'cell_types', None) or {}
 
         result = {
             'type': 'excel',
@@ -121,7 +272,9 @@ class DiffExcelCompareMixin:
                                                   key_columns=key_columns,
                                                   header_rows=header_count,
                                                   header_name_row=name_row,
-                                                  marker_column=marker_column)
+                                                  marker_column=marker_column,
+                                                  cell_types=(current_cell_types.get(sheet_name),
+                                                              previous_cell_types.get(sheet_name)))
             result['sheets'][sheet_name] = sheet_diff
             
             # 更新统计信息
@@ -167,9 +320,33 @@ class DiffExcelCompareMixin:
         blanked.iloc[:, index] = ""
         return blanked
 
+    @staticmethod
+    def _blank_marker_cell_types(cell_types, marker_column):
+        """把标记列在类型表里抹成「空」（理由见 `_compare_dataframes` 的调用处）。
+
+        返回**新的**元组：类型表挂在 `WorkbookData` 上，同一份读取结果可能被比较两次
+        （页面与 AI 各取一次），就地改写会让第二次读到一份被抹过的表。
+        """
+        if not marker_column or not cell_types:
+            return cell_types
+        index = column_index(marker_column)
+        if index is None or not isinstance(cell_types, (tuple, list)) or len(cell_types) != 2:
+            return cell_types
+        blanked = []
+        for type_rows in cell_types:
+            if not type_rows:
+                blanked.append(type_rows)
+                continue
+            blanked.append([
+                codes[:index] + CELL_TYPE_EMPTY + codes[index + 1:] if index < len(codes) else codes
+                for codes in type_rows
+            ])
+        return tuple(blanked)
+
     def _compare_dataframes(self, current_df, previous_df, sheet_name: str,
                             key_columns: str = None, header_rows: int = None,
-                            header_name_row: int = None, marker_column: str = None) -> Dict[str, Any]:
+                            header_name_row: int = None, marker_column: str = None,
+                            cell_types=None) -> Dict[str, Any]:
         """比较两个DataFrame
 
         marker_column：标记列（见 `_compare_excel_data`）。**必须在三个分支之前处理** ——
@@ -183,6 +360,9 @@ class DiffExcelCompareMixin:
         header_name_row 是名称行的物理行号（见 `_header_name_row`）。增/删工作表这两条
         分支也要按它取列名：不然同一张表在「整表新增」与「改了一格」两种提交里，
         列头会显示成两套名字（一边是第 1 行的标题占位名、一边是字段名）。
+
+        cell_types 是本工作表两版的原始类型表 `(当前, 上一版)`（见 `WorkbookData`）。
+        只有「逐格比较」这条分支用得上：整表增/删没有逐格差异可比，类型也不参与。
         """
 
         header_count = self._header_row_count(header_rows)
@@ -193,6 +373,10 @@ class DiffExcelCompareMixin:
         # 在「改了一格」时不算变更、在「整表重建」时被算成 N 行变更，两边口径对不上。
         current_df = self._blank_marker_column(current_df, marker_column)
         previous_df = self._blank_marker_column(previous_df, marker_column)
+        # 标记列在数据区不算数据，**类型也不该算**：两版类型表里那一列抹成「空」，
+        # 否则「上一版数值 1 / 这一版文本 "1"」的标记列会凭空多出一条类型变更 ——
+        # 那正好是「标记列不产生变更」这条契约要排除的东西。
+        cell_types = self._blank_marker_cell_types(cell_types, marker_column)
 
         if current_df is None and previous_df is None:
             return {'headers': [], 'rows': [], 'stats': {'added': 0, 'removed': 0, 'modified': 0}}
@@ -285,11 +469,13 @@ class DiffExcelCompareMixin:
         return self._detailed_dataframe_comparison(current_df, previous_df,
                                                    key_columns=key_columns,
                                                    header_rows=header_count,
-                                                   header_name_row=name_row)
+                                                   header_name_row=name_row,
+                                                   cell_types=cell_types)
 
     def _detailed_dataframe_comparison(self, current_df, previous_df, key_columns: str = None,
                                        header_rows: int = None,
-                                       header_name_row: int = None) -> Dict[str, Any]:
+                                       header_name_row: int = None,
+                                       cell_types=None) -> Dict[str, Any]:
         """详细比较两个DataFrame，支持行插入/删除的智能识别
 
         `header_name_row` 是名称行的物理行号：**列名取表头块里的第几行**（配 2 用于
@@ -297,6 +483,8 @@ class DiffExcelCompareMixin:
         （比 `_pair_columns` 与 `header_changes` 都早），否则「名称行改名」会被报成
         一串无名的假变更：配对按旧名认不出任何一列，列变更提示里还会同时出现旧名与
         新名。改名前的列名另存一份，供第 1 行的呈现用（见 `_plan_name_row`）。
+
+        `cell_types` 见 `_compare_dataframes`：只有「两侧都有帧、逐格比较」时才有意义。
         """
         # 列身份不能只看列名 —— 见 _pair_columns 的说明。
         # `header_rows`/`header_name_row` 到这里都已经是规范化过的值（`_compare_dataframes`
@@ -320,11 +508,13 @@ class DiffExcelCompareMixin:
 
         header_changes = []
         first_rows = None
+        # 上一版列名按配对结果改写成的名字（没配上的保持原名）。类型查表也要用它 ——
+        # 下面行字典的键是**改名后**的列名，拿上一版的旧名去查会一格都查不到。
+        mapped = list(previous_columns)
         if current_df is not None and previous_df is not None:
             # 把上一版的列名**按配对结果改写成当前列名**，再逐格比。
             # 不改名的话，一次列改名会让「旧名」和「新名」同时出现在列并集里，
             # 每一行都会多出「旧值→空」「空→新值」两处假变更（线上审计 6657）。
-            mapped = list(previous_columns)
             for cur_idx, prev_idx in pairs:
                 old_name, new_name = previous_columns[prev_idx], current_columns[cur_idx]
                 if old_name != new_name and not self._is_placeholder_pair(old_name, new_name):
@@ -388,10 +578,17 @@ class DiffExcelCompareMixin:
         if previous_df is not None:
             previous_df = previous_df.reindex(columns=ordered_columns, fill_value='')
 
+        # 类型查表用「比较时的列名」：当前列名 + 上一版改写后的列名（`mapped`）。
+        # 任一侧没有类型信息（CSV/老格式/手工构造的帧）时是 None，比较行为不变。
+        type_context = None
+        if cell_types and current_df is not None and previous_df is not None:
+            type_context = self._cell_type_context(cell_types, current_columns, mapped)
+
         # 使用智能diff算法处理行插入/删除
         result = self._smart_row_diff(current_df, previous_df, ordered_columns,
                                       key_columns=key_columns, header_rows=header_rows,
-                                      name_row=name_row, first_rows=first_rows)
+                                      name_row=name_row, first_rows=first_rows,
+                                      type_context=type_context)
         if header_changes:
             result['header_changes'] = header_changes
         return result
@@ -555,7 +752,7 @@ class DiffExcelCompareMixin:
 
     def _smart_row_diff(self, current_df, previous_df, all_columns, key_columns=None,
                         header_rows: int = None, name_row: int = None,
-                        first_rows=None) -> Dict[str, Any]:
+                        first_rows=None, type_context=None) -> Dict[str, Any]:
         """智能行差异算法，正确处理行插入、删除和修改
 
         key_columns 有值时先按关键列配对（见 `_resolve_key_columns`），
@@ -567,6 +764,14 @@ class DiffExcelCompareMixin:
 
         name_row/first_rows 见 `_plan_name_row`：名称行不是第 1 行时，第 1 行不在
         任何一帧里（pandas 把它读成了列名），只能由 `first_rows` 补进表头块。
+
+        type_context 见 `_cell_type_context`。它把两件事带进比较循环：
+        **值相同但原始类型不同的格子**不再被当成「没变」（见
+        `_row_type_only_changes`，这正是 `dtype=str` 唯一会漏的那类变更），
+        以及值变更的格子补上 `old_type` / `new_type`。
+
+        表头块（`header_rows`）不吃类型信息：表头是元数据，它的取值变化照旧由
+        逐格文本比较表达，类型不是评审者要确认的东西。
         """
         # 转换为列表便于处理，保留原始行号
         current_rows_with_index = self._dataframe_rows_with_index(current_df)
@@ -597,12 +802,20 @@ class DiffExcelCompareMixin:
         current_rows = [row_data for _, row_data in current_filtered]
         previous_rows = [row_data for _, row_data in previous_filtered]
 
-        # 大表常见场景：过滤后按顺序逐行等价，直接返回空差异
+        # 大表常见场景：过滤后按顺序逐行等价，直接返回空差异。
+        # **类型不同也算不等**：否则整张表只有类型变化时（值字面量全相同）会在这里
+        # 直接返回「零差异」，类型信息就算算出来了也进不了结果。
         rows_equal = False
         if len(current_rows) == len(previous_rows):
             rows_equal = True
             for idx, row_data in enumerate(current_rows):
                 if not self._rows_equal(row_data, previous_rows[idx], all_columns):
+                    rows_equal = False
+                    break
+                if type_context and self._row_type_only_changes(
+                        row_data, previous_rows[idx],
+                        current_filtered[idx][0], previous_filtered[idx][0],
+                        all_columns, type_context):
                     rows_equal = False
                     break
         if rows_equal:
@@ -690,9 +903,21 @@ class DiffExcelCompareMixin:
             # 的话，评审者拿它回旧文件里核对就会整体错一行。
             previous_row_num = previous_filtered[previous_idx][0]
 
-            if similarity < 1.0:
+            # 值字面量相同、原始类型不同的格子：相似度是 1.0（值全等），原先会落到
+            # 「这一行没变」；类型变了就必须报，否则这就是本功能要补的那个漏报。
+            type_only_changes = (
+                self._row_type_only_changes(current_row, previous_row,
+                                            orig_row_num, previous_row_num,
+                                            all_columns, type_context)
+                if type_context else []
+            )
+            if similarity < 1.0 or type_only_changes:
                 # 计算具体的字段变更
                 cell_changes = self._row_cell_changes(current_row, previous_row, all_columns)
+                if type_context:
+                    cell_changes = self._annotate_cell_changes_with_types(
+                        cell_changes, orig_row_num, previous_row_num, type_context)
+                    cell_changes.extend(type_only_changes)
 
                 rows.append({
                     'row_number': orig_row_num,

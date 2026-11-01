@@ -50,13 +50,13 @@ from models.ai_analysis import (
     AiWeeklyAnalysisState,
 )
 from services.ai import snapshot_store
-from services.ai_analysis_service import update_project_analysis_config
 from services.ai.coverage_ledger import build_ledger
 from services.ai.scope_sampling import (
     _decide_scope,
     _summarize_weekly_files,
     weekly_snapshot_digest,
 )
+from services.ai_analysis_service import update_project_analysis_config
 
 # 窗口里的文件名刻意避开平台默认的关键路径模式（`config/`、`.sql$` …）：这一组量的是
 # 增量基线，命中关键路径会把范围判定升级为全量，把变量搅在一起。
@@ -647,6 +647,15 @@ def test_a_picked_focus_filters_the_compensation_list_too():
         group = _make_group(file_count=20)
         code = _add_code_repo(group, file_count=10)
         cfg_id = group["cfg"].id
+
+        # 本用例量的是「focus 筛掉的那部分在变更清单与补偿清单两边一起消失」，前提是
+        # 混合批次**整批**进输入。`tables`（默认，WP14）会先按仓库收窄到配表那 20 个，
+        # 那样补偿集里根本不会出现代码文件 —— 显式按 all 跑，把两个变量分开。
+        ok, message, errors = update_project_analysis_config(
+            group["project"].id, {"analysis_profile": "all"}, updated_by="tester"
+        )
+        assert ok, f"{message} {errors}"
+        db.session.commit()
 
         # 首跑：整份快照（20 张表 + 10 个代码文件）都进了输入。
         first = _run_once(group, engine_status="succeeded")

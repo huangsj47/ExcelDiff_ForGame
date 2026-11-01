@@ -29,15 +29,17 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Mapping
 
 from models.ai_analysis.project_config import (
+    ANALYSIS_PROFILE_CHOICES,
     BUDGET_COST_LIMIT_MAX,
     BUDGET_PERIOD_CHOICES,
     BUDGET_TOKEN_LIMIT_RANGE,
     CONFIDENCE_CHOICES,
+    DEFAULT_ANALYSIS_PROFILE,
+    DEFAULT_AUTO_WEEKLY_ENABLED,
     DEFAULT_BUDGET_COST_LIMIT,
     DEFAULT_BUDGET_PERIOD,
     DEFAULT_BUDGET_TOKEN_LIMIT,
     DEFAULT_MAX_ANALYSIS_ROUNDS,
-    DEFAULT_AUTO_WEEKLY_ENABLED,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
     DEFAULT_MAX_ANOMALIES_PER_SUBAGENT,
     DEFAULT_MAX_FILES_PER_RUN,
@@ -55,11 +57,10 @@ from models.ai_analysis.project_config import (
     PROMPT_CACHE_FORMAT_CHOICES,
     PROMPT_CACHE_MODE_CHOICES,
     PROMPT_CHAR_BUDGET_RANGE,
-    SINGLE_RUN_TOKEN_LIMIT_RANGE,
     SEVERITY_CHOICES,
+    SINGLE_RUN_TOKEN_LIMIT_RANGE,
     WEEKLY_INTERVAL_RANGE,
 )
-from services.ai.pricing import parse_price_table
 from services.ai.llm_client import (
     LLMClient,
     LLMConfigError,
@@ -68,6 +69,7 @@ from services.ai.llm_client import (
     LLMTransportError,
     normalize_base_url,
 )
+from services.ai.pricing import parse_price_table
 
 # 服务来源的两个预设。`custom` 不预填任何东西 —— 预填一个假地址只会让人以为它是对的。
 SOURCE_OPENAI = "openai"
@@ -138,6 +140,11 @@ FIELD_RULES: Mapping[str, FieldRule] = {
     "subagent_enabled": FieldRule("子代理模式（仅周版本）", "bool"),
     # 对账轮：汇总之后再跑一次「找反证」。同样是**默认关**的额外一轮模型调用。
     "subagent_verify": FieldRule("对账轮（找反证，仅周版本）", "bool"),
+    # 分析 profile（2026-11，契约 §1.7）：本次分析要过哪一份维度清单。
+    # `tables` = 只回答本批配表改动的风险（默认），`all` = 出厂那 9 个维度全过。
+    # 本轮**不做配置面板 UI**（下一轮），但它照样进规则表：保存走同一套校验，
+    # 而「默认值必须生效」这件事不能等界面 —— 默认值来自模型层的 `resolved()`。
+    "analysis_profile": FieldRule("分析范围", "choice", choices=ANALYSIS_PROFILE_CHOICES),
     "min_severity": FieldRule("严重度门槛", "choice", choices=SEVERITY_CHOICES),
     "min_confidence": FieldRule("置信度门槛", "choice", choices=CONFIDENCE_CHOICES),
     # 这两栏是长文本，长度只做一个防呆上限。
@@ -195,6 +202,9 @@ FIELD_DEFAULTS: Mapping[str, Any] = {
     "auto_weekly_enabled": DEFAULT_AUTO_WEEKLY_ENABLED,
     "weekly_interval_minutes": DEFAULT_WEEKLY_INTERVAL_MINUTES,
     "max_files_per_run": DEFAULT_MAX_FILES_PER_RUN,
+    # 分析 profile 的出厂默认值。**必须引用常量**（见上一条注释）：这里的另一份副本
+    # 正是「无配置行」那条最常见路径读到的值。
+    "analysis_profile": DEFAULT_ANALYSIS_PROFILE,
     "max_analysis_rounds": DEFAULT_MAX_ANALYSIS_ROUNDS,
     "max_tool_requests": DEFAULT_MAX_TOOL_REQUESTS,
     "prompt_char_budget": DEFAULT_PROMPT_CHAR_BUDGET,

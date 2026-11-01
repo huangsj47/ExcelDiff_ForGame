@@ -322,7 +322,9 @@ def _coverage_note(result: SearchResult, scope_note: str) -> str:
         f"本次搜索覆盖了本批次改动的 {result.scanned}/{result.files_total} 个文件"
     ]
     if result.binary:
-        parts.append(f"{result.binary} 个不是文本（配表等二进制，没搜）")
+        # 配表（xlsx/xlsm）现在由 `reference_index` 定向索引，进 `binary` 的只剩真正的
+        # 二进制与**打不开**的工作簿 —— 这里再把配表整体说成「没搜」会是假话。
+        parts.append(f"{result.binary} 个不是文本（图片/音频/压缩包，或打不开的配表，没搜）")
     if result.missing:
         parts.append(f"{result.missing} 个读不到（工作副本里取不到，没搜）")
     if result.oversized:

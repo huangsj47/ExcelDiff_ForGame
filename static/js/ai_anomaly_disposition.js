@@ -17,14 +17,25 @@
  * 四条口径
  * ---------------------------------------------------------------------------
  * 1. **中文名只认服务端。** 结论的状态名（`dispositions`）、严重度（`severity_label`）、
- *    置信度（`confidence_label`）全都取服务端算好的那一份，界面**一个字都不译**。
- *    界面里再抄一份 `pending → 待确认` / `critical → 严重` 的映射表，就是同一个事实的
- *    第二份抄本：服务端加一个状态、改一个中文名时，界面显示的是一个**错的**名字 ——
- *    而用户正是按这些名字理解「我那条结论算什么、有多严重」。
+ *    置信度（`confidence_label`）、维度（`category_label`）全都取服务端算好的那一份，
+ *    界面**一个字都不译**。界面里再抄一份 `pending → 待确认` / `critical → 严重` /
+ *    `config_id → 配置 ID` 的映射表，就是同一个事实的第二份抄本：服务端加一个状态、
+ *    改一个中文名时，界面显示的是一个**错的**名字 —— 而用户正是按这些名字理解
+ *    「我那条结论算什么、有多严重」。
  *    **服务端没给的空值不回落到码值**（见 `shownText`）：码值只留在悬停提示里。
  *    （「撤销」「批量」是动作词，不在服务端那张表里，所以只有这两个词写在界面里。）
- * 2. **次序照服务端给的走**，不再排一次。`anomalies_of_run` 已按严重度、置信度排好；
+ * 2. **组内次序照服务端给的走**，不再排一次。`anomalies_of_run` 已按严重度、置信度排好；
  *    界面再排一次会让上下两处对同一次运行给出两种次序，读的人会以为看的是两份清单。
+ *    **唯一的例外是分组**（2026-11-01）：清单按服务端给的 `category_group` 分成
+ *    「配表 / 代码·流程 / 未归类」三段，段与段之间有标题；**每一段内部仍然原样照
+ *    服务端的次序**。分组是分区，不是重排 —— 它让读者能一眼滤掉「非配表内容」，
+ *    而报告里每条结论仍然按 `dimension_label` 各写各的，不依赖这里的先后。
+ *    只有**全部行都带服务端分组**时才分组；混着缺字段的（前后端版本没对齐）就按旧样子
+ *    平铺，不凭界面自己猜一个组出来。
+ *    **「范围外」另起一段、排在最后**（2026-11-01 第二轮）：`out_of_scope === true` 的条目
+ *    不参与风险等级与计数（契约 1.8），与「这次要处置的问题」混在一段里会让读者以为它们
+ *    也要处理。判据只认服务端给的那个布尔字段，**缺字段的（老后端）照旧按 `category_group`
+ *    分组** —— 界面不自己推「哪条算越界」（那是 `allowed_paths` 的判定，不在这层）。
  *    只有**按钮的排布**是界面定的（撤销排最后，见 `orderedChoices`）。
  * 3. **一次取全量，不按 `?disposition=` 过滤。** 单条接口只回那一行、**不回 counts**，
  *    所以界面上那几个数字要本地重算（`recount`）；一旦按处置状态过滤，手里就只剩
@@ -66,6 +77,19 @@
         confirmed: 'btn-outline-success',
         ignored: 'btn-outline-warning'
     };
+
+    // 分组标题的**版式次序**（配表 → 代码·流程 → 未归类 → 范围外）。分组本身不在这里判定：
+    // key 与中文标题都由服务端给（`category_group` / `category_group_label`），
+    // 这里只决定几段谁先谁后 —— 那是界面的事，不是「哪些 id 算配表」那个事实。
+    // 服务端将来加了新组：排在已知组之后（按它第一次出现的次序），不丢内容。
+    //
+    // 「范围外」排**最后**：它不来自 `category_group`，而是「这条引用的文件不在允许读取的
+    // 范围内」（`out_of_scope`）。放在末尾不是降级，而是把它摆出「处置清单」的默认阅读
+    // 次序 —— 那几条平台没有计入等级与计数，读者不该从它们开始处理。
+    var GROUP_ORDER = ['table', 'code_process', 'unclassified', 'out_of_scope'];
+    // 「范围外」那一组的键与标题（服务端不给这一组：它是按 `out_of_scope` 另起的）。
+    var OUT_OF_SCOPE_GROUP = 'out_of_scope';
+    var OUT_OF_SCOPE_LABEL = '范围外';
 
     var state = {
         runId: null,
@@ -210,6 +234,84 @@
         }
     }
 
+    /**
+     * 这一条是不是**范围外**（引用的文件不在本批次允许读取的范围里，契约 1.8）。
+     *
+     * **只认服务端那个布尔字段**：`out_of_scope` 由 `result_payload` 在落库时按
+     * `allowed_paths` 判好，界面自己按 `category` / `file_path` 猜等于把判定抄成第二份
+     * —— 猜错的方向是「把一条越界结论当成要处置的问题」，或者反过来把它藏起来。
+     * 字段缺失（老后端）按 `false`：那时退回 `category_group` 的旧分组，不多出「范围外」一段。
+     */
+    function isOutOfScope(row) {
+        return !!(row && row.out_of_scope === true);
+    }
+
+    /**
+     * 这一行属于哪一组。**只读服务端给的 `category_group`**：分组是「哪些维度算配表」
+     * 这个事实的下游，界面自己按 category 猜等于把它抄成第二份。
+     * 范围外的条目另成一组（见 `OUT_OF_SCOPE_GROUP`），判据优先于 category 分组 ——
+     * 一条越界的配表结论既不该混进「配表」，也不该被读者当成这次要处理的问题。
+     */
+    function groupKeyOf(row) {
+        if (isOutOfScope(row)) return OUT_OF_SCOPE_GROUP;
+        return row && typeof row.category_group === 'string' ? row.category_group : '';
+    }
+
+    /** 这一组的标题（「配表」/「代码·流程」/「未归类」/「范围外」），前三种只认服务端。 */
+    function groupLabelOf(row) {
+        if (isOutOfScope(row)) return OUT_OF_SCOPE_LABEL;
+        return row && typeof row.category_group_label === 'string'
+            ? row.category_group_label : '';
+    }
+
+    /**
+     * 能不能分组：**每一行都要带得出组与标题**。
+     *
+     * 只有一部分行带的时候必须退回平铺 —— 给缺字段的那几条编一个组，等于界面替服务端
+     * 断言「它们属于未归类」，而真相是「这一版后端没给」（前后端版本没对齐）。
+     * 旧行为（平铺）是那时唯一不会说错的摆法。
+     *
+     * 范围外的行是例外：它们的组与标题由 `out_of_scope` 这一个字段自己带出来（见
+     * `groupKeyOf`），所以后端只给这一个布尔、没给 `category_group` 时照样能分组 ——
+     * 那一条事实确实在手里，不算替服务端猜。
+     */
+    function canGroup(list) {
+        if (!list || !list.length) return false;
+        for (var i = 0; i < list.length; i += 1) {
+            if (!groupKeyOf(list[i]) || !groupLabelOf(list[i])) return false;
+        }
+        return true;
+    }
+
+    /**
+     * 按组切开（组次序见 `GROUP_ORDER`），**组内保持传进来的次序**。
+     *
+     * 这里只做分区，不做排序：排序是服务端的事（`anomalies_of_run` 已按严重度/置信度
+     * 排好），再排一次会让上下两处对同一次运行给出两种次序（见文件头口径 2）。
+     */
+    function groupedRows(list) {
+        var buckets = [];
+        var byKey = {};
+        (list || []).forEach(function (row) {
+            var key = groupKeyOf(row);
+            if (!byKey[key]) {
+                byKey[key] = {key: key, label: groupLabelOf(row), rows: []};
+                buckets.push(byKey[key]);
+            }
+            byKey[key].rows.push(row);
+        });
+        // 未知组排在已知组之后；`Array.prototype.sort` 在现代浏览器里是稳定排序，
+        // 所以几个未知组之间仍是它们第一次出现的次序。
+        buckets.sort(function (left, right) {
+            var li = GROUP_ORDER.indexOf(left.key);
+            var ri = GROUP_ORDER.indexOf(right.key);
+            if (li === -1) li = GROUP_ORDER.length;
+            if (ri === -1) ri = GROUP_ORDER.length;
+            return li - ri;
+        });
+        return buckets;
+    }
+
     // -----------------------------------------------------------------------
     //  渲染
     // -----------------------------------------------------------------------
@@ -277,7 +379,15 @@
             var confidence = addTag(meta, 'ai-anomaly-item-confidence', '置信度 ' + confidenceText);
             if (row.confidence) confidence.setAttribute('title', String(row.confidence));
         }
-        if (row.category) addTag(meta, 'ai-anomaly-item-category', row.category);
+        // 维度：**显示服务端算好的中文名**（`category_label`），不再印 `config_value`
+        // 这种英文 id —— 面板上 `config_value` 与 `code_logic` 长得一样，非配表内容
+        // 无法一眼滤掉（2026-11-01）。码值只进 `title`（对照报告里的 category 原文）。
+        // 标签缺失时什么都不印（与 severity 同一条反自检：不许回落到码值）。
+        var categoryText = shownText(row.category_label);
+        if (categoryText) {
+            var category = addTag(meta, 'ai-anomaly-item-category', categoryText);
+            if (row.category) category.setAttribute('title', String(row.category));
+        }
         item.appendChild(meta);
 
         var evidence = row.evidence || [];
@@ -450,7 +560,19 @@
         node.appendChild(renderToolbar(data));
         var items = doc().createElement('div');
         items.className = 'ai-anomaly-list';
-        list.forEach(function (row) { items.appendChild(renderItem(row, data)); });
+        if (canGroup(list)) {
+            // 三段：配表 / 代码·流程 / 未归类。段内有标题，段内次序照服务端（见文件头口径 2）。
+            groupedRows(list).forEach(function (group) {
+                var heading = addLine(
+                    items, 'ai-anomaly-group-title',
+                    group.label + '（' + group.rows.length + ' 条）');
+                // 机器可读的组键留给将来做筛选/折叠：中文标题是给人看的，键是给代码看的。
+                heading.setAttribute('data-category-group', group.key);
+                group.rows.forEach(function (row) { items.appendChild(renderItem(row, data)); });
+            });
+        } else {
+            list.forEach(function (row) { items.appendChild(renderItem(row, data)); });
+        }
         node.appendChild(items);
     }
 

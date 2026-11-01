@@ -28,9 +28,12 @@
 from __future__ import annotations
 
 import inspect
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from flask import make_response
@@ -50,9 +53,12 @@ from models.ai_analysis import (
 )
 from services.ai.analysis_budget import budget_status, platform_budget_status
 from services.ai.platform_budget import set_platform_budget
+from services.ai.pricing import ModelPrice, PriceTable, amount_of
 from services.ai.usage_statistics import (
     IN_FLIGHT_STATUSES,
     RESET_CONFIRM_WORD,
+    duplicate_snapshot_runs,
+    full_scope_share,
     get_usage_statistics,
     in_flight_runs,
     is_counted,
@@ -60,6 +66,7 @@ from services.ai.usage_statistics import (
     purge_usage_statistics,
     set_usage_baseline,
     statistics_public,
+    upgrade_reason_distribution,
     usage_baseline,
 )
 from services.ai_analysis_service import update_project_analysis_config
@@ -1167,3 +1174,198 @@ class TestTheStatisticsCard:
         assert "这个页面上不该有删除按钮" not in html
         # 筛选区那两个按钮仍要说清它们只动筛选条件。
         assert "只动筛选条件" in html
+
+
+# ==========================================================================
+#  六、成本指标（契约 WP9）：三个**纯函数**
+# ==========================================================================
+#
+# 它们不查库、不读时钟：输入是「已经取好的行」，输出是普通字典。这一节用
+# `SimpleNamespace` 造行（而不是往会话里塞记录）来钉住「纯」这件事 —— 一旦有人给它们
+# 加上查询，这里会因为没有 app context / 没有表而失败，而不是悄悄变成一条 IO 链路。
+
+
+_PRICE_TABLE = PriceTable(
+    models={
+        "test-model": ModelPrice(
+            input_per_million=Decimal("1"),
+            output_per_million=Decimal("2"),
+            currency="CNY",
+        )
+    },
+    version="wp9-test",
+    currency="CNY",
+    source="project",
+)
+
+
+def _metric_run(
+    *,
+    run_id: int = 1,
+    digest: str = "digest-1",
+    scope: str = "full",
+    policy_reason: str = "",
+    baseline_reason: str = "",
+    group_key: str = "g-1",
+    tokens_input: int = 1000,
+    tokens_output: int = 500,
+) -> SimpleNamespace:
+    """一条 run 行（只有指标真正会读的那几列）。"""
+    payload: dict = {"scope": scope, "group": {"key": group_key}}
+    if digest:
+        payload["snapshot"] = {"content_digest": digest}
+    if policy_reason:
+        payload["policy"] = {"reason": policy_reason}
+    if baseline_reason:
+        payload["baseline"] = {"reason": baseline_reason}
+    return SimpleNamespace(
+        id=run_id,
+        scope=scope,
+        request_payload=json.dumps(payload, ensure_ascii=False),
+        tokens_input=tokens_input,
+        tokens_output=tokens_output,
+        model="test-model",
+        # run 行没有这一列；给个空串，验证「没有列时按 payload 还原」那一支。
+        upgrade_reason="",
+    )
+
+
+def _metric_job(*, job_id: int = 1, effective_mode: str, upgrade_reason: str) -> SimpleNamespace:
+    """一条 job 行（升级原因是**列**上的真值）。"""
+    return SimpleNamespace(id=job_id, effective_mode=effective_mode, upgrade_reason=upgrade_reason)
+
+
+class TestDuplicateSnapshotRuns:
+    def test_it_counts_the_repeated_payments_on_the_same_snapshot(self):
+        """同一份快照跑了 3 次：第一次是必要的，后两次是**重复付费**。
+
+        tokens 与金额都只算后两次。金额按单价表折算（这里 1000 输入 + 500 输出 = 0.002 元/次）。
+        """
+        runs = [
+            _metric_run(run_id=1, digest="same"),
+            _metric_run(run_id=2, digest="same"),
+            _metric_run(run_id=3, digest="same"),
+            _metric_run(run_id=4, digest="other"),
+        ]
+
+        report = duplicate_snapshot_runs(runs, price_table=_PRICE_TABLE)
+
+        assert report["duplicate_groups"] == 1
+        assert report["duplicate_runs"] == 2
+        group = report["groups"][0]
+        assert group["content_digest"] == "same"
+        assert group["run_ids"] == [1, 2, 3]
+        assert group["runs"] == 3 and group["duplicate_runs"] == 2
+        assert group["tokens"] == 3 * 1500
+        assert report["wasted_tokens"] == 2 * 1500
+        assert amount_of(report["wasted_cost"]) == Decimal("0.004"), report["wasted_cost"]
+
+    def test_without_a_price_table_it_reports_tokens_but_no_money(self):
+        """没有单价表就没有金额可算 —— 写 0 会把「算不出」说成「没花钱」。"""
+        runs = [
+            _metric_run(run_id=1, digest="same"),
+            _metric_run(run_id=2, digest="same"),
+        ]
+
+        report = duplicate_snapshot_runs(runs)
+
+        assert report["wasted_tokens"] == 1500
+        assert report["wasted_cost"] is None
+        assert report["groups"][0]["cost"] is None
+
+    def test_runs_without_a_digest_are_counted_apart_not_guessed(self):
+        """读不出快照指纹的运行**单独计数**，不并进任何一个组（未知不当成重复）。"""
+        runs = [
+            _metric_run(run_id=1, digest=""),
+            _metric_run(run_id=2, digest=""),
+            _metric_run(run_id=3, digest="same"),
+        ]
+
+        report = duplicate_snapshot_runs(runs)
+
+        assert report["missing_digest_runs"] == 2
+        assert report["groups"] == []
+
+    def test_no_duplicates_means_a_real_zero(self):
+        """没有重复就是真的 0（确定的数），不是「算不出」。"""
+        runs = [_metric_run(run_id=1, digest="a"), _metric_run(run_id=2, digest="b")]
+
+        report = duplicate_snapshot_runs(runs, price_table=_PRICE_TABLE)
+
+        assert report["duplicate_groups"] == 0 and report["duplicate_runs"] == 0
+        assert report["wasted_tokens"] == 0
+        assert report["wasted_cost"] is None, "没有条目可加时不编一个 0 元"
+
+
+class TestFullScopeShare:
+    def test_it_counts_full_and_incremental_and_keeps_unknown_apart(self):
+        runs = [
+            _metric_run(run_id=1, scope="full"),
+            _metric_run(run_id=2, scope="incremental"),
+            _metric_run(run_id=3, scope=""),
+        ]
+
+        report = full_scope_share(runs)
+
+        assert (report["runs"], report["full_runs"], report["incremental_runs"]) == (3, 1, 1)
+        assert report["unknown_scope_runs"] == 1
+        # 认不出口径的那条不进分子分母：1/2，而不是 1/3。
+        assert report["full_share"] == 0.5
+
+    def test_an_empty_batch_has_no_share_instead_of_zero(self):
+        """分母为 0 时写 0 会被读成「一次全量都没有」—— 给 `None`。"""
+        report = full_scope_share([])
+
+        assert report["runs"] == 0 and report["full_share"] is None
+
+
+class TestUpgradeReasonDistribution:
+    def test_it_normalizes_the_historical_first_run_value(self):
+        """`first_run` 折成 `no_conclusion_baseline`：同一种原因不许出现两个桶。
+
+        两条 job 行（一条还是历史字面值、一条已是新词）加一条 run 行（按 payload 还原），
+        三条必须落进同一个键。
+        """
+        rows = [
+            _metric_job(job_id=1, effective_mode="full", upgrade_reason="first_run"),
+            _metric_job(
+                job_id=2, effective_mode="incremental", upgrade_reason="no_conclusion_baseline"
+            ),
+            _metric_run(run_id=3, scope="full", policy_reason="first_run"),
+            _metric_job(job_id=4, effective_mode="full", upgrade_reason="force_full_rebuild"),
+        ]
+
+        report = upgrade_reason_distribution(rows)
+
+        assert report["distribution"] == {
+            "no_conclusion_baseline": 3,
+            "force_full_rebuild": 1,
+        }, report["distribution"]
+        assert report["full_runs"] == 3
+        assert report["no_reason_runs"] == 0
+        assert report["distributed_runs"] == 4
+
+    def test_a_force_rebuild_baseline_wins_over_the_policy_reason(self):
+        """强制重建时 `policy.reason` 仍写着首跑口径 —— 原因必须从 `baseline.reason` 认。"""
+        run = _metric_run(
+            run_id=1,
+            scope="full",
+            policy_reason="first_run",
+            baseline_reason="force_full_rebuild",
+        )
+
+        report = upgrade_reason_distribution([run])
+
+        assert report["distribution"] == {"force_full_rebuild": 1}
+
+    def test_runs_without_a_reason_are_not_pushed_into_a_bucket(self):
+        """没有原因 ≠ 某一种原因：`no_reason_runs` 必须能说清「还有几条没有账」。"""
+        rows = [
+            _metric_job(job_id=1, effective_mode="incremental", upgrade_reason=""),
+            _metric_run(run_id=2, scope="incremental"),
+        ]
+
+        report = upgrade_reason_distribution(rows)
+
+        assert report["distribution"] == {}
+        assert report["no_reason_runs"] == 2

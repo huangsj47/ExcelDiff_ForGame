@@ -39,6 +39,7 @@ from services.ai.frozen_repo import (
     FrozenRepository,
     FrozenTreeReader,
     build_read_scope_multi,
+    normalize_allowed_paths,
     not_tracked_text,
     reader_for_repository,
     repository_label,
@@ -65,7 +66,6 @@ from utils.content_window import (
     ContentPage,
     ContentWindow,
     page_lines,
-    slice_lines,
 )
 from utils.logger import log_print
 from utils.text_decoding import binary_content_notice, text_or_notice
@@ -782,6 +782,25 @@ def _as_frozen_tuple(value: Any) -> tuple:
         return (value,)
 
 
+def _repository_key(repository_id: Any) -> str:
+    """分仓白名单的键：`request_payload` 走一趟 JSON 之后整数键会变成字符串，两种都认。"""
+    return "" if repository_id is None else str(repository_id).strip()
+
+
+def _normalize_allowed_paths_by_repository(value: Any) -> Optional[dict]:
+    """`{repository_id: [路径]}` → `{str(id): frozenset | None}`；`None` = 没有分仓声明。
+
+    值为 `None` 的条目保留 `None`（= 这个仓库不限制），与扁平集合的 `None` 同一语义。
+    """
+    if value is None:
+        return None
+    mapping = value if isinstance(value, Mapping) else {}
+    return {
+        _repository_key(repository_id): normalize_allowed_paths(paths)
+        for repository_id, paths in mapping.items()
+    }
+
+
 class PlatformContextProvider(ReferenceSearchMixin):
     """接到平台取数链路上的 `ContextProvider`。
 
@@ -799,6 +818,8 @@ class PlatformContextProvider(ReferenceSearchMixin):
         delta_bases: Optional[Mapping[Any, str]] = None,
         cache_row_ids: Optional[Mapping[Any, int]] = None,
         frozen_repository: FrozenRepository | None = None,
+        allowed_paths: Any = None,
+        allowed_paths_by_repo: Any = None,
         content_max_chars: int | None = None,
         repo_git_service: Any = None,
         repo_index_files: int | None = None,
@@ -861,6 +882,16 @@ class PlatformContextProvider(ReferenceSearchMixin):
         # 可以给**一个**，也可以给**一组**：本项目有多个仓库时逐一冻结（见
         # `_batch_repositories`），显式指定这条路同样按组收。
         self._frozen_declared = _as_frozen_tuple(frozen_repository)
+        # 本次分析**允许读的路径**（WP17，`None` = 不限制，旧行为）。它比「冻结 tip 的
+        # 跟踪树」更紧：`profile=tables` 只留配置表仓库的路径，范围外的冻结读取必须被拒
+        # （理由说「不在本次分析范围」，而不是「读不到」）。
+        self._allowed_paths = normalize_allowed_paths(allowed_paths)
+        # 分仓白名单（P1-3）：同一个相对路径可以同时存在于两个仓库（`config/items.json`），
+        # 扁平集合不含仓库身份，交给每个 reader 就会让另一个仓库的同名路径穿过白名单。
+        # `None` = 老 payload 没有这个键 → 退回扁平集合，行为逐字不变。
+        self._allowed_paths_by_repo = _normalize_allowed_paths_by_repository(
+            allowed_paths_by_repo
+        )
         self._repo_git_service = repo_git_service
         # 仓库范围检索一次索引多少个文件（上限，不是目标）。给了就覆盖模块初值——
         # 调用方（或测试）据此把「一页多大」与运行预算对上。
@@ -954,6 +985,20 @@ class PlatformContextProvider(ReferenceSearchMixin):
         single = self._batch_repository()
         return (single,) if single is not None else ()
 
+    def _allowed_paths_for(self, repository_id: Any):
+        """这个仓库本次的读取范围。
+
+        有分仓声明时**只认它**：映射里没有这个仓库 = 这一轮没有为它声明任何路径
+        （空集合 = 一条都不许）。**不能退回扁平集合** —— 两个仓库都有
+        `config/items.json` 时，那份集合会把另一个仓库的同名路径一起放行，正是 P1-3。
+        老 payload（根本没有分仓键，`None`）照旧用扁平集合，行为逐字不变。
+        """
+        if self._allowed_paths_by_repo is None:
+            return self._allowed_paths
+        return self._allowed_paths_by_repo.get(
+            _repository_key(repository_id), frozenset()
+        )
+
     def _resolved_readers(self) -> tuple[tuple[FrozenTreeReader, ...], str]:
         """本次可用的**冻结读取器（一组）**。第二个返回值是拿不到的原因。
 
@@ -966,7 +1011,10 @@ class PlatformContextProvider(ReferenceSearchMixin):
         self._frozen_resolved = True
         frozen = self._frozen_declared
         if frozen:
-            self._frozen_readers = tuple(FrozenTreeReader(item) for item in frozen)
+            self._frozen_readers = tuple(
+                FrozenTreeReader(item, allowed_paths=self._allowed_paths_for(item.repository_id))
+                for item in frozen
+            )
             self._frozen_reason = ""
             return self._frozen_readers, ""
         commits: tuple = ()
@@ -989,7 +1037,10 @@ class PlatformContextProvider(ReferenceSearchMixin):
                 "AI",
             )
             return (), self._frozen_reason
-        self._frozen_readers = tuple(FrozenTreeReader(item) for item in frozens)
+        self._frozen_readers = tuple(
+            FrozenTreeReader(item, allowed_paths=self._allowed_paths_for(item.repository_id))
+            for item in frozens
+        )
         self._frozen_reason = ""
         if note:
             # 部分仓库没冻结成功**照样可读剩下的那些** —— 但要说出来，否则「这个文件读不到」
@@ -1011,7 +1062,11 @@ class PlatformContextProvider(ReferenceSearchMixin):
         if self._repo_scope is None:
             readers, _reason = self._resolved_readers()
             self._repo_scope = build_read_scope_multi(
-                tuple(reader.frozen for reader in readers)
+                tuple(reader.frozen for reader in readers),
+                # 把 reader 一起交下去：`allowed_paths` 挂在 reader 上（见
+                # `FrozenTreeReader.__init__`），不传的话范围对象会退成「不限制」，
+                # 而协议层读的就是它的 `paths` —— 收口会静默漏掉一层。
+                readers={reader.frozen.repository_id: reader for reader in readers},
             )
         return self._repo_scope
 

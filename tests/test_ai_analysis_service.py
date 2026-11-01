@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 
 import services.ai.provenance as provenance
 import services.ai_analysis_service as ai_service
-from services.ai import project_config_source
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
 from models.ai_analysis import AiAnalysisRun, AiProjectApiKey, AiWeeklyAnalysisState
+from services.ai import project_config_source
 
 
 def _uid(prefix: str) -> str:
@@ -112,7 +112,13 @@ def test_ai_weekly_payload_scope_and_policy():
         assert payload["scope"] == "full"
         assert payload["execution"]["version"] == "latest"
         assert payload["policy"]["allow_cross_file"] is True
-        assert payload["repositories"][0]["repository_id"] == repo_code.id
+        # 入口是**代码仓库**的配置，但批次里还有配表仓库：`tables`（默认）只分析配表
+        # 仓库（WP14），所以输入与仓库归属都只剩 `repo_table` 那一份。
+        assert payload["repositories"][0]["repository_id"] == repo_table.id
+        assert {item["repository_id"] for item in payload["delta_files"]} == {repo_table.id}
+        assert all(
+            item["file_path"].startswith("data/") for item in payload["delta_files"]
+        ), "代码仓库的文件进了输入"
 
         last_analyzed_at = datetime.now(timezone.utc) - timedelta(minutes=30)
         group_key = ai_service.build_weekly_group_key(cfg_code)
@@ -127,7 +133,7 @@ def test_ai_weekly_payload_scope_and_policy():
         db.session.add(state)
         db.session.commit()
 
-        updated_entry = WeeklyVersionDiffCache.query.filter_by(config_id=cfg_code.id).first()
+        updated_entry = WeeklyVersionDiffCache.query.filter_by(config_id=cfg_table.id).first()
         updated_entry.updated_at = datetime.now(timezone.utc)
         db.session.commit()
 
@@ -135,6 +141,9 @@ def test_ai_weekly_payload_scope_and_policy():
         assert skip_reason is None
         assert payload["scope"] == "incremental"
         assert payload["policy"]["reason"] == "delta_small"
+        assert [item["file_path"] for item in payload["delta_files"]] == [
+            updated_entry.file_path
+        ]
 
 def test_the_payload_carries_the_base_run_for_the_unread_cursor():
     """未读游标（P1b）的基准必须**真的进 payload**，不能只活在写侧的返回值里。
@@ -1709,7 +1718,9 @@ def test_a_small_repository_still_reaches_the_payload_when_truncated(monkeypatch
 
         monkeypatch.setattr(
             ai_service, "get_project_analysis_config",
-            lambda *a, **k: {},
+            # 本用例量的是「取样必须同时照顾到两个仓库」：`tables`（默认，WP14）会先按
+            # 仓库把代码那 30 个文件整个收窄掉，公平取样就无从谈起。显式按 all 跑。
+            lambda *a, **k: {"analysis_profile": "all"},
         )
         # 取样上限 2026-09-23 起按规模推导（旧配置 `max_files_per_run` 已收掉），
         # 「退化时取多少个」就是它：这里压到 10 逼出公平取样那一支。
@@ -1725,6 +1736,8 @@ def test_a_small_repository_still_reaches_the_payload_when_truncated(monkeypatch
             f"配表仓库被挤出了清单（进了 {len(table_paths)}/3 个）：{listed}"
         )
         assert payload["delta_truncated"] is True
+        # `all` profile 下 `allowed_paths=None`，可读范围就是整批 33 个 —— `tables` 收窄
+        # 到配表仓库的行为在 `test_ai_allowed_paths.py` 里单独钉（WP14）。
         assert payload["summary"]["total_files"] == 33
 
         # 白名单必须是全部 33 个 —— 清单少列不等于少给可读范围。

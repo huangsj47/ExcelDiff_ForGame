@@ -20,7 +20,7 @@ import json
 from typing import Optional
 
 from models.ai_analysis import AiAnalysisRun
-from services.ai.report_document import risk_label, scope_label
+from services.ai.report_document import input_scope_labels, risk_label, scope_label
 from utils.timezone_utils import format_beijing_time
 
 
@@ -32,6 +32,15 @@ def _parse_response_payload(raw: Optional[str]) -> Optional[dict]:
         return json.loads(raw)
     except json.JSONDecodeError:
         return None
+
+
+def _parse_request_payload(raw: Optional[str]) -> Optional[dict]:
+    """输入那一列（`request_payload`）的 JSON。解析不出来就是 `None`（按老记录处理）。
+
+    与结论那一列同一套解析：读侧只拿它取「本次输入的范围口径」，坏数据不该让整条
+    结论读不出来。
+    """
+    return _parse_response_payload(raw)
 
 
 # 界面上的「最近分析」时间一律走北京时间（UTC+8）。
@@ -69,6 +78,13 @@ def _in_progress_result(run: AiAnalysisRun) -> dict:
 def _conclusion_payload(run: AiAnalysisRun) -> dict:
     """一条**有结论的** run 的读侧形态。"""
     result = _parse_response_payload(run.response_payload)
+    # 「分析范围口径」与「纳入仓库」：与导出报告**同一份组装**（`input_scope_labels`），
+    # 只读这条 run 自己冻结的 `request_payload`（不碰库、不现查项目仓库）。
+    # 取不到时是空串，界面按「不显示那一行」处理 —— 老记录的形状一个字都不变。
+    # 放在服务端算而不是让前端拼：中文口径只写一份，导出与 `/latest` 才不会两种说法。
+    profile_label, repo_scope = input_scope_labels(
+        _parse_request_payload(run.request_payload)
+    )
     return {
         "run_id": run.id,
         "status": run.status,
@@ -79,12 +95,40 @@ def _conclusion_payload(run: AiAnalysisRun) -> dict:
         # 的话，改一处必然漏两处。
         "scope_label": scope_label(run.scope),
         "risk_label": _risk_label_of(result),
+        # 「模式裁决」那一句（为什么这次是增量 / 全量）。**只透传、不在这里重算**：
+        # 谁把它写进 `response_payload.mode_decision`，这里就原样交给界面。写入方是
+        # `result_payload.result_payload`（结论落库那一刻按本次的账算好，见
+        # `report_document.mode_decision_text`）；老运行没有这个键时是空串 ——
+        # 界面按「不显示这一行」处理。
+        #
+        # **读侧不许自己再判一次**：把 run 的 policy/baseline 拿来重推，等于把判定逻辑
+        # 抄成第二份（而且读不到 job 上的升级原因）；两处迟早对同一次运行给出两种说法，
+        # 还都不报错。
+        "mode_decision": _mode_decision_of(result),
+        # 本次输入的范围口径（P2）：生效的「分析范围」档位与纳入的仓库。**可选字段**，
+        # 老记录 / 单提交分析时是空串；界面按「不显示」处理，既有键一个都不动。
+        # 措辞与导出报告同源（`report_document.ANALYSIS_PROFILE_LABELS`），不在这里另写。
+        "analysis_profile_label": profile_label,
+        "repository_scope": repo_scope,
         "trigger_source": run.trigger_source,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "created_at_display": _created_at_display(run),
         "response_text": run.response_text,
         "result": result,
     }
+
+
+def _mode_decision_of(result: object) -> str:
+    """结论里的「模式裁决」→ 一句人话。没有这个字段 / 形状不对就是空串。
+
+    **不要在这里推**：本模块只依赖 run 行（`request_payload` 里虽然有 policy，但读侧
+    再判一次就是第二份判定）。字符串以外的值一律当「这一层没给」，不 `str()` 一个
+    dict 出来（那会印出 `{'requested': ...}` —— 比不显示更糟）。
+    """
+    if not isinstance(result, dict):
+        return ""
+    value = result.get("mode_decision")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _risk_label_of(result: object) -> str:

@@ -42,9 +42,14 @@ from models.ai_analysis import (
     AiAnalysisTrace,
     AiWeeklyAnalysisState,
 )
+from models.ai_analysis.anomaly import AiAnalysisIgnoredFingerprint
 from services import ai_report_history_service as history
+from services.ai.anomaly_disposition import set_disposition
 from services.ai.baseline_source import previous_run
-from services.ai.job_service import UPGRADE_REASON_FIRST_RUN, _decide_effective_mode
+from services.ai.job_service import (
+    UPGRADE_REASON_NO_CONCLUSION_BASELINE,
+    _decide_effective_mode,
+)
 from services.ai.weekly_state import get_or_create_weekly_state
 from tests.test_ai_history_survives_restart import REPORT_TEXT, _setup_config
 from tests.test_ai_report_export_route import _run
@@ -189,13 +194,18 @@ def test_a_markdown_only_run_cannot_become_the_baseline():
         assert db.session.get(AiAnalysisRun, markdown_only.id) is not None
 
 
-def test_deleting_every_conclusion_makes_the_next_incremental_run_full():
-    """一条都不剩 → 下一次「增量」被平台升格成全量，并带上升级原因。
+def test_deleting_every_conclusion_keeps_incremental_but_records_the_missing_baseline():
+    """一条都不剩 → 下一次「增量」**仍是增量**，但必须记下「无结论基线」这个原因。
 
-    这不是新功能（`job_service._decide_effective_mode` 早就这么判），但它是这个删除功能的
-    **预期后果**：用户删空了之后点增量，不该看到一份拿着空基线跑出来的报告。
+    这不是新功能（`job_service._decide_effective_mode` 早就按这个指针判），但它是这个删除
+    功能的**预期后果**：用户删空了之后点增量，不该看到一份拿着空基线跑出来的报告 ——
+    所以原因必须落库可查。
 
-    变异：删空之后不清成 NULL（留着一个已删除的运行号）→ 这里判出来的是增量 → 红。
+    2026-11-01 契约 1.5 改了**模式**这一半：平台不再替用户把增量改成 full（那会被前端
+    读成「用户要的从零重判」，并把基线一起清掉）；「输入只能整窗读」由运行侧的
+    `scope` 表达，job 上记的是 `incremental` + `no_conclusion_baseline`。
+
+    变异：删空之后不清成 NULL（留着一个已删除的运行号）→ 这里判出来的是「有基线」→ 红。
     """
     with app.app_context():
         project, _repo, cfg = _setup_config()
@@ -204,15 +214,19 @@ def test_deleting_every_conclusion_makes_the_next_incremental_run_full():
         state = _state(project.id, key, baseline=only)
 
         assert _decide_effective_mode("incremental", state)[0] == "incremental", "前提不成立"
+        assert _decide_effective_mode("incremental", state)[1] in (None, ""), "前提不成立"
 
         assert history.delete_target_run(only.id, expected_target_key=key)[0] == ""
 
         db.session.refresh(state)
         assert state.last_concluded_run_id is None
         assert _decide_effective_mode("incremental", state) == (
-            "full",
-            UPGRADE_REASON_FIRST_RUN,
-        ), "删空之后增量没有被升格成全量 —— 用户会拿到一份以空基线跑出来的报告"
+            "incremental",
+            UPGRADE_REASON_NO_CONCLUSION_BASELINE,
+        ), (
+            "删空之后要么模式被改成了全量（契约 1.5 不许），"
+            "要么连「无结论基线」这个原因都没记下来 —— 用户会拿到一份以空基线跑出来的报告"
+        )
 
 
 def test_deleting_two_runs_of_the_same_group_moves_the_pointer_to_what_is_left():
@@ -409,6 +423,42 @@ def test_all_three_child_tables_go_with_the_run():
         assert AiAnalysisAnomaly.query.filter_by(run_id=run.id).count() == 0
         assert AiAnalysisRoundEvent.query.filter_by(run_id=run.id).count() == 0, (
             "逐轮事件行还在 —— 这张子表没有外键，run id 复用之后下一次运行会读到它们"
+        )
+
+
+def test_deleting_a_run_also_drops_its_ignored_ledger_rows():
+    """人工忽略台账跟着**运行**走（`last_run_id` 上的 DB 级 `ON DELETE CASCADE`）。
+
+    为什么不在应用层再删一次：删运行有三条路径（用户删一条 / 保留期清理 / 全量重置），
+    没有一条在本工作包的文件所有权内，而且它们都是批量 DELETE（ORM 事件不触发）。
+    漏清的后果不是「多了几行垃圾」：那条忽略已经没有原始结论可以解释，却会继续在
+    下一轮挡住同一条误报 —— 用户删掉了「历史」，而它的判决还在生效。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        key = _key(cfg)
+        run = _mk(project.id, cfg)
+        anomaly = AiAnalysisAnomaly.query.filter_by(run_id=run.id).one()
+        set_disposition(anomaly, disposition="ignored", username="tester")
+        db.session.commit()
+        # 把这个强引用摘出 session：`remove_analysis_runs` 的
+        # `_forget_rows_deleted_outside_the_session` 会遍历 session 里的子表对象读它们的
+        # `run_id`，而 commit 已经把它们 expire 了 —— 子行刚被批量 DELETE，expire 刷新
+        # 就会撞 `ObjectDeletedError`（既有实现的一个边界，不在本工作包所有权内；
+        # 真实删除请求里没有这种跨请求存活的对象，所以线上碰不到）。
+        db.session.expunge(anomaly)
+        assert (
+            AiAnalysisIgnoredFingerprint.query.filter_by(target_key=key).count() == 1
+        ), "前提不成立：忽略没有落进台账"
+
+        reason, message, _extra = history.delete_target_run(
+            run.id, expected_target_key=key
+        )
+
+        assert reason == "", message
+        assert AiAnalysisIgnoredFingerprint.query.filter_by(target_key=key).count() == 0, (
+            "运行删了、人工忽略还在台账里 —— 下一轮同一条误报会被一条已经没有原始结论的"
+            "「判决」继续静默抑制"
         )
 
 
@@ -850,6 +900,16 @@ def test_purging_takes_the_round_events_with_it():
         project, _repo, cfg = _setup_config()
         run = _mk(project.id, cfg, events=2)
         assert AiAnalysisRoundEvent.query.filter_by(run_id=run.id).count() == 2, "前提不成立"
+        # 人工忽略台账也要跟着全量重置一起走：它按 `last_run_id` 级联，而这里是
+        # 「删光全部运行」那条路（`purge_usage_statistics` **不在**本工作包所有权内，
+        # 所以只能靠 DB 级级联 —— 这条用例就是那个接线的实证）。
+        asset = AiAnalysisAnomaly.query.filter_by(run_id=run.id).one()
+        set_disposition(asset, disposition="ignored", username="tester")
+        db.session.commit()
+        target_key = run.target_key
+        assert (
+            AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).count() == 1
+        ), "前提不成立：忽略没有落进台账"
 
         ok, message, deleted = purge_usage_statistics(updated_by="tester")
 
@@ -858,6 +918,11 @@ def test_purging_takes_the_round_events_with_it():
         assert AiAnalysisRoundEvent.query.count() == 0, (
             "全量重置之后逐轮事件行还在 —— 下一次运行的 id 一复用，思考过程里就会混进"
             "上一批早已删掉的轮次"
+        )
+        assert (
+            AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).count() == 0
+        ), (
+            "全量重置之后人工忽略台账还在 —— 结论都清空了，那条「判决」却还在挡着报告"
         )
 
 

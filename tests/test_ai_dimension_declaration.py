@@ -17,6 +17,8 @@
    以及第一轮的开场指令。前两处以前各按**平台出厂值**做事：单代理的报告正文里根本没有
    「未归类」那一节，导出文档把项目自有的维度显示成「未归类（performance）」——
    而这两处都不会报错，只是悄悄说错。
+5. **profile 决定本次过哪一份清单**（第六节）：`tables` 只过 5 个配表维度，`all` 是出厂
+   那 9 个 —— 但**出厂清单本身不动**，文档校验（`_check_body_contract`）按它逐字比。
 
 ## 为什么这个通道放在知识包里
 
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from pathlib import Path
 
 import pytest
@@ -46,11 +49,16 @@ from services.ai.report_document import (
 from services.ai.result_payload import result_payload
 from services.ai.scope import AnalysisScope
 from services.ai.skill_contract import (
+    ANALYSIS_PROFILES,
+    DEFAULT_ANALYSIS_PROFILE,
     DEFAULT_DIMENSION_SPECS,
     DIMENSION_IDS,
     MAX_DECLARED_DIMENSIONS,
+    TABLE_DIMENSION_IDS,
+    TABLE_DIMENSION_SPECS,
     build_dimensions,
     dimension_ids_of,
+    dimension_specs_for_profile,
     render_dimension_section,
 )
 from services.ai.skill_contract import (
@@ -912,3 +920,164 @@ class TestTheFirstRoundHintFollowsTheEffectiveList:
         assert "config_data" not in first_user
         assert "value_sanity" not in first_user
         assert "先分诊" in first_user, "开场指令本身还得在"
+
+
+# ==========================================================================
+# 六、profile：本次生效的是哪一份清单
+# ==========================================================================
+#
+# 「只分析配表」不是给模型加一句措辞，而是**换一份合同**：出厂那 9 个维度里有 4 个
+# （`module_coupling` / `code_logic` / `version_branch` / `process`）在配表项目里拿不到
+# 证据，却与配表维度抢同一份结论条数上限和同一批取证额度（方案 §3.2 L5 / §4.4）。
+#
+# 这一节只钉「profile → 清单」这条**纯函数**；接线（`project_facts.dimensions` /
+# `LoadedSkills.dimensions` 按 profile 选）由调用方负责 —— 本轮 WP3 只提供函数与配置字段。
+
+
+class TestTheProfileSelectsTheDimensionList:
+    def test_the_table_profile_is_exactly_the_five_config_dimensions(self):
+        """`tables` 只有 5 个，且逐字是那几个配表维度（顺序也是合同的一部分）。"""
+        specs = dimension_specs_for_profile("tables")
+
+        assert len(specs) == 5
+        assert tuple(spec.id for spec in specs) == TABLE_DIMENSION_IDS
+        assert tuple(spec.id for spec in specs) == (
+            "config_id",
+            "config_value",
+            "config_data",
+            "value_sanity",
+            "config_linkage",
+        )
+
+    def test_the_all_profile_is_the_factory_nine(self):
+        """`all` 就是那 9 个**出厂**维度，不是另外一份副本。
+
+        这一条要紧的是「同一个对象/同一组 id」：`report_document` 兜底中文名、文档校验、
+        以及「清单与出厂相同就不追加提示词」这三件事都按出厂值判。`all` 若换成一份
+        内容相同但另行拼装的清单，其中一处迟早会分叉。
+        """
+        specs = dimension_specs_for_profile("all")
+
+        assert len(specs) == 9
+        assert specs == DEFAULT_DIMENSION_SPECS
+        assert dimension_ids_of(specs) == DIMENSION_IDS
+
+    def test_the_factory_list_keeps_its_nine_entries(self):
+        """**出厂清单不许因为 profile 缩水**：文档校验按它逐字比（`_check_body_contract`）。
+
+        缩成 5 个之后，SKILL.md 里那 9 个 `category` 会被判「与运行期常量不一致」，
+        而那条校验红起来的原因是「有人改了一个看起来无关的常量」，很难反推。
+        """
+        assert len(DEFAULT_DIMENSION_SPECS) == 9
+        assert DIMENSION_IDS == tuple(spec.id for spec in DEFAULT_DIMENSION_SPECS)
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "everything", "TABLES_V2", "code-only"])
+    def test_a_missing_or_dirty_profile_falls_back_to_tables(self, raw):
+        """NULL / 脏值一律落到 `tables`（保守那一侧），与 `resolved()` 同一口径。"""
+        assert DEFAULT_ANALYSIS_PROFILE == "tables"
+        assert len(dimension_specs_for_profile(raw)) == 5, f"profile={raw!r}"
+        assert dimension_specs_for_profile(raw) == TABLE_DIMENSION_SPECS
+
+    def test_the_profile_value_is_normalized_like_every_other_choice(self):
+        """大小写与首尾空格要归一：配置来自表单与手工改库，` ALL ` 不该判成脏值。"""
+        assert len(dimension_specs_for_profile(" ALL ")) == 9
+        assert len(dimension_specs_for_profile("Tables")) == 5
+
+    def test_the_table_specs_share_the_factory_labels(self):
+        """中文名只有**一份**（`DIMENSION_LABELS`）：配表维度不许另写一套中文名。
+
+        抄第二份的后果是面板印英文 id、报告印中文名，而两边都不会报错 ——
+        这正是 `skill_contract` 开头那段注释警告的坑。
+        """
+        factory = {spec.id: spec.label for spec in DEFAULT_DIMENSION_SPECS}
+
+        for spec in TABLE_DIMENSION_SPECS:
+            assert spec.label == factory[spec.id]
+
+    def test_the_profile_values_are_a_subset_of_the_factory_list(self):
+        """配表维度必须**逐字**来自出厂清单（filter 之后与它相等，不是「差不多」）。"""
+        picked = tuple(spec for spec in DEFAULT_DIMENSION_SPECS if spec.id in TABLE_DIMENSION_IDS)
+
+        assert picked == TABLE_DIMENSION_SPECS
+        assert set(TABLE_DIMENSION_IDS).issubset(DIMENSION_IDS)
+
+    def test_the_value_domain_is_visible_to_callers(self):
+        """值域本身也要能被调用方读到（校验、界面、测试三处不该各抄一份）。"""
+        assert ANALYSIS_PROFILES == ("tables", "all")
+        assert DEFAULT_ANALYSIS_PROFILE in ANALYSIS_PROFILES
+
+
+# ==========================================================================
+# 七、调用点传的是**生效后**的 profile（P2-1）
+# ==========================================================================
+
+
+class TestTheCallSitePassesTheEffectiveProfile:
+    """周版本 `tables` / 回退 `all` 的维度由 `payload["plan"]["dimensions"]` 钉着
+    （`tests/test_ai_allowed_paths.py`）；这一节钉的是**没有 payload profile** 的那条路：
+    单提交分析的输入是代码，不是配表，必须按 `all` 取出厂 9 维 —— 哪怕项目配置里写着
+    `tables`（那是「周版本默认只看配表」的档，不该管到单提交）。
+
+    判据落在**落库结果**上（`response_payload.dimension_specs`）：只断言
+    `_load_project_skills` 的入参，接线断了（执行侧又改成读配置）这条仍会绿。
+    """
+
+    def test_a_commit_analysis_uses_the_factory_nine(self, monkeypatch):
+        import services.ai_analysis_service as ai_service
+        from app import app, create_tables, db
+        from models import Project
+        from models.ai_analysis import AiAnalysisRun
+        from tests.test_ai_analysis_service import COMMIT_SHA, TABLE_PATH, _FakeClient
+
+        with app.app_context():
+            create_tables()
+            project = Project(
+                code=f"P_COMMIT_{uuid.uuid4().hex[:8]}",
+                name="commit-dim-project",
+                department="QA",
+            )
+            db.session.add(project)
+            db.session.flush()
+            run = AiAnalysisRun(
+                project_id=project.id,
+                target_type="commit",
+                target_id=1,
+                status="running",
+            )
+            db.session.add(run)
+            db.session.commit()
+
+            monkeypatch.setattr(
+                ai_service,
+                "build_endpoint_client",
+                lambda *args, **kwargs: (_FakeClient(), []),
+            )
+            result = ai_service._execute_analysis(
+                run,
+                project_id=project.id,
+                # 单提交 payload **没有** `analysis_profile` 键（生产侧 `build_commit_payload`
+                # 就是这么造的）—— 执行侧必须自己按 `all` 取清单。
+                payload={
+                    "mode": "commit",
+                    "scope": "full",
+                    "commit": {
+                        "commit_id": COMMIT_SHA,
+                        "path": TABLE_PATH,
+                        "message": "改了道具表",
+                        "operation": "M",
+                    },
+                },
+                project_config=ai_service.get_project_analysis_config(project.id),
+                target_type="commit",
+                target_key=None,
+            )
+
+            assert result["status"] == "succeeded", result
+            db.session.refresh(run)
+            payload = json.loads(run.response_payload or "{}")
+            ids = [item["id"] for item in payload.get("dimension_specs") or []]
+
+        assert ids == list(DIMENSION_IDS), (
+            f"单提交分析按 5 个配表维度跑了（项目配置默认 tables）：{ids}"
+        )
+

@@ -105,7 +105,10 @@ ANOMALY_RUN_CAP = 20
 #: 计划的版本。**它进 `analysis_revision`**（见 `compose_analysis_revision`）：改了这个
 #: 模块里任何会改变分工/额度/裁剪的口径，就必须同时改这个号，否则「基线口径已变」那句
 #: 提示不会出现，旧结论会被当成新口径下的产物静默复用。
-PLAN_VERSION = "2026-09-23.1"
+#:
+#: 2026-11-01：单次输出上限从 `None`（端点默认）改成 `DEFAULT_OUTPUT_TOKENS`，计划的
+#: 「本轮保守预留」与请求体里的 `max_tokens` 都跟着变 —— 额度口径变了，所以进版本号。
+PLAN_VERSION = "2026-11-01.1"
 
 # --- 小批次门槛（**初值，待基准校准**）---
 #
@@ -162,6 +165,29 @@ SINGLE_AGENT_REQUESTS = 40
 # 不放松 —— 周期留空解析成 100M/月，拿它当单次上限就等于「一次可以花一亿」）。
 SINGLE_RUN_TOKEN_CAP_SMALL = 3_000_000
 SINGLE_RUN_TOKEN_CAP_LARGE = 8_000_000
+
+#: 单次模型调用的**输出上限**（token）的出厂值。它现在是 `EngineLimits.max_output_tokens`
+#: 的默认值，因此请求体一定会带 `max_tokens` —— 此前那一栏是 `None`（= 不传，输出没有
+#: 上限，由网关那个看不见的默认值决定）。
+#:
+#: ## 为什么是 8192，以及为什么不能更小
+#:
+#: * **4096 是硬下限**：交结论那一轮是一份完整 JSON（`report_markdown` + `anomalies` +
+#:   `dimensions`）。低于 4096 会把 JSON 截成半份 —— 那比不封顶更糟：既要重问一次，
+#:   半份正文还可能被当成「模型说没问题」收下。8192 给结论 JSON 留了约一倍余量；
+#: * **量级与既有保守预留一致**：`_output_cap_for` 一直按 8,000 这个量级算「一次调用
+#:   最多写多少」（run 45 各阶段输出累计 24k~52k token，单次调用远用不完）；
+#: * **成本**：实测输出 token 占费用 71%~79%（Run22/Run23），不封顶时这一项随网关默认值
+#:   漂移。封顶把「一次调用最多写多少」从网关手里拿回项目自己手里；
+#: * **端点兼容**：端点若明确拒绝这个字段（HTTP 400 点名 `max_tokens`），`llm_client`
+#:   会去掉它重试一次并记日志（见 `llm_client.complete`）—— 封顶不会让分析跑不起来；
+#: * **撞上时的处理**：`finish_reason == "length"` 由引擎既有的截断/降级分支识别
+#:   （`TRUNCATED_OUTPUT_HINT` → 压小重发 → 收尾），不需要新逻辑。
+#:
+#: 项目配置**没有**这一列（`models/ai_analysis/project_config.py` 里没有
+#: `max_output_tokens`），所以这里只给常量；`EngineLimits.from_config` 仍然认同名键，
+#: 将来加列时不用改引擎那一层。
+DEFAULT_OUTPUT_TOKENS = 8192
 
 #: 预留给报告收尾的额度占单次上限的比例（下限见下）。收尾 = 汇总那一次调用 + 报告正文，
 #: 它是**一次完整的模型调用**，不能被前面的探索吃掉 —— 没有它，预算耗尽时连「有哪些没查」
@@ -986,18 +1012,18 @@ def _member_rounds(requests: int, ceiling: int) -> int:
 
 
 def _output_cap_for(mode: str, output_tokens: Optional[int]) -> int:
-    """单次输出的名义上限（token）。用户配了就用他的，否则用平台的保守值。
+    """单次输出的名义上限（token）。用户配了就用他的，否则用平台默认值。
 
-    它**会进计划**，是「本轮保守预留」那个算式里的输出部分；这一版**不改真实请求体**
-    （`EngineLimits.max_output_tokens` 保持 `None` = 用端点默认值）—— 收紧每一个角色的
-    `max_output_tokens` 是工作包 D 的压缩项，要先在金标上量过召回，B 只负责把它算清、
-    记全。
+    **它现在也是请求体里 `max_tokens` 的来源**（`EngineLimits.max_output_tokens` 的默认
+    值取同一个常量 `DEFAULT_OUTPUT_TOKENS`，由 `model_call.complete_kwargs` 带进请求体）：
+    计划里记这个数，是为了让「这一轮最多能写多少」在账上可查，而不是由网关的隐性默认值
+    决定 —— 后者既看不见，也会随部署环境漂移。
     """
     if output_tokens and int(output_tokens) > 0:
         return int(output_tokens)
-    # 保守值：run 45 各阶段输出 24k~52k token，一次调用写不完那么多，但预留按**一次调用
-    # 可能写的上限**算 —— 8,000 与 `EngineLimits.max_output_tokens` 的注释里那个量级一致。
-    return 8_000
+    # 保守值：run 45 各阶段输出 24k~52k token 是**累计**，一次调用远用不完；
+    # 4,096 是「完整结论 JSON」的硬下限，8192 留出一倍余量（见 `DEFAULT_OUTPUT_TOKENS`）。
+    return DEFAULT_OUTPUT_TOKENS
 
 
 def _round_reserve(requests_per_member: int, rounds_per_member: int, *, list_chars: int, output_cap: int) -> int:
@@ -1475,6 +1501,10 @@ def _assemble_plan(
             "report_reserve_tokens": report_reserve,
             "round_reserve_tokens": round_reserve,
             "user_chars": user_chars,
+            # 单次输出上限（token）。**与请求体里那个 `max_tokens` 同源**
+            # （`DEFAULT_OUTPUT_TOKENS` / 配置覆盖）：计划上写多少，模型一次就只能写多少 ——
+            # 两个数各写一份时，「计划说 8k、端点按 64k 收钱」这种账没人对得出来。
+            "output_tokens": output_cap,
             "cost_limit": str(cost_limit or ""),
             **dict(thresholds_extra),
         },

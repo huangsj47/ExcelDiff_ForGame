@@ -6,6 +6,8 @@
 1. `CRITICAL_PATH_PATTERNS` 的每条模式都要求前导斜杠（`/config/`），而 git 的改动路径是
    相对路径（`config/x.xlsx`）—— 判据恒为 False，「命中关键路径就升级为全量分析」
    这条通道从来没触发过，不报错、不留痕。
+   2026-11-01 又往前走了一步：`config/`、`configs/` 已移出默认清单（配表项目每次动表
+   都命中，实测 4/6 次 full 来自它）；命中也不再改输入口径，只置 `suggested_full`。
 2. 界面上那一栏「重点表名」（`Repository.important_tables`）**全仓只写不读**：
    管理员填的重点从未影响过任何判定。
 3. `build_bundles(generated_prefixes=...)` 这个形参没有任何生产调用方传过，
@@ -39,6 +41,7 @@ from services.ai.project_facts import (
     important_table_hit,
     scan_critical_paths,
 )
+from services.ai.scope_sampling import decide_scope
 from services.ai.skill_loader import SKILL_PROJECTS_ROOT_ENV
 
 
@@ -48,7 +51,7 @@ def _uid(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
-def _critical_path_hit(path: str, declared_tables=()) -> bool:
+def _critical_path_hit(path: str, declared_tables=(), *, resource_type: str = "") -> bool:
     """「这条路径算不算关键路径」在本文件里的唯一入口 —— 走**生产入口**。
 
     生产路径（周版本汇总）调的就是 `project_facts.scan_critical_paths`：一次扫完
@@ -57,7 +60,7 @@ def _critical_path_hit(path: str, declared_tables=()) -> bool:
     `scan_critical_paths` 了，它只剩测试在调 —— 那种「入口」等于让测试去守一份
     没人用的实现，而它自己错了、或者哪天被删掉，都只有测试发现得了。
     """
-    return scan_critical_paths([(path, declared_tables)]).hit
+    return scan_critical_paths([(path, declared_tables, resource_type)]).hit
 
 
 # ==========================================================================
@@ -65,21 +68,37 @@ def _critical_path_hit(path: str, declared_tables=()) -> bool:
 # ==========================================================================
 
 
-def test_a_relative_config_path_is_a_critical_path():
+def test_a_relative_default_path_is_a_critical_path():
     """**这一条就是那个从来没触发过的通道。**
 
     git 的 `Commit.path` 是**不带前导斜杠**的相对路径。老写法 `/config/` 对
     `config/x.xlsx` 一次都命中不了，于是「关键路径 → 全量分析」这条通道形同虚设。
+    现在换默认清单里还在的那几条来钉同一件事（`config/` 已移出，见下一条）。
     """
-    assert _critical_path_hit("config/x.xlsx")
-    assert _critical_path_hit("config/60_skill/角色属性表.xlsx")
-    assert _critical_path_hit("config/[30]道具表_CfgItem.xlsx")
+    assert _critical_path_hit("auth/login.py")
+    assert _critical_path_hit("db/migrations/001.json")
+    assert _critical_path_hit("pay/billing/charge.py")
+
+
+def test_the_config_directory_is_not_a_default_critical_path():
+    """**`config/`、`configs/` 已移出默认清单**（2026-11-01）。
+
+    它们原来在清单里，而配表驱动项目的主体内容就在 `config/` 下 —— 于是「这一周
+    动过一张表」必然命中关键路径。实测线上 4/6 次「增量退回全量」都来自它，hits
+    原文是 `config/10_role/角色等级表_CfgPlayerLevel.xlsx（命中关键路径模式 (?:^|/)config/）`。
+    """
+    assert not _critical_path_hit("config/x.xlsx")
+    assert not _critical_path_hit("config/60_skill/角色属性表.xlsx")
+    assert not _critical_path_hit("config/[30]道具表_CfgItem.xlsx")
+    assert not _critical_path_hit("configs/app.json")
+    assert not any("config/" in pattern for pattern in DEFAULT_CRITICAL_PATH_PATTERNS)
 
 
 def test_a_directory_that_merely_ends_with_config_is_not_a_critical_path():
     """`myconfig/x` 与 `deconfig/x` 跟 `config/` 这个目录没有关系，不许命中。
 
     这就是「路径分量起点」写法（`(?:^|/)config/`）与「只要包含 config/」的区别。
+    项目自己声明这条模式时，这条判据同样成立。
     """
     assert not _critical_path_hit("myconfig/x")
     assert not _critical_path_hit("deconfig/x")
@@ -88,10 +107,39 @@ def test_a_directory_that_merely_ends_with_config_is_not_a_critical_path():
 
 def test_svn_style_absolute_paths_still_match():
     """修 bug 不能把原来就命中的写法弄丢：SVN 风格带前导斜杠的路径照旧命中。"""
-    assert _critical_path_hit("/config/demo.xlsx")
+    assert _critical_path_hit("/migrations/001.json")
+    assert _critical_path_hit("/auth/login.py")
     assert _critical_path_hit("db/migrations/001.sql")
     assert _critical_path_hit("a.sql")
     assert not _critical_path_hit("code/qz_pub/cfg/a.lua")
+
+
+def test_a_table_repository_does_not_treat_config_as_a_critical_path(tmp_path, monkeypatch):
+    """配表仓库的 `config/` 是**常规目录**：项目声明了这条模式也不许命中。
+
+    为什么默认清单已经去掉 `config/` 之后还要这一条：项目可以在知识包里自己声明
+    `critical_path_patterns`，而配表项目最容易写进去的就是 `config/` —— 一写，
+    「每次动表都建议整窗重跑」又回来了。同一个路径对代码仓库仍是危险路径（那是
+    发布配置），对配表仓库只是它每天在改的那堆表。
+    """
+    monkeypatch.setenv(SKILL_PROJECTS_ROOT_ENV, str(tmp_path))
+    _write_pack(
+        tmp_path,
+        "p1",
+        "name: p1\ndescription: p1 事实\ncritical_path_patterns: (?:^|/)config/",
+    )
+    facts = critical_path_facts("P1")
+    assert facts.patterns_source == SOURCE_PROJECT
+
+    table_path = "config/[30]道具表_CfgItem.xlsx"
+    assert facts.why(table_path, resource_type="table") == "", (
+        "配表仓库的常规目录被算成了关键路径 —— 每次动表都会建议整窗重跑"
+    )
+    assert facts.why(table_path, resource_type="code"), "代码仓库里的 config/ 仍应算危险路径"
+    # 不传仓库类型时按「不知道类型」处理，与从前的行为一致（缺参不能放宽判定）。
+    assert facts.why(table_path)
+    # 「重点表名」那条通道不受影响：指名了就该命中，哪怕它在 config/ 下。
+    assert facts.why("config/道具表.xlsx", ("道具表",), resource_type="table")
 
 
 def test_the_removed_single_path_wrapper_stays_removed():
@@ -222,8 +270,12 @@ def _seed(cfg, repo, path: str, *, updated_at: datetime) -> None:
 def test_the_declared_important_table_changes_the_scope_decision(declared_repo):
     """**这一条证明那一栏不再是死的。**
 
-    同一个路径、同一批数据，只差仓库上那一栏「重点表名」：声明了的那个仓库把本次分析
-    升级为全量，没声明的照旧走增量。在这之前两边的结果**永远一样**（因为它从来没被读过）。
+    同一个路径、同一批数据，只差仓库上那一栏「重点表名」：声明了的那个仓库**建议
+    整窗重跑**（`suggested_full=True`），没声明的照旧走增量且不建议。在这之前两边
+    的结果**永远一样**（因为它从来没被读过）。
+
+    注意「建议」不等于「升全量」（2026-11-01 起）：`scope` 仍是 `incremental`、
+    基线照旧保留，只有 `policy.suggested_full` 与 `policy.decision` 记下这条建议。
     """
     with app.app_context():
         last = declared_repo["last_analyzed_at"]
@@ -234,8 +286,12 @@ def test_the_declared_important_table_changes_the_scope_decision(declared_repo):
         assert skip is None
         assert declared_summary["critical_paths"] is True, "填了重点表却什么都没变"
         assert "道具表" in "".join(declared_summary["critical_path_hits"])
+        decision = decide_scope(declared_summary, last)
+        assert (decision.scope, decision.reason) == ("incremental", "critical_path_detected")
+        assert decision.suggested_full is True
+        # 兼容 wrapper 的形状不变（job/结算仍按二元组取）。
         assert ai_service._decide_scope(declared_summary, last) == (
-            "full",
+            "incremental",
             "critical_path_detected",
         )
 
@@ -247,6 +303,7 @@ def test_the_declared_important_table_changes_the_scope_decision(declared_repo):
         # 在结果里分不开（这里没知识包，所以是平台默认）。
         assert silent_summary["critical_path_source"] == SOURCE_DEFAULT
         assert ai_service._decide_scope(silent_summary, last) == ("incremental", "delta_small")
+        assert decide_scope(silent_summary, last).suggested_full is False
 
 
 def test_the_control_repo_is_the_same_shape_as_the_declared_one(declared_repo):
@@ -427,7 +484,8 @@ def test_no_project_declaration_means_platform_defaults(tmp_path, monkeypatch):
     facts = critical_path_facts("NOT_A_REAL_PROJECT")
     assert facts.patterns_source == SOURCE_DEFAULT
     assert facts.patterns == DEFAULT_CRITICAL_PATH_PATTERNS
-    assert facts.why("config/x.xlsx")
+    assert facts.why("auth/login.py")
+    assert not facts.why("config/x.xlsx"), "config/ 又回到了平台默认清单里"
     assert DEFAULT_CRITICAL_PATH_FACTS.why("db/migrations/001.sql")
 
 

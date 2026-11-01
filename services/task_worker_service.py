@@ -109,6 +109,7 @@ from models.ai_analysis.project_config import (
     DEFAULT_WEEKLY_INTERVAL_MINUTES,
 )
 from services.ai.analysis_budget import budget_gate_reason
+from services.ai.analysis_scope_filter import effective_config_ids
 # 启动恢复扫描：把卡在非终态、且确定不会再有下文的 job 结清（`start_background_task_worker`
 # 里紧跟 `fail_orphaned_analysis_runs()` 的那一步）。写侧只有一份，实现在 `job_service`。
 from services.ai.job_service import recover_stale_jobs
@@ -1666,7 +1667,13 @@ def schedule_weekly_ai_analysis_tasks():
 
                 primary = select_primary_weekly_config(configs)
                 config_ids = [cfg.id for cfg in configs]
-                if not has_weekly_changes(config_ids, state.last_analyzed_at if state else None):
+                # 水位线与快照指纹只认**实际装进输入**的配置集（P1-4）：`tables` 收窄后
+                # 只有配表仓库的缓存行进 `build_weekly_payload`，拿整组 id 算指纹永远不等。
+                # 任务创建仍走整组（按 primary 配置建一条），不在这里改。
+                effective_ids = effective_config_ids(
+                    configs, project_cfg.get("analysis_profile")
+                )
+                if not has_weekly_changes(effective_ids, state.last_analyzed_at if state else None):
                     _note_weekly_ai_skip(counts, "no_change")
                     continue
                 # **输入一字未变就别再分析一遍**（内容判据，与上面那条时间判据互补）。
@@ -1675,7 +1682,7 @@ def schedule_weekly_ai_analysis_tasks():
                 # 新变化」会一直转，每小时烧一次全量分析。指纹相同 = 同一份输入，
                 # 再跑一遍只会得到同样的结果 —— 尤其上一轮正是「额度用尽、基于已有证据
                 # 出结论」时。手动触发不受这条限制（用户的明确动作照跑）。
-                if snapshot_already_analyzed(state, config_ids):
+                if snapshot_already_analyzed(state, effective_ids):
                     log_print(
                         f"⏭️ 周版本自动分析跳过（输入与上次分析逐字相同）: group_key={group_key}",
                         "AI",

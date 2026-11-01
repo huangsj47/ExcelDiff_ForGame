@@ -16,6 +16,9 @@ E8 这五条路径是**用户点下去之后平台做什么**，判据完全不�
    已有任务附着、无变化复用。前四条在 `POST /ai-analysis/weekly/<id>/jobs` 上就能
    看到完整的裁决（`effective_mode` / `upgrade_reason` / `base_run_id` / `attached`）；
    第五条要真的跑一次生产执行入口才看得见（结论被复用、**没有新建付费运行**）。
+   2026-11-01 起预检多一份 `mode_decision`（契约 1.6）：用户要什么、平台会跑什么、
+   平台只是**建议**整窗还是真的升全量 —— 建议原因不再冒充升级原因。
+   另加「同一份快照跑完再点一次 → 附着/复用，不新建运行」（契约 WP2）。
 
 **测试库是会话级共用的**：断言一律按本用例自己造的项目 / 分组过滤，绝不数全表。
 """
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from inspect import getsource
 
 import pytest
 
@@ -37,7 +41,9 @@ from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
 from models.ai_analysis import AiAnalysisJob, AiAnalysisRun, AiWeeklyAnalysisState
 from services.ai import job_service
+from services.ai.engine import EngineOutcome
 from services.ai.provenance import current_provenance
+from services.ai.result_payload import result_payload
 
 _CREATED: dict = {"projects": [], "groups": []}
 
@@ -362,6 +368,43 @@ def _runs_for(group) -> int:
     return AiAnalysisRun.query.filter_by(target_key=group["group_key"]).count()
 
 
+def _conclude_a_job(group) -> tuple:
+    """建一条增量 job 并以「成功 + 有结论」收口它，返回 `(job_id, run_id)`。
+
+    不真的调模型：建 job 走生产入口（`create_or_attach_job`），然后直接落一条**溯源与
+    当前一致**的 succeeded run，再用生产的 `mark_running` / `settle_from_run` 收口。
+    「溯源一致」是必须的：`_is_run_fresh` 会把溯源不符的旧结论判成不可复用，
+    用例要测的是「同一份快照可以复用」，不是「任何旧结论都能复用」。
+    """
+    config = db.session.get(WeeklyVersionConfig, group["cfg_id"])
+    created = job_service.create_or_attach_job(
+        config=config, requested_mode="incremental", idempotency_key=_uid("k")
+    )
+    job_id = created.job_id
+    now = datetime.now(timezone.utc)
+    run = AiAnalysisRun(
+        project_id=group["project_id"],
+        target_type="weekly",
+        target_id=group["cfg_id"],
+        target_key=group["group_key"],
+        status="succeeded",
+        scope="incremental",
+        trigger_source="manual",
+        response_text="报告正文",
+        response_payload="{}",
+        created_at=now,
+        finished_at=now,
+        **current_provenance(group["project_id"]),
+    )
+    db.session.add(run)
+    db.session.commit()
+    run_id = run.id
+    job_service.mark_running(job_id, run_id=run_id)
+    job_service.settle_from_run(run)
+    db.session.commit()
+    return job_id, run_id
+
+
 class TestTheFiveWeeklyPathsOverHttp:
     def test_path_1_a_plain_incremental_run_keeps_the_incremental_mode(self):
         """**普通增量**：有可复用基线 → 增量就是增量，不被升级。
@@ -396,6 +439,14 @@ class TestTheFiveWeeklyPathsOverHttp:
         `db.session.get(...)`（模块里根本没 import `db`）在静态检查里才露出来，
         而功能测试全绿。判据必须**同时**是「三个字段有值」与「值正确」：
         只断言键存在的话，`None` 也能通过。
+
+        ## 2026-11-01 口径（契约 1.6）：`plan` 用真实 delta
+
+        2/6 仍然会被平台判成 `delta_ratio_high`，但那是**建议整窗**，不再是「已经升成
+        全量」：`effective` 仍是增量，`planned_files` 必须是真实的 2（不是整窗 6），
+        建议原因进 `mode_decision.suggestion_reason`，`upgrade_reason` 保持空。
+        改动前的断言（`planned_files == 6` / `mode == "full"` / `upgrade_reason ==
+        "delta_ratio_high"`）钉的正是那条被修掉的固化链。
         """
         with app.app_context():
             create_tables()
@@ -417,18 +468,170 @@ class TestTheFiveWeeklyPathsOverHttp:
             ).get_json()
 
         assert body["success"] is True, body
-        # 2/6 触发 delta_ratio_high；页面确认后会明确按 full 建任务，所以区间必须按
-        # 真正将执行的 6 个文件缩放，同时下面的 delta 事实仍保留 2。
-        assert body["planned_files"] == 6, body
-        assert body["mode"] == "full", body
+        # 平台只是**建议**整窗：真正会交给引擎的是这 2 个文件，区间也必须按 2 缩放。
+        assert body["planned_files"] == 2, body
+        assert body["mode"] == "incremental", body
         assert body["delta_files"] == 2, body
         assert body["compensation_files"] == 0, body
         assert body["baseline_run"]["run_id"] == baseline_run_id, body["baseline_run"]
         assert body["baseline_run"]["created_at"], body["baseline_run"]
         assert body["baseline_run"]["scope"], body["baseline_run"]
-        assert body["upgrade_reason"] == "delta_ratio_high", body
+        # 建议原因**不许**再冒充升级原因（这一条是「首次全量之后一直全量」的固化点）。
+        assert body["upgrade_reason"] in (None, ""), body
+        decision = body["mode_decision"]
+        assert decision["requested"] == "incremental", decision
+        assert decision["effective"] == "incremental", decision
+        assert decision["suggested_full"] is True, decision
+        assert decision["suggestion_reason"] == "delta_ratio_high", decision
+        assert decision["upgrade_reason"] == "", decision
+        assert decision["can_continue_incremental"] is True, decision
         # 这三项**不参与**区间折算：带上这句话，读的人才不会拿它当折扣。
         assert any("不参与" in note for note in body["notes"]), body["notes"]
+
+    def test_a_group_without_a_conclusion_baseline_is_incremental_with_a_reason(self):
+        """**无结论基线 → 增量 + `no_conclusion_baseline`**（契约 1.5 / 1.6）。
+
+        预检与建 job 是同一套判据：这里摆出来的 `mode_decision` 就是
+        `POST /jobs` 那一刻会落库的东西。整窗输入是事实（没有基线可做差），
+        但**模式不许被说成全量**，原因也不许再用历史字面值 `first_run`。
+        """
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=3)
+
+        with app.test_client() as client:
+            _login(client)
+            body = client.get(
+                f"/ai-analysis/usage/estimate?project={group['project_id']}"
+                f"&config={group['cfg_id']}&mode=incremental"
+            ).get_json()
+
+        assert body["success"] is True, body
+        # 没有基线 → 没有可做差的增量集，这次输入就是整个窗口的 3 个文件。
+        assert body["planned_files"] == 3, body
+        assert body["mode"] == "full", (
+            "整窗输入必须按 full 样本估区间（否则单文件强度会把固定开销放大上百次）"
+        )
+        assert body["upgrade_reason"] == "no_conclusion_baseline", body
+        decision = body["mode_decision"]
+        assert decision["requested"] == "incremental", decision
+        assert decision["effective"] == "incremental", (
+            f"没有结论基线就把 effective 说成 full 了：{decision}"
+        )
+        assert decision["suggested_full"] is False, decision
+        assert decision["suggestion_reason"] == "", decision
+        assert decision["upgrade_reason"] == "no_conclusion_baseline", decision
+        assert decision["can_continue_incremental"] is True, decision
+
+    def test_clicking_again_after_the_snapshot_finished_reuses_it_without_a_new_run(self):
+        """**同一份快照跑完后再点一次 → 复用结论，不新建运行**（契约 WP2 的验收）。
+
+        判据是「一条运行都没建」+「拿回同一条 job」+ `reused_run_id` 指向那条已有结论。
+        只看 `success` 的话，「每次点击都建一条新 job、再让 worker 判 no_change」也能
+        通过 —— 那仍然要走一遍任务队列，而这里钉的是**在预检/建 job 这一层就拦住**。
+
+        快照身份来自**当前缓存内容**（与 `seal_snapshot` 同一个指纹）：内容对不上就
+        不许复用（换版之后旧结论回答的是另一份输入）。
+        """
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=6)
+            _settle_and_advance(group)
+            first_job_id, run_id = _conclude_a_job(group)
+            runs_before = _runs_for(group)
+            jobs_before = AiAnalysisJob.query.filter_by(
+                target_key=group["group_key"]
+            ).count()
+            target_snapshot_id = db.session.get(AiAnalysisJob, first_job_id).target_snapshot_id
+            assert target_snapshot_id is not None, (
+                "建 job 时没有记下目标快照 —— 「同一份快照」这条判据就没有依据"
+            )
+
+        with app.test_client() as client:
+            _login(client)
+            # 预检也要**在建 job 之前**说得出「再点一次是复用」（契约 WP2 的可见性要求）。
+            preview = client.get(
+                f"/ai-analysis/usage/estimate?project={group['project_id']}"
+                f"&config={group['cfg_id']}&mode=incremental"
+            ).get_json()
+            second = _post_job(
+                client, group["cfg_id"],
+                analysis_mode="incremental", idempotency_key=_uid("k"),
+            ).get_json()
+
+        assert preview["success"] is True, preview
+        assert preview["reused_run_id"] == run_id, preview
+        assert any("复用" in note for note in preview["notes"]), preview["notes"]
+        assert preview["mode_decision"]["effective"] == "incremental", preview
+        assert second["success"] is True, second
+        assert second["attached"] is True, second
+        assert second["job_id"] == first_job_id, (first_job_id, second)
+        assert second["reused"] is True, second
+        assert second["reused_run_id"] == run_id, second
+        assert second["state"] in ("succeeded", "degraded", "reused"), second
+        with app.app_context():
+            assert AiAnalysisJob.query.filter_by(
+                target_key=group["group_key"]
+            ).count() == jobs_before, "同一份快照又建了一条 job"
+            assert _runs_for(group) == runs_before, "同一份快照又建了一条 run（白花一次调用）"
+
+    def test_a_changed_snapshot_is_not_reused(self):
+        """换版之后**不许**复用旧结论：判据是「同一份快照」，不是「同一个分组跑过」。
+
+        这条是上一条的反向自检：只按「这个 target 有没有结论」复用的实现在这里会红
+        —— 那会把用户刚提交的改动静默吞掉（报告说没问题，而那些改动一次都没被看过）。
+        """
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=6)
+            _settle_and_advance(group)
+            _conclude_a_job(group)
+            # 换一份输入：改一个文件的最新提交 → 当前内容不再等于任何已冻结快照。
+            row = WeeklyVersionDiffCache.query.filter_by(
+                config_id=group["cfg_id"], file_path=_PATH.format(index=0)
+            ).one()
+            row.latest_commit_id = "e" * 40
+            db.session.commit()
+            runs_before = _runs_for(group)
+
+        with app.test_client() as client:
+            _login(client)
+            body = _post_job(
+                client, group["cfg_id"],
+                analysis_mode="incremental", idempotency_key=_uid("k"),
+            ).get_json()
+
+        assert body["success"] is True, body
+        assert body["attached"] is False, body
+        assert body["reused"] is False, body
+        with app.app_context():
+            assert _runs_for(group) == runs_before, "复用判据没有看快照，直接建了运行"
+
+    def test_an_explicit_full_request_is_a_command_not_a_reuse(self):
+        """用户显式点了全量 → **不许**拿旧结论复用（那是命令，不是确认）。
+
+        复用只服务「我就想再看一眼上次那份结论」；用户按全量是想按当前规则重新判一遍。
+        把这一档也复用掉，按钮就成了不会生效的假按钮。
+        """
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=6)
+            _settle_and_advance(group)
+            first_job_id, _run_id = _conclude_a_job(group)
+
+        with app.test_client() as client:
+            _login(client)
+            body = _post_job(
+                client, group["cfg_id"],
+                analysis_mode="full", idempotency_key=_uid("k"),
+            ).get_json()
+
+        assert body["success"] is True, body
+        assert body["attached"] is False, body
+        assert body["job_id"] != first_job_id, body
+        assert body["requested_mode"] == "full", body
+        assert body["effective_mode"] == "full", body
+        assert body["upgrade_reason"] in (None, ""), body
 
     def test_it_says_which_group_the_precheck_facts_came_from(self):
         """多个分组时，预检要**说出**那份事实取自哪个窗口（近似不许被当成事实）。
@@ -720,3 +923,81 @@ class TestTheJobRemembersItsPlan:
             assert seen["project_id"] == group["project_id"]
             assert seen["config_id"] == group["cfg_id"]
             assert seen["planned_files"] == 1
+
+
+# ---------------------------------------------------------------------------
+#  `/latest` 的「模式裁决」：**要有写入方**（WP16）
+# ---------------------------------------------------------------------------
+
+
+class TestTheLatestConclusionSaysWhyThisMode:
+    """抽屉里那条「最近一次结论」要显示「为什么这次是增量 / 全量」。
+
+    ## 这条链之前断在哪
+
+    读侧（`conclusion_view._mode_decision_of`）**只透传** `response_payload.mode_decision`
+    —— 而那条链上一直没有写入方：导出文档是现算的，落库的 payload 里没有这个键。于是
+    抽屉里的「模式裁决」永远是空串（界面按「不显示这一行」处理），用户要解释这一次为什么
+    整窗重跑只能去看导出的 `.md`。
+
+    ## 为什么读侧不自己现算
+
+    读侧再判一次就是第二份判定（而且要读 job 行），两处迟早对同一次运行给出两种说法。
+    所以写入方只能是**结论落库那一层**：`result_payload`（形态）+ `_persist_outcome`
+    （落库）。这一条走的就是这两段生产代码，再用 HTTP 读回 `/latest`。
+    """
+
+    def test_the_conclusion_carries_the_mode_decision_over_http(self):
+        with app.app_context():
+            create_tables()
+            group = _make_group(file_count=3)
+            payload, _state, skip = ai_service.build_weekly_payload(group["cfg_id"])
+            assert skip is None, f"这次 payload 没建出来：{skip}"
+            run = ai_service._create_run(
+                project_id=group["project_id"],
+                target_type="weekly",
+                target_id=group["cfg_id"],
+                target_key=payload["group"]["key"],
+                response_mode="blocking",
+                scope=payload["scope"],
+                trigger_source="manual",
+                payload=payload,
+            )
+            outcome = EngineOutcome(
+                status="succeeded",
+                anomalies=(),
+                report_markdown="# 风险评估\n\n没发现问题。\n",
+            )
+            result = result_payload(outcome, payload)
+            ai_service._persist_outcome(run, outcome, result)
+            expected = result["mode_decision"]
+            run_id = run.id
+
+        # 首跑：没有可做差的基线 → `scope` 就是 full，那句话必须解释「为什么是全量」。
+        assert expected == "全量（无可用基线）", expected
+
+        with app.test_client() as client:
+            _login(client)
+            body = client.get(
+                f"/ai-analysis/weekly/{group['cfg_id']}/latest"
+            ).get_json()
+
+        assert body["success"] is True, body
+        assert body["result"] is not None, body
+        assert body["result"]["run_id"] == run_id
+        assert body["result"]["mode_decision"] == expected, (
+            "落库的那句没有走到 /latest —— 读侧只有透传，没有写入方它就永远是空串"
+        )
+
+    def test_the_requested_mode_is_frozen_into_the_run_payload(self):
+        """`requested_mode` 随 run 冻结：`/latest` 写那句裁决时读它，不回头查 job 行。
+
+        **这条是源码断言，因为它守的正是「那一行还在不在」**：调度路径（没有 job）也要
+        有「用户点了什么」这个账，而它唯一的来源是执行入口那个形参。删掉那一行不会让任何
+        功能测试变红（`mode_decision_text` 只是少一档判据、退化成别的说法），所以钉在这里。
+        """
+        source = getsource(ai_service.run_weekly_analysis_background)
+
+        assert 'payload["requested_mode"] = requested_mode or ""' in source, (
+            "requested_mode 没有写进 payload —— 「用户点了全量」这条账在结论里丢了"
+        )

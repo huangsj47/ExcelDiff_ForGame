@@ -32,6 +32,7 @@ from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
 from services.ai import report_document as doc
 from services.ai.skill_loader import SKILL_PROJECTS_ROOT_ENV, project_pack_slug
 from tests.test_ai_history_survives_restart import REPORT_TEXT, _setup_config
+
 # 「逐字」类断言的比较方式**只有一份**（`test_ai_report_document._no_hard_breaks` 的
 # docstring 写了为什么这几条要按去掉行尾空白之后比）。这里再写一份迟早会分叉。
 from tests.test_ai_report_document import _no_hard_breaks
@@ -312,7 +313,81 @@ def test_a_broken_request_payload_does_not_break_the_export():
             response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
 
         assert response.status_code == 200
-        assert "分析焦点" not in response.get_data(as_text=True)
+        body = response.get_data(as_text=True)
+        assert "分析焦点" not in body
+        # 坏 JSON 也不能凭空长出新行：取不到 payload 时两格都是空串。
+        assert "分析范围口径" not in body
+        assert "| 纳入仓库 |" not in body
+
+
+def test_the_export_says_the_run_only_read_the_config_repositories():
+    """P2：元信息里要**由程序**写出本次输入的范围，不靠模型在正文里提一句。
+
+    默认 `profile=tables` 时「分析范围：全量」会被读成整个项目的覆盖 —— 这一行说明
+    生效的档位、装进来的仓库，以及「其余仓库未纳入本次输入」。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            target_key=ai_service.build_weekly_group_key(cfg),
+            request_payload=json.dumps(
+                {
+                    "mode": "weekly",
+                    "analysis_profile": "tables",
+                    "repositories": [
+                        {"repository_id": 1, "repository_name": "qz_config"},
+                        {"repository_id": 2, "repository_name": "qz_config_lua"},
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        with app.test_client() as client:
+            _login(client)
+            response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
+
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "| 分析范围口径 | 仅配置表仓库（tables） |" in body
+        assert (
+            "| 纳入仓库 | 纳入 2 个仓库：qz_config、qz_config_lua；其余仓库未纳入本次输入 |"
+            in body
+        )
+        # 顺序：紧跟「分析范围」之后、「触发方式」之前（覆盖那几行是它们的结果）。
+        assert (
+            body.index("| 分析范围 |")
+            < body.index("| 分析范围口径 |")
+            < body.index("| 纳入仓库 |")
+            < body.index("| 触发方式 |")
+        )
+
+
+def test_an_old_request_payload_does_not_grow_the_new_rows():
+    """老 payload 不含这两个键 → 不出现新行（老记录导出的输出与以前逐字相同）。
+
+    没有 `analysis_profile` 也没有 `group` 的 payload 按老记录处理 —— 不替它断言
+    一个并不存在于记录里的「全部仓库」。
+    """
+    with app.app_context():
+        project, _repo, cfg = _setup_config()
+        run = _run(
+            project_id=project.id,
+            target_type="weekly",
+            target_id=cfg.id,
+            target_key=ai_service.build_weekly_group_key(cfg),
+            request_payload=json.dumps({"focus": {"key": "all", "label": ""}}),
+        )
+        with app.test_client() as client:
+            _login(client)
+            response = client.get(f"/ai-analysis/runs/{run.id}/report.md")
+
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert "分析范围口径" not in body
+        assert "| 纳入仓库 |" not in body
 
 
 # ---------------------------------------------------------------------------

@@ -636,13 +636,20 @@ def test_no_change_job_points_to_and_returns_the_reused_report():
 
 
 def test_already_running_job_attaches_to_the_existing_run_and_tracks_its_scope():
+    """附着到「已经有一条在跑」的那次运行时，job 的账要跟着那条 run 走。
+
+    注意这里的 `reason` 用**真实升级原因**（`force_full_rebuild`）：2026-11-01 契约 1.1
+    之后 `delta_ratio_high` / `critical_path_detected` 这类**建议原因**不再让
+    `run.scope` 变成 full（它只是建议整窗），所以它们不会再出现在「增量的 job 被升成
+    full」这个状态里。用它们造夹具会让用例描述一件生产上不再发生的事。
+    """
     import services.task_worker_task_handlers as handlers
 
     with app.app_context():
         group = _make_group()
         active = _make_run(group, status="running")
         active.scope = MODE_FULL
-        active.request_payload = json.dumps({"policy": {"reason": "critical_path_detected"}})
+        active.request_payload = json.dumps({"policy": {"reason": "force_full_rebuild"}})
         job = _make_job(group, state=STATE_RUNNING)
         job.effective_mode = MODE_INCREMENTAL
         task = _make_task(group, job_id=job.id, status="processing")
@@ -656,7 +663,7 @@ def test_already_running_job_attaches_to_the_existing_run_and_tracks_its_scope()
         assert attached.state == STATE_RUNNING
         assert attached.run_id == active.id
         assert attached.effective_mode == MODE_FULL
-        assert attached.upgrade_reason == "critical_path_detected"
+        assert attached.upgrade_reason == "force_full_rebuild"
         assert attached.active_key is not None
 
 
@@ -995,10 +1002,19 @@ def test_the_jobs_focus_reaches_the_run_the_worker_builds():
 
 
 def test_the_default_focus_changes_nothing():
-    """老调用方逐字保持原行为：不传 focus 时这一段不产生任何过滤。"""
+    """老调用方逐字保持原行为：不传 focus 时这一段不产生任何过滤。
+
+    `tables`（默认）现在先按**仓库**收窄输入（WP14），混合批次只剩配表那 2 个文件 ——
+    那样就测不到「focus 这一段不过滤」了。所以显式按 `all` 跑：本用例守的是 focus，
+    不是 profile 的收窄（后者的行为在 `test_ai_allowed_paths.py` 里钉）。
+    """
     with app.app_context():
         group = _make_group(file_count=3, table_file_count=2)
         ai_service.set_project_api_key(group["project"].id, "sk-test")
+        ok, message, errors = ai_service.update_project_analysis_config(
+            group["project"].id, {"analysis_profile": "all"}, updated_by="tester"
+        )
+        assert ok, f"{message} {errors}"
         db.session.commit()
 
         created = job_service.create_or_attach_job(
@@ -1013,7 +1029,9 @@ def test_the_default_focus_changes_nothing():
 
         payload = json.loads(_last_run_of_group(group).request_payload)
         assert payload["focus"] == {"key": "all", "label": ""}, payload["focus"]
+        # `all` profile 下可读范围是整批（3 代码 + 2 配表）；少给可读范围就是另一类缺口。
         assert payload["summary"]["total_files"] == 5, payload["summary"]
+        assert len(payload["delta_files"]) == 5, "白名单不能跟着 profile 收口少给"
 
 
 def test_an_explicit_full_request_overrides_the_platforms_incremental_choice():
@@ -1104,3 +1122,94 @@ def test_a_task_whose_reference_is_an_intent_id_is_not_read_as_a_job():
         assert job_service.focus_for_task(
             _make_task(group, job_id=unrelated.id, status="processing").id
         ) == "table"
+
+
+# ===========================================================================
+#  六、混合仓库 + profile=tables：快照指纹必须与 payload 的 config_ids 同源（P1-4）
+#
+#  `build_weekly_payload` 收窄后 `payload["group"]["config_ids"]` 只有配表仓库的配置，
+#  `seal_snapshot` 冻的就是这一份；而 job 这一侧原先拿 `group_config_ids(config)`
+#  （整组）去算指纹 —— 混合仓库项目永远判不出「当前缓存就是那份已冻结快照」。
+# ===========================================================================
+
+
+def test_a_mixed_batch_snapshot_digest_matches_the_effective_input():
+    """`_current_target_snapshot` 的指纹必须等于 `seal_snapshot` 冻下的那一份。
+
+    反向自检：用**整组** id 算出的指纹与它不同 —— 证明这条用例确实在考「两处各用了一份
+    config 集」，而不是一个恒等式。
+    """
+    from services.ai.baseline_blocks import seal_target_snapshot
+    from services.ai.scope_sampling import weekly_snapshot_digest
+
+    with app.app_context():
+        group = _make_group(file_count=2, table_file_count=2)
+
+        payload, _state, skip = ai_service.build_weekly_payload(group["table_cfg"].id)
+        assert skip is None
+        assert payload["group"]["config_ids"] == [group["table_cfg"].id], (
+            "这次的输入没有按 profile 收窄 —— 用例前提不成立"
+        )
+        sealed = seal_target_snapshot(payload)
+        assert sealed is not None
+
+        current = job_service._current_target_snapshot(
+            group["table_cfg"], group["group_key"]
+        )
+
+        assert current is not None, (
+            "当前缓存与刚冻结的快照明明是同一份输入，却判不出快照（整组 vs 收窄后的指纹）"
+        )
+        assert current.id == sealed["snapshot_id"]
+        assert current.content_digest == sealed["content_digest"]
+        assert weekly_snapshot_digest(payload["group"]["config_ids"]) == current.content_digest
+        assert weekly_snapshot_digest([group["cfg"].id, group["table_cfg"].id]) != (
+            current.content_digest
+        ), "整组 id 算出了同一个指纹 —— 反证不成立，无法证明两处口径不同源"
+
+
+def test_a_mixed_batch_reuses_the_conclusion_of_the_effective_snapshot():
+    """同一份快照下已有可复用结论 → 命中复用（零消耗），而不是再建一条运行。
+
+    判据是 `reusable_conclusion_for` 真的返回了那条 job/run：只断言
+    `_current_target_snapshot` 非空的话，「快照对了但复用判据另写一份」仍会绿。
+    """
+    from services.ai.baseline_blocks import seal_target_snapshot
+    from services.ai.provenance import current_provenance
+
+    with app.app_context():
+        group = _make_group(file_count=2, table_file_count=2)
+        payload, _state, skip = ai_service.build_weekly_payload(group["table_cfg"].id)
+        assert skip is None
+        sealed = seal_target_snapshot(payload)
+        assert sealed is not None
+
+        now = datetime.now(timezone.utc)
+        run = AiAnalysisRun(
+            project_id=group["project"].id,
+            target_type="weekly",
+            target_id=group["table_cfg"].id,
+            target_key=group["group_key"],
+            status="succeeded",
+            scope="incremental",
+            trigger_source="manual",
+            response_text="# 旧结论",
+            response_payload=json.dumps({"risk_level": "low"}),
+            created_at=now,
+            finished_at=now,
+        )
+        # `_is_run_fresh` 会比对这些溯源列；不写就是 NULL = 与现在不一致 = 不可复用。
+        for key, value in current_provenance(group["project"].id).items():
+            setattr(run, key, value)
+        db.session.add(run)
+        db.session.commit()
+
+        job = _make_job(group, state=STATE_SUCCEEDED, run_id=run.id)
+        job.target_snapshot_id = sealed["snapshot_id"]
+        db.session.commit()
+
+        hit = job_service.reusable_conclusion_for(group["cfg"], focus="all")
+
+        assert hit is not None, "同一份快照下已有结论，却判不出来（混合仓库指纹对不上）"
+        assert hit["job_id"] == job.id
+        assert hit["run_id"] == run.id

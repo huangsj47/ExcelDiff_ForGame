@@ -32,11 +32,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from models import db
-from models.ai_analysis import AiAnalysisAnomaly
-from models.ai_analysis.anomaly import DEFAULT_DISPOSITION, DISPOSITION_LABELS, DISPOSITIONS
+from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
+from models.ai_analysis.anomaly import (
+    DEFAULT_DISPOSITION,
+    DISPOSITION_LABELS,
+    DISPOSITIONS,
+    AiAnalysisIgnoredFingerprint,
+)
+from services.ai.baseline import DISPOSITION_IGNORED
 from utils.logger import log_print
 
 # 备注的长度上限。**必须有**：这是自由文本，界面上是一个 textarea，
@@ -90,6 +96,109 @@ def note_was_truncated(raw: Any) -> bool:
     return len(str(raw or "").strip()) > DISPOSITION_NOTE_MAX_CHARS
 
 
+# ---------------------------------------------------------------------------
+# 人工忽略的**持久台账**（P0 真漏口）
+# ---------------------------------------------------------------------------
+# 为什么处置之外还要多写一张表：`disposition` 挂在**行**上，而被忽略的条目交付时会被
+# `result_payload` 从 `anomalies` 里剔掉 —— 于是「下一条运行」的行里根本没有它。基线
+# 读侧又只读「最近一次有结构化结论的运行」那一批行，中间夹一次「有结论但 0 行」的运行，
+# 人工的判断就从读侧彻底消失（下一轮同一条误报以 `pending` 重新报出来）。
+#
+# 所以「忽略」要落在一个**不跟着行走**的地方：按 `(target_key, fingerprint)` 记。
+# 读侧在 `baseline_source`（`baseline_findings` / `suppressed`），写侧只有这里。
+#
+# 判据的**唯一来源是分组键**（`target_key` = 周版本分组键，`build_weekly_group_key`）。
+# 它为空时（单提交分析）不写台账：那张运行没有「组」可隔离，跨组抑制会误伤别的版本
+# 的同名结论 —— 宁可在这一档退回旧逻辑。
+IGNORED_TITLE_MAX_CHARS = 500
+
+
+def _ignored_ledger_identity(anomaly: AiAnalysisAnomaly) -> Optional[tuple[str, int]]:
+    """这条结论在台账里的身份：`(target_key, project_id)`；没有分组键就返回 None。
+
+    分组键只能从**运行**上取（`AiAnalysisRun.target_key`），不在这条异常行上 —— 所以
+    这里多一次查询。它是处置路径（一次一条 / 一次最多 `MAX_BATCH_ITEMS` 条），不是
+    热路径；拿错分组的代价（抑制到别的版本、或者该抑制的没抑制）比这一下查询贵得多。
+
+    运行行已经不在库里时返回 None：没有分组键就无法定位台账身份，与「分组键为空」
+    同一档处理（退回旧逻辑，不猜）。
+    """
+    run_id = anomaly.run_id
+    if not run_id:
+        return None
+    run = db.session.get(AiAnalysisRun, run_id)
+    if run is None:
+        return None
+    target_key = str(run.target_key or "").strip()
+    if not target_key:
+        return None
+    return target_key, int(run.project_id or anomaly.project_id or 0)
+
+
+def record_ignored_fingerprint(
+    anomaly: AiAnalysisAnomaly,
+    *,
+    ignored_at: Optional[datetime] = None,
+) -> Optional[AiAnalysisIgnoredFingerprint]:
+    """把「这条不用再报」记进台账（同一个身份重复处置就刷新，不叠加行）。
+
+    刷新 `ignored_at` / `last_run_id` / 标题是有意的：用户后来又在另一个运行的行上点了
+    一次「忽略」，台账应当说「最近一次忽略发生在这一次运行上」—— 删运行时正是按
+    `last_run_id` 级联清台账（见模型列的说明），留着旧 run 号会让清理漏掉它。
+    """
+    identity = _ignored_ledger_identity(anomaly)
+    fingerprint = str(anomaly.fingerprint or "").strip()
+    if identity is None or not fingerprint:
+        # 没有身份就没有台账行可写。**不报错**：这是「这一档不适用」，不是失败
+        # （处置本身仍然照旧生效，下一次读侧走旧逻辑）。
+        return None
+    target_key, project_id = identity
+    row = AiAnalysisIgnoredFingerprint.query.filter_by(
+        target_key=target_key, fingerprint=fingerprint
+    ).first()
+    if row is None:
+        row = AiAnalysisIgnoredFingerprint(target_key=target_key, fingerprint=fingerprint)
+        db.session.add(row)
+    row.project_id = project_id
+    row.title = str(anomaly.title or "")[:IGNORED_TITLE_MAX_CHARS] or None
+    row.file_path = str(anomaly.file_path or "")[:500] or None
+    row.ignored_at = ignored_at or anomaly.disposition_at or datetime.now(timezone.utc)
+    row.last_run_id = anomaly.run_id
+    return row
+
+
+def forget_ignored_fingerprint(anomaly: AiAnalysisAnomaly) -> int:
+    """把这条指纹从台账里删掉（`pending` / `confirmed` 时调用）。
+
+    撤销与确认都要删：台账回答的是「用户判定过不用再报吗」，一旦他改成「确认」或
+    「再等等」，答案就变成否 —— 留着不删，下一轮同一条会被继续静默抑制，而界面上
+    显示的是「已确认」。返回删掉的行数（给测试与排查用）。
+    """
+    identity = _ignored_ledger_identity(anomaly)
+    fingerprint = str(anomaly.fingerprint or "").strip()
+    if identity is None or not fingerprint:
+        return 0
+    target_key, _project_id = identity
+    return (
+        AiAnalysisIgnoredFingerprint.query.filter_by(
+            target_key=target_key, fingerprint=fingerprint
+        ).delete(synchronize_session=False)
+    )
+
+
+def sync_ignored_ledger(anomaly: AiAnalysisAnomaly, disposition: str) -> None:
+    """处置落库时同步台账：`ignored` → 记上；`pending` / `confirmed` → 删掉。
+
+    **不吞异常**：台账写失败就意味着「用户以为忽略生效了、下一轮照旧重报」—— 那正是
+    本模块存在要消灭的那种静默失效。让它抛，调用方的整笔事务一起回滚（处置也没发生），
+    用户看到一次明确的失败，而不是一次看起来成功、下一轮被推翻的操作。
+    """
+    if disposition == DISPOSITION_IGNORED:
+        record_ignored_fingerprint(anomaly)
+        return
+    forget_ignored_fingerprint(anomaly)
+
+
 def set_disposition(
     anomaly: AiAnalysisAnomaly,
     *,
@@ -109,6 +218,12 @@ def set_disposition(
     撤销也要留痕，所以这里额外写一行日志。**没有落库的审计表**（谁在什么时候撤销了
     处置）是有意为之：为一个「改错了点回来」的动作建一张表，收益远小于它的维护成本；
     真正需要追溯的是当前状态，而当前状态在行上。
+
+    ## 台账是这张表的另一半（P0）
+
+    `ignored` 除了写在行上，还要写进**分组级**的台账（`sync_ignored_ledger`）：
+    行会被下一轮的交付剔掉，而「这条不用再报」这个判断不能跟着它一起消失。
+    `pending` / `confirmed` 则要把台账行删掉 —— 那是「撤销这次忽略」的唯一入口。
     """
     target = normalize_disposition(disposition)
     previous = anomaly.disposition or DEFAULT_DISPOSITION
@@ -123,6 +238,10 @@ def set_disposition(
         anomaly.disposition_by = (username or "")[:100]
         anomaly.disposition_at = stamp
         anomaly.disposition_note = normalize_note(note) or None
+
+    # **同一个事务**里写台账：处置与它在台账上的影子要么一起生效、要么一起回滚。
+    # 分开 commit 的话，「行改成功、台账写失败」会留下一个下一轮照旧重报的假忽略。
+    sync_ignored_ledger(anomaly, target)
 
     if target == DEFAULT_DISPOSITION and previous != DEFAULT_DISPOSITION:
         log_print(
@@ -187,4 +306,47 @@ def set_many(
         if before != after:
             changed += 1
     db.session.commit()
+    return changed
+
+
+def persist_suppressed_previous(run_id: int, anomalies) -> int:
+    """把**这一轮合并结果**里的「曾被人工忽略」标记落到已落库的结论行上。
+
+    ## 为什么在 `_persist_outcome` 之外另开一个落库辅助
+
+    `services/ai_analysis_service.py::_persist_outcome` 逐条建 `AiAnalysisAnomaly` 行，
+    但它**不在本工作包的文件所有权内**（1987 行，贴着仓库的 2000 行上限）。而这一列
+    恰恰只能由它写：它读的是 `result["anomalies"]`，标记也在这份结果上
+    （`incremental_baseline.reconcile_result` 的 `suppressed_previous=True`）。
+    所以做法是：**写库逻辑集中在这一个函数里**，`_persist_outcome` 落库之后调用一次
+    即可（一行调用，留给那个文件的所有者接；不接也不会破坏任何既有行为，只是这一列
+    保持默认的 False）。
+
+    ## 判据与幂等
+
+    只认 `suppressed_previous is True` **这一种真值**：合并器只在真的命中时加键，
+    其余条目连键都没有 —— 这里不做 `bool()` 折真，一个手写的 `"false"` 字符串不该
+    被读成「曾被忽略」。
+
+    **按这一轮的结果重写，而不是只置 True**：同一个 run 被重复落库（重试/补写）时，
+    「上一轮置过 True、这一轮结果里没有它」必须能改回 False，否则这一列会只增不减，
+    最终每条都带着这个标记，失去区分力。
+
+    返回改动的行数（测试与排查用）。
+    """
+    wanted = {
+        str(item.get("fingerprint") or "")
+        for item in anomalies or []
+        if isinstance(item, Mapping) and item.get("suppressed_previous") is True
+    }
+    wanted.discard("")
+    rows = AiAnalysisAnomaly.query.filter_by(run_id=run_id).all()
+    changed = 0
+    for row in rows:
+        should_be = str(row.fingerprint or "") in wanted
+        if bool(row.suppressed_previous) != should_be:
+            row.suppressed_previous = should_be
+            changed += 1
+    if changed:
+        db.session.commit()
     return changed

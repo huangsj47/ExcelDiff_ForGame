@@ -49,6 +49,9 @@ from services.ai.analysis_plan import (
     plan_of,
     single_member_limits,
 )
+from services.ai.analysis_scope_filter import allowed_paths_by_repository as _paths_by_repo
+from services.ai.analysis_scope_filter import allowed_paths_for_profile, filter_configs_for_profile, scope_signature
+from services.ai.analysis_scope_filter import scope_signature_for_facts as _scope_signature_for
 from services.ai.auto_sizing import (
     ANOMALY_RUN_CAP,
     MODE_FAMILY,
@@ -70,7 +73,6 @@ from services.ai.baseline_blocks import (
 )
 from services.ai.baseline_blocks import (
     resolve_baseline,
-    seal_target_snapshot,
 )
 from services.ai.baseline_blocks import (
     snapshot_digest_for as _snapshot_digest_for,
@@ -95,6 +97,7 @@ from services.ai.baseline_source import (
 from services.ai.baseline_source import (
     has_previous_conclusion,
     previous_anomaly_rows,
+    run_scope_signature,
 )
 from services.ai.baseline_source import (
     previous_run as _previous_run,  # noqa: F401 —— 测试按这个名字 import
@@ -225,13 +228,21 @@ from services.ai.run_cache_source import (  # noqa: F401 —— 启动清理与�
 )
 from services.ai.run_progress import clear as clear_run_progress
 from services.ai.run_progress import publish as publish_run_progress
+
+# 目标快照的「重冻」放在 `run_seal`：撞唯一索引后的 rollback 会把只 flush 的快照一起
+# 回滚，所以 seal 必须随每一次 INSERT 重做（理由见那个模块的抬头）。
+from services.ai.run_seal import seal_attempt_snapshot
 from services.ai.scope_sampling import (  # noqa: F401 —— 任务服务与测试仍在用
+    FULL_ANALYSIS_FILE_THRESHOLD,
+    FULL_ANALYSIS_RATIO_THRESHOLD,
     _decide_scope,
     _limit_items,
     _repo_priority,
     _sample_with_repo_fairness,
     _summarize_weekly_files,
+    decide_scope,
     has_weekly_changes,
+    refine_summary_for_focus,
     weekly_snapshot_digest,
 )
 from services.ai.skill_contract import DIMENSION_IDS, dimension_ids_of
@@ -356,11 +367,19 @@ def build_commit_payload(commit_id: int) -> dict:
     return payload
 
 
-def _concluded_run(state) -> Optional[AiAnalysisRun]:
+def _concluded_run(
+    state, scope_signature: Optional[tuple] = None
+) -> Optional[AiAnalysisRun]:
     """这个分组的**结论基线**那条运行（`ai_weekly_analysis_state.last_concluded_run_id`）。
 
     降级也算（它跑完了、有可复用的结论，只是浅），所以指针与「时间水位线」不是一回事。
     指不到就回 `None`：补偿集宁可不补，也不去猜「上一次是哪一次」。
+
+    `scope_signature` 给了就加一道**范围校验**（P1，2026-11-01）：指针那一轮的 payload
+    与本次范围不同时回 `None` —— 补偿集是「上一轮没取到证据的文件」，范围一换它就不是
+    本轮的缺口了，宁可少补也不跨范围。**旧 payload（判不了范围）照旧用**：补偿只决定
+    「哪些文件进输入」，不会把结论继承进报告，而未读游标那条链正靠它接上（见
+    `tests/test_ai_analysis_service.py::test_the_payload_carries_the_base_run_for_the_unread_cursor`）。
     """
     if state is None:
         return None
@@ -368,9 +387,14 @@ def _concluded_run(state) -> Optional[AiAnalysisRun]:
     if not run_id:
         return None
     try:
-        return db.session.get(AiAnalysisRun, run_id)
+        run = db.session.get(AiAnalysisRun, run_id)
     except Exception:  # noqa: BLE001 —— 读不到基线不是「这次分析起不来」的理由
         return None
+    if scope_signature is not None:
+        recorded = run_scope_signature(run)
+        if recorded is not None and recorded != scope_signature:
+            return None
+    return run
 
 
 def build_weekly_payload(
@@ -381,49 +405,61 @@ def build_weekly_payload(
     focus: Optional[str] = None,
 ) -> Tuple[Optional[dict], Optional[AiWeeklyAnalysisState], Optional[str]]:
     config = WeeklyVersionConfig.query.get_or_404(config_id)
-    # 输入集 = 这个**批次**的全部配置。判据必须与分组键同源（同项目 + 同窗口 +
-    # **同版本名**）—— 只按「项目 + 窗口」取会把同一窗口下另一个名字的周版本配置
-    # 也拉进来，于是报告标题写着一个版本、清单里却有另一个版本的文件（REV-AI-002）。
+    # 输入集 = 这个**批次**的全部配置；判据必须与分组键同源（同项目 + 同窗口 + **同版本名**），
+    # 否则报告标题写着一个版本、清单里却有另一个版本的文件（REV-AI-002）。
     configs = weekly_batch_configs(config)
     if not configs:
         return None, None, "no_configs"
 
+    project_config = get_project_analysis_config(config.project_id)
+    # 「分析模式」（契约 1.7/1.8）：`tables` 只看配置表仓库、`all` 不限制；这里兜一次默认值，
+    # 是为了老库 NULL 行（`resolved()` 之外的读法）。
+    analysis_profile = str(project_config.get("analysis_profile") or "tables").strip().lower()
+    # **输入集按 profile 收窄**（WP14，口径见 `analysis_scope_filter` 的模块抬头）：`tables`
+    # 只留配表仓库的配置（仓库里的 `.lua/.py/.json/.proto` 照样进输入，它们是配表风险的
+    # 证据）；没有配表仓库时退回 `all`（否则整个项目无法分析），并在
+    # `policy.decision.profile_fallback` 留痕。
+    configs, profile_fallback = filter_configs_for_profile(configs, analysis_profile)
+    if profile_fallback:
+        analysis_profile = "all"
+
     group_key = build_weekly_group_key(config)
     base_name = _resolve_base_name(config)
-    project_config = get_project_analysis_config(config.project_id)
     state = AiWeeklyAnalysisState.query.filter_by(group_key=group_key).first()
 
-    # **做差的基准是快照，不是时间水位线**（AI-P0-02）。`force_full` 时永远是 None ——
-    # 全量模式不看基线。退回时间水位线的只有一种情形：这个分组还没有任何冻结快照
-    # （升级上来的老分组），见 `baseline_blocks.resolve_baseline`。
+    # 做差基准是**快照**不是时间水位线（AI-P0-02）：`force_full` 时永远是 None（全量不看
+    # 基线），退回水位线的只有升级上来的老分组（见 `baseline_blocks.resolve_baseline`）。
     baseline, baseline_account = resolve_baseline(
         group_key, state, force_full=force_full, force_full_reason=force_full_reason
     )
+    # 补偿集与基线都要过范围签名（P1）：范围变了不继承；链断但指针同范围也要留痕。
+    scope_sig = _scope_signature_for(analysis_profile, focus, (c.repository_id for c in configs))
+    base_run = _concluded_run(state, scope_sig)
+    if base_run is None and _concluded_run(state) is not None:
+        baseline_account["scope_mismatch"] = True
+    elif base_run is not None and _previous_run("weekly", group_key, scope_signature=scope_sig) is None and _previous_run("weekly", group_key) is not None:
+        baseline_account["scope_mismatch"] = True
     summary, details, skip_reason = _summarize_weekly_files(
         configs,
         baseline,
-        # 补偿集的事实来源：**上一次有可复用结论的运行**（降级也算）。它那 94% 没取到
-        # 证据的文件不许就这么算了 —— 按风险排序后回到这一轮的输入里。
-        base_run=_concluded_run(state),
+        # 补偿集的事实来源：**上一次有可复用结论的运行**（降级也算），它那批没取到证据的
+        # 文件不许就这么算了 —— 按风险排序后回到这一轮的输入里。
+        base_run=base_run,
         compensation_max=_configured_int(
             project_config.get("compensation_max_files"), DEFAULT_COMPENSATION_MAX_FILES
         ),
-        # 窗口提交账要**跟着用户选的范围收窄**（见下面 `_configs_in_focus` 的说明）：
-        # 不收窄就会放行本批次不该看的仓库的提交。
+        # 窗口提交账要跟着用户选的「分析范围」收窄，否则会放行本批次不该看的仓库的提交。
         window_configs=_configs_in_focus(configs, focus),
     )
     if skip_reason and not force_full:
         return None, state, skip_reason
 
-    scope, policy = _decide_scope(summary, baseline)
-
     repo_details = details.get("repos", [])
     repo_details.sort(key=lambda item: (item.get("priority", 1), item.get("repository_name", "")), reverse=True)
 
     delta_files = details.get("delta_files", [])
-    # 清单取样上限按本周规模推导（配置面收敛，2026-09-23）：clamp(文件数, 200, 500)。
-    # 旧的 `max_files_per_run` 配置已收掉 —— 公式与 `derive_family_sizing` 同一份常数
-    # （`auto_sizing.sampling_cap_for`），不是第二个事实源。
+    # 清单取样上限按本周规模推导：clamp(文件数, 200, 500)；旧 `max_files_per_run` 已收掉，
+    # 公式与 `derive_family_sizing` 同一份常数（`auto_sizing.sampling_cap_for`）。
     max_files = sampling_cap_for(len(delta_files))
     compensation_files = list(details.get("compensation_files") or [])
     focus_label = ""
@@ -431,74 +467,99 @@ def build_weekly_payload(
         delta_files, focus_label = _filter_delta_files_by_focus(delta_files, focus, configs)
         if not delta_files:
             return None, state, "focus_empty"
-        # **计数要跟着筛选走**（四个都跟）：不跟的话提示词会告诉模型「本次变更共 767 个
-        # 文件」而它只看得到 19 个 —— 「把清单当全量」的镜像错误，这次是把全量说大了。
-        # 补偿项那一份同样要跟着筛：它已经算进 `delta_files` 里，两本账不能对不上。
+        # **计数要跟着筛选走**（四个都跟）：不跟的话提示词会把「本次变更」说大，模型就把
+        # 半份输入当全量；补偿项那一份已经算进 `delta_files`，两本账不能对不上。
         kept = {item.get("file_path") for item in delta_files}
         compensation_files = [
             item for item in compensation_files if item.get("file_path") in kept
         ]
-        summary = {
-            **summary,
-            "total_files": len(delta_files),
-            "delta_files": len(delta_files),
-            "batch_files": len(delta_files),
-            "compensation_files": len(compensation_files),
-        }
+        summary = refine_summary_for_focus(summary, delta_files, compensation_files)
+
+    # **范围判定必须在 focus 之后**（2026-11-01）：先判后筛会让 focus 对 `scope` 毫无
+    # 作用（审查报告 :37）。判定只产出「输入口径 + 建议」，不再把 `scope` 改成 full。
+    decision = decide_scope(summary, baseline)
+    scope = decision.scope
+
+    # 本批次**允许模型读的路径**（契约 1.8 + WP14）：`configs` 收窄后 `delta_files` 只剩
+    # 配表仓库的改动，所以 `tables` 不再按后缀挑表（那会让模型读不到刚交给它的输入）。
+    allowed_paths = allowed_paths_for_profile(analysis_profile, delta_files)
+
+    # `tables` 时「本次变更 N 个」不能大于**可读**文件数（WP9）；必须放在 focus 与
+    # `decide_scope` **之后**：判定要的是真实变化数，不是可读范围。
+    if allowed_paths:
+        summary["batch_files"] = summary["total_files"] = len(allowed_paths)
+
     list_files, list_truncated = _select_listed_files(delta_files, max_files)
 
     truncated = list_truncated
     payload = {
         "mode": "weekly",
         "scope": scope,
+        # 生效的分析模式与**允许模型读的路径**（契约 1.8）：`allowed_paths` 为 `None` =
+        # 不限制；非空时 `change_set.from_weekly_payload` 在源头把授权收窄到这些路径。
+        "analysis_profile": analysis_profile,
+        "allowed_paths": allowed_paths,
+        "allowed_paths_by_repo": None if allowed_paths is None else _paths_by_repo(delta_files),
         "execution": {
             "version": EXECUTION_VERSION,
             "streaming_preferred": True,
         },
         "prompt": project_config.get("prompt_template") or DEFAULT_PROMPT_TEMPLATE,
         "policy": {
-            "reason": policy,
+            "reason": decision.reason,
             "max_files": max_files,
             "sample_strategy": "priority_then_commit_count",
             "allow_cross_file": True,
+            # 平台**建议**整窗重跑：`scope` 不改、基线不清空，由界面问用户要不要改跑全量。
+            # 这两个字段是「标签 full → 真全量」那条闭环的断点（见 `ScopeDecision`）。
+            "suggested_full": decision.suggested_full,
+            # 这次输入到底装的是整窗还是 delta（`scope` 的同义展开，给读侧与界面用）。
+            "input_scope": "window" if scope == "full" else "delta",
+            # **裁决账落库**：事后查「为什么建议整窗」不必再靠日志（实测 run 63/62 复盘）。
+            "decision": {
+                "real_delta": decision.real_delta,
+                "compensation": decision.compensation,
+                "dependency": decision.dependency,
+                "denominator": decision.denominator,
+                "ratio": round(decision.ratio, 4),
+                "critical_source": decision.critical_source,
+                "critical_hits": list(decision.critical_hits),
+                # 可读路径数（`None` = 不限制）：与 summary 收口同一个数（WP9）。
+                "allowed_files": None if allowed_paths is None else len(allowed_paths),
+                # 读取范围（WP20）：输入仍只装配表改动，读取放开到全部跟踪文件。
+                "read_scope": "all_tracked",
+                "thresholds": {
+                    "file_count": FULL_ANALYSIS_FILE_THRESHOLD,
+                    "ratio": FULL_ANALYSIS_RATIO_THRESHOLD,
+                },
+            },
         },
-        # 用户选的「分析范围」。`label` 会被渲染进提示词（见 change_set._scope_note），
-        # 所以报告与界面都能说清「这次只看了一半」。
+        # 用户选的「分析范围」。`label` 会被渲染进提示词（见 `change_set._scope_note`）。
         "focus": {"key": str(focus or FOCUS_ALL), "label": focus_label},
         "group": {
             "key": group_key,
             "base_name": base_name,
             "project_id": config.project_id,
-            # 这一组都有哪些配置。**不是给模型看的**：它是「这份快照由哪些配置的缓存行
-            # 组成」的账，`_update_weekly_state` 用它算快照指纹
-            # （`scope_sampling.weekly_snapshot_digest`），调度器据此拦掉「输入一字未变
-            # 却还要再分析一遍」。也顺便让落库的 request_payload 自己说清楚覆盖了谁。
+            # 这一组都有哪些配置（**不是给模型看的**）：`_update_weekly_state` 用它算快照
+            # 指纹，调度器据此拦掉「输入一字未变却还要再分析一遍」；也顺便让落库的
+            # request_payload 自己说清覆盖了谁。
             "config_ids": [item.id for item in configs],
             "start_time": config.start_time.isoformat() if config.start_time else None,
             "end_time": config.end_time.isoformat() if config.end_time else None,
         },
         "summary": summary,
-        # 这次做差的**基准**（快照 id / 指纹 / 条数 / 覆盖面）。落进 request_payload 之后，
-        # 「这次为什么是增量、基准是哪一份」不必再去猜状态行的当前值 —— 状态行是**会变的**，
-        # 而这份账冻结在运行记录上（同 `coverage_ledger` 读 request_payload 的口径）。
+        # 这次做差的**基准**：落进 request_payload 之后，「为什么是增量、基准是哪一份」不必
+        # 再去猜状态行的当前值 —— 状态行会变，而这份账冻结在运行记录上。范围变了时其中
+        # 多一个 `scope_mismatch`（指针那一轮与本次范围不同，本轮不继承它的结论）。
         "baseline": baseline_account,
-        # **补偿项单独列一份**（复测文档 :163 的验收：「这 5 个文件 + 必要依赖和**明确
-        # 列出的补偿项**」）。它们已经在 `delta_files` 里（模型读得到），这里再显式列一遍
-        # 是为了让「这周真的改了什么」与「上一轮漏看了什么」在账上分得开 —— 混在一起，
-        # 报告里的变更数会被补偿项虚增。
+        # **补偿项单独列一份**（复测文档 :163）：它们已经算进 `delta_files`（模型读得到），
+        # 再显式列一遍是为了让「这周真的改了什么」与「上一轮漏看了什么」在账上分得开。
         "compensation_files": compensation_files,
         "repositories": repo_details,
-        # 窗口里**真实可达的提交**与**每个提交自己改过哪些文件**。
-        #
-        # 这两个键必须**冻结进 request payload**，不能只在读侧现算：
-        # `change_set` 是纯函数层（不碰库），而「窗口里有哪些提交」只有上面那次
-        # `_summarize_weekly_files` 有库会话。先前写侧把它们算进了 `details` 却**没有
-        # 复制到这个 payload 里** —— 于是下游 `payload.get("window_commit_ids")` 恒为空，
-        # 新增的白名单代码在真实链路上**从未生效**：模型问不了窗口里其它提交
-        # （`resolve_commit` 一律判「不属于本批次」），也读不到它们的单提交 diff。
-        # 实测的症状是报告写「累计 2 个提交」而平台统计是 3 个，且模型对第三个提交的
-        # 取证请求被拒。既有的 `tests/test_ai_weekly_commit_accounting.py` 只构造
-        # **已经含清单**的 payload，验的是读侧，接线漏了这一层。
+        # 窗口里**真实可达的提交**与**每个提交自己改过哪些文件**。这两个键必须冻结进
+        # request payload、不能只在读侧现算（`change_set` 不碰库，只有上面那次
+        # `_summarize_weekly_files` 有库会话）：原先漏抄的表现是「模型问不了窗口里其它
+        # 提交」，实测报告写「累计 2 个提交」而平台统计是 3 个。
         "window_commit_ids": list(details.get("window_commit_ids") or ()),
         "window_commit_files": details.get("window_commit_files") or {},
         # 未读游标的基准（P1b）：写侧算了、组装时漏抄 ⇒ 下游 `.get()` 恒为 None（同上面的坑）。
@@ -510,15 +571,14 @@ def build_weekly_payload(
         "delta_truncated": truncated,
     }
     payload["policy"]["truncated"] = truncated
+    if profile_fallback:
+        # 空串不写：没有回退时 payload 形状与加这个键之前逐字一致（读侧按 `.get` 取）。
+        payload["policy"]["decision"]["profile_fallback"] = profile_fallback
     if truncated:
         payload["policy"]["truncation_reason"] = "token_budget"
-    # **先有计划，再有清单**（P2-3）：清单里的分片数必须是**这次真的要拆几片**，
-    # 而不是配置里那个 `subagent_count`。原先它读配置，于是实测 run 53（单分析者）
-    # 的 `manifest.by_shard` 写着 `{S1:1, S2:1, S3:1}` —— 一份「3 个分片各拿一个文件」
-    # 的账，而这一轮根本没有人被分片。模型读到的 `change-manifest` 也照着这个数说分工。
-    #
-    # 顺序反过来还有一层：清单是**计划的下游**（`subagent.apply_manifest` 按它分配文件），
-    # 所以只能由计划决定它，不能由它反过来暗示计划。
+    # **先有计划，再有清单**（P2-3）：清单的分片数必须是**这次真的要拆几片**，而不是配置
+    # 里那个 `subagent_count`（实测 run 53 的账写着 3 片，而这一轮根本没有人被分片）；
+    # 反过来也不行 —— 清单是计划的下游（`subagent.apply_manifest` 按它分文件）。
     plan = attach_weekly_plan(payload)
     payload["manifest"] = build_manifest(
         delta_files, shard_count=shard_count_for_plan(plan)
@@ -553,7 +613,8 @@ def attach_weekly_plan(payload: dict) -> object:
     """
     project_id = (payload.get("group") or {}).get("project_id")
     project_config = get_project_analysis_config(project_id) if project_id else {}
-    loaded, failure = _load_project_skills(project_id) if project_id else (None, "没有项目号")
+    profile = payload.get("analysis_profile") or "all"
+    loaded, failure = _load_project_skills(project_id, profile) if project_id else (None, "没有项目号")
     dimensions = dimension_ids_of(getattr(loaded, "dimensions", ()) or ()) if loaded else ()
     source = "项目声明" if dimensions else f"平台出厂清单（读不到项目声明：{failure or '未知'}）"
     if not dimensions:
@@ -588,13 +649,13 @@ def attach_weekly_plan(payload: dict) -> object:
     return plan
 
 
-def _load_project_skills(project_id: int) -> Tuple[object, str]:
+def _load_project_skills(project_id: int, profile: Optional[str] = None) -> Tuple[object, str]:
     """加载平台 skill 与项目知识包。返回 `(loaded, 失败原因)`，成功时原因是空串。
-    **加载失败不阻断分析**，但原因要交出去：成因都在用户自己能改的地方，只写日志等于让他猜。"""
+    **加载失败不阻断分析**，但原因要交出去：成因都在用户自己能改的地方，只写日志等于让他猜；`profile` 用 payload 生效后的档（回退 all 时与项目配置不同档，P2-1）。"""
     project = db.session.get(Project, project_id)
     code = getattr(project, "code", None) if project else None
     try:
-        return load_skills(_REPO_ROOT, project_code=code), ""
+        return load_skills(_REPO_ROOT, project_code=code, profile=profile), ""
     except Exception as exc:  # noqa: BLE001
         log_print(f"⚠️ AI 分析：skill 加载失败（project={project_id}）: {exc}")
         return None, describe_load_error(exc, _REPO_ROOT)
@@ -947,6 +1008,9 @@ def _persist_outcome(
             )
         )
 
+    from services.ai.anomaly_disposition import persist_suppressed_previous  # WP15：落「曾被忽略」标记
+    persist_suppressed_previous(run.id, result.get("anomalies") or [])
+
     # **覆盖与缺口**（审计 P1-03）：挂进 payload，`report_markdown` 一个字节都不动。
     #
     # 落在这里（逐轮明细已 `add`、`coverage_ledger` 的查询会顺手 flush）而不是更早，
@@ -1146,12 +1210,6 @@ def _create_run(
     周版本那两份抽屉附着上去接着看，单提交那份说清「已经有一次在跑」。
     """
     summary = payload.get("summary") or {}
-    # 冻结这次的**目标快照**（AI-P0-02）：位置在**所有闸门之后**，所以冻下来的必定是
-    # 一份同步已经写完的清单。它同时是「这次分析的是哪一份」的账与下一次做差的基准。
-    # 出错只记日志（见 `baseline_blocks.seal_target_snapshot`），不阻断这次分析。
-    snapshot_account = seal_target_snapshot(payload)
-    if snapshot_account:
-        payload["snapshot"] = snapshot_account
     # 溯源在重试路径上会被用两次，所以先算一次（它要哈希源码文件，不便宜）。
     provenance = current_provenance(project_id)
     claim_key = _analysis_claim_key(
@@ -1188,6 +1246,9 @@ def _create_run(
         )
 
     for attempt in range(2):
+        # 每次 INSERT 前**重冻**目标快照（位置仍在所有闸门之后）：撞唯一索引的 rollback
+        # 会把上一次只 flush 的快照一起回滚，不重冻就会留下一条「账上有、库里没有」的 run。
+        seal_attempt_snapshot(payload)
         run = _build()
         db.session.add(run)
         try:
@@ -1330,7 +1391,7 @@ def _run_engine_and_persist(
         )
         return result
 
-    loaded, skill_failure = _load_project_skills(project_id)
+    loaded, skill_failure = _load_project_skills(project_id, payload.get("analysis_profile") or "all")
     if loaded is None:
         message = skill_failure or "分析协议（skill）加载失败，未发起分析。"
         result = failed_result(summary, message)
@@ -1380,6 +1441,8 @@ def _run_engine_and_persist(
             loaded=loaded, scope=change.scope,
             manifest=change.manifest,
             use_stored_batch_diff=(payload.get("mode") != "commit"),
+            allowed_paths=payload.get("allowed_paths"),
+            allowed_paths_by_repo=payload.get("allowed_paths_by_repo"),
             # 增量分析里每个变化文件的**比较基线**（上一轮看到的那条提交），键
             # `(latest_commit_id, file_path)`。有它时那个文件的 diff 是
             # 「上一轮 → 这一轮」两点对比，而不是整窗口的合并差异 —— 见
@@ -1411,7 +1474,8 @@ def _run_engine_and_persist(
         # `baseline_source.run_ignores_history`）。注意 `suppressed` **不跟着关** ——
         # 那是用户的分类账，不是模型的输入。
         "baseline_digest": _baseline_digest(
-            target_type, target_key, change, baseline_account=payload.get("baseline")
+            target_type, target_key, change, baseline_account=payload.get("baseline"),
+            scope_signature=scope_signature(payload),
         ),
         # 每跑完一轮把累计用量写进进程内的进度快照（services/ai/run_progress.py，界面
         # 一边跑一边轮询它）。**它是给界面看的一眼，不是账** —— 账在 `_persist_outcome`。
@@ -1532,10 +1596,11 @@ def _run_engine_and_persist(
         )
     )
 
+    scope = scope_signature(payload)
     result = result_payload(
         outcome,
         payload,
-        suppressed=_suppressed(target_type, target_key, change),
+        suppressed=_suppressed(target_type, target_key, change, scope_signature=scope),
         context_budget_note=budget_note,
         budget_plan=budget_plan_payload,
     )
@@ -1550,17 +1615,21 @@ def _run_engine_and_persist(
     # 对账的判据是**「有没有上一轮结论可比」**，不是「做差基准是不是快照」——
     # 两件事不一样，判据与理由写在 `baseline_source.has_previous_conclusion` 里。
     if has_previous_conclusion(baseline_account):
-        previous = _previous_run(target_type, target_key)
-        if previous is not None:
-            # 行形状**不许在这里手抄**（`previous_anomaly_rows` 的 docstring 写着那次实测：
-            # 手抄的那份少了 `claims`，12 条继承项的断言清单在真机上全是空的）。
-            previous_rows = previous_anomaly_rows(previous.id)
-            result = reconcile_incremental_result(
-                result,
-                previous_rows,
-                changed_paths=change.paths,
-                previous_run_id=previous.id,
-            )
+        previous = _previous_run(target_type, target_key, scope_signature=scope)
+        # 行形状**不许在这里手抄**（`previous_anomaly_rows` 的 docstring 写着那次实测：
+        # 手抄的那份少了 `claims`，12 条继承项的断言清单在真机上全是空的）。
+        previous_rows = (
+            previous_anomaly_rows(previous.id, scope_signature=scope)
+            if previous is not None
+            else []
+        )
+        result = reconcile_incremental_result(
+            result,
+            previous_rows,
+            changed_paths=change.paths, allowed_paths=payload.get("allowed_paths"),
+            previous_run_id=previous.id if previous is not None else None,
+            scope_mismatch=baseline_account.get("scope_mismatch") is True,
+        )
     _persist_outcome(
         run, outcome, result, pricing_version=_price_version_for(project_config)
     )
@@ -1837,6 +1906,10 @@ def run_weekly_analysis_background(
         return {"status": "skipped", "reason": "missing_api_key"}
 
     group_key = payload["group"]["key"]
+    # 「模式裁决」要读**用户点的模式**：随 run 的 request_payload 一起冻结，结论落库时
+    # 就按这份账写成 `response_payload.mode_decision`（`/latest` 与抽屉读它，见
+    # `result_payload.result_payload`）。不回头查 job 行：那句话必须在落库那一刻定下来。
+    payload["requested_mode"] = requested_mode or ""
     try:
         run = _create_run(
             project_id=project_id,
@@ -1883,6 +1956,11 @@ def run_weekly_analysis_background(
                     and run.scope == "full"
                 ):
                     runtime_reason = str(policy.get("reason") or "runtime_scope_upgrade")
+                    # `first_run` 是 2026-11-01 之前的历史字面值：新写入统一成
+                    # `no_conclusion_baseline`（读侧仍认旧值），否则 job 上会一直挂着
+                    # 一个「平台把我升成全量了」的原因 —— 而那条升级已经不再发生。
+                    if runtime_reason == job_service.UPGRADE_REASON_FIRST_RUN:
+                        runtime_reason = job_service.UPGRADE_REASON_NO_CONCLUSION_BASELINE
                 job_service.mark_running(
                     task_row.job_id,
                     run_id=run.id,

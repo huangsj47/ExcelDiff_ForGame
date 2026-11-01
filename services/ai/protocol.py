@@ -55,9 +55,11 @@ from services.ai.claims import (  # noqa: F401 —— Claim 在本模块重新�
     _as_str,
     parse_claims,
 )
+
 # 中间轮的字段收窄搬到 `mid_round` 了（`protocol.py` 顶着 2000 行的 ERROR 闸门）。
 # `MID_ROUND_FIELDS` 一并回导：它是「中间轮认哪四个字段」的唯一出处，读代码的人会按名字找它。
 from services.ai.mid_round import MID_ROUND_FIELDS, mid_round_drops  # noqa: F401
+from services.ai.reference_search import MIN_QUERY_WEIGHT, normalize_query, query_weight
 
 # 说给模型听的收敛 / 补齐提示搬到 `round_hints` 了（同一个 2000 行 ERROR 闸门的理由）。
 # 在这里回导：既有导入点（`prompt.py` 等）按 `protocol.build_*` 取名字，不必跟着改。
@@ -68,7 +70,6 @@ from services.ai.round_hints import (  # noqa: F401
     build_markdown_reemit_hint,
     build_token_budget_final_hint,
 )
-from services.ai.reference_search import MIN_QUERY_WEIGHT, normalize_query, query_weight
 from services.ai.scope import AnalysisScope, normalize_path
 from services.ai.skill_contract import (
     CONFIDENCES,
@@ -906,6 +907,7 @@ def sanitize_requests(
     scope: AnalysisScope,
     *,
     repo_paths: Optional[frozenset] = None,
+    allowed_paths: Optional[frozenset] = None,
 ) -> tuple[tuple[ContextRequest, ...], tuple[DroppedItem, ...]]:
     """工具白名单：把越权的上下文请求丢掉。
 
@@ -931,6 +933,13 @@ def sanitize_requests(
     「仓库里一个跟踪文件都没有」（几乎不可能），那会让每一条仓库范围请求都被判越权 ——
     所以调用方拿不到集合时必须传 `None`。
 
+    ## `allowed_paths`：比冻结范围更紧的一层（WP17）
+
+    `repo_paths` 问「仓库里有没有它」，`allowed_paths` 问「**这次准不准读它**」（写侧按
+    分析范围声明）。不在集合里的 `file_content`、以及前缀匹配不到集合的
+    `find_references` 都丢弃，理由写「不在本次分析范围」而不是「不在跟踪树里」——
+    后者在路径确实被跟踪时是一句假话。`None` = 不限制（旧行为逐字不变）。
+
     ## 另加一道：字段里带控制字符的请求按畸形丢掉
 
     请求字段（`commit` / `path` / `name` / `query` / `repository_id`）会被**原样拼进下一轮的提示词**：平台
@@ -942,6 +951,10 @@ def sanitize_requests(
     「出现即畸形」，理由用 `repr` 转义后记账 —— 不把原样的控制字符回显出去。
     """
     repo_set = None if repo_paths is None else frozenset(repo_paths)
+    # 写侧声明的可读范围；`None` = 不限制（旧行为）。空集合 = **一条都不许**。
+    from services.ai.frozen_repo import allowed_paths_matches_prefix, normalize_allowed_paths, out_of_scope_reason
+
+    allowed_set = normalize_allowed_paths(allowed_paths)
     allowed: list[ContextRequest] = []
     dropped: list[DroppedItem] = []
     seen: set[tuple[str, str, str, str, str]] = set()
@@ -1048,6 +1061,18 @@ def sanitize_requests(
                 )
                 continue
             prefix = normalize_path(request.path)
+            if allowed_set is not None and prefix and not allowed_paths_matches_prefix(
+                allowed_set, prefix
+            ):
+                dropped.append(
+                    DroppedItem(
+                        "request",
+                        index,
+                        out_of_scope_reason(allowed_set) + "（`path` 前缀也匹配不到它）",
+                        prefix,
+                    )
+                )
+                continue
             if prefix and not scope.prefix_allowed(prefix) and not _repo_matches_prefix(
                 repo_set, prefix
             ):
@@ -1079,7 +1104,13 @@ def sanitize_requests(
             # 背景版本），判据与顺序都在 `_content_request` 里。它必须排在下面那条
             # 「只有本批次一条路」的分支**之前** —— 那条会对 `file_content` 直接下结论。
             prepared, drop = _content_request(
-                request, index, request_type, scope, repo_set, resolve_repo_path
+                request,
+                index,
+                request_type,
+                scope,
+                repo_set,
+                resolve_repo_path,
+                allowed_set=allowed_set,
             )
             if prepared is None:
                 dropped.append(drop)
@@ -1280,6 +1311,8 @@ def _content_request(
     scope,
     repo_set,
     resolve_repo_path,
+    *,
+    allowed_set=None,
 ):
     """`file_content` 的判据：`(可执行的请求, None)` 或 `(None, 记账)`。
 
@@ -1309,8 +1342,24 @@ def _content_request(
     可照做的理由）。在这里先判一次，是为了让模型**这一轮**就拿到准确的原因；
     真正的读取还会在取数层再判一次（那里才是安全边界）。**扩大范围到「本项目全部仓库」
     只放宽了第 2 条的路径集合，这两条判据一步都没绕过。**
+
+    ## `allowed_paths` 排在两条路**之前**
+
+    它是写侧声明的**本次可读范围**；「能读本批次」与「这次准不准读」是两件事，后者更紧。
+    `allowed_set is None` 时什么都不做（旧行为逐字不变）。
     """
+    from services.ai.frozen_repo import out_of_scope_reason
+
     raw_path = str(request.path or "")
+    normalized_for_scope = normalize_path(raw_path)
+    if (
+        allowed_set is not None
+        and normalized_for_scope
+        and normalized_for_scope not in allowed_set
+    ):
+        return None, DroppedItem(
+            "request", index, out_of_scope_reason(allowed_set), raw_path
+        )
     resolved = scope.resolve_commit(request.commit)
     # 仓库维度**只在这一层做形状归一**（去空白）；「这个仓库是不是真的跟踪这条路径」是
     # 取数层的判据（那里才有 `paths_by_repository`）—— 这一层只回答「该不该执行」，

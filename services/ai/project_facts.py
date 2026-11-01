@@ -24,10 +24,11 @@
     复用它是刻意的：平台里已经有这个字段、已经有写入路径与界面，再造一套声明通道
     等于让管理员在两个地方填同一件事。在这之前它**只写不读**，管理员填的重点
     从未影响过任何判定。
-  * **路径模式** → 本模块的 `DEFAULT_CRITICAL_PATH_PATTERNS` 是平台默认（保留原清单，
-    只把「前导斜杠」这个 bug 修掉），项目可用知识包里的 `critical_path_patterns` 覆盖。
-    配表驱动项目的危险路径（`cfg/`、`code/**/cfg/` 之类）不在默认清单里，那是**项目
-    事实**，只能由项目自己声明 —— 平台替它猜一个，猜错的代价是每次分析都被升级成全量。
+  * **路径模式** → 本模块的 `DEFAULT_CRITICAL_PATH_PATTERNS` 是平台默认（含 Web 后端
+    口味的那一小撮，`config/`、`configs/` 已在 2026-11-01 移出，理由见下面那段注释），
+    项目可用知识包里的 `critical_path_patterns` 覆盖。配表驱动项目的危险路径
+    （`cfg/`、`code/**/cfg/` 之类）不在默认清单里，那是**项目事实**，只能由项目自己
+    声明 —— 平台替它猜一个，猜错的代价是每次分析都被建议整窗重跑（旧版是直接升全量）。
 * **生成物前缀** → **项目知识包**（`skills/projects/<slug>/references/project-facts.md`）。
   理由：它就是「项目事实」，而知识包在这个仓库里已经是项目事实的落点（见
   `skills/projects/g119/KNOWLEDGE.md`「这里放什么」）；并且它已经有平台读写入口
@@ -69,8 +70,9 @@ parse_frontmatter`，刻意不引入 PyYAML），正文写给人看。三个键�
   维度」，而那时模型报出的每一条异常都只能进「未归类」——一个自相矛盾的配置。
   写 `none` 会被告警并按「未声明」处理。
 
-没声明时**与今天逐字一致**：生效清单就是平台出厂的那九个（含中文名与顺序），提示词里
-也不会多出任何一段。
+没声明时按项目配置的 `analysis_profile` 选一份：`all` 就是平台出厂的那九个（含中文名
+与顺序，提示词里也不会多出任何一段），`tables`（默认）是 5 个配表维度。**声明了就以
+声明为准**（不与 profile 取交集，否则非配表项目的清单会变空集，见 `dimensions`）。
 
 ## 读不到时怎么办
 
@@ -101,10 +103,10 @@ from services.ai.skill_contract import (
     DimensionSpec,
     SkillContractError,
     build_dimensions,
+    dimension_specs_for_profile,
+    normalize_analysis_profile,
     parse_frontmatter,
 )
-from utils.logger import log_print
-
 from services.ai.skill_loader import (
     SkillLoadError,
     pack_belongs_to,
@@ -112,6 +114,7 @@ from services.ai.skill_loader import (
     resolve_projects_root,
     safe_join,
 )
+from utils.logger import log_print
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -130,18 +133,22 @@ KEY_DIMENSIONS = "dimensions"
 
 # 平台默认的关键路径模式。
 #
-# **每一条都写成「路径分量起点」**（`(?:^|/)config/`），不能写成 `/config/`：
+# **每一条都写成「路径分量起点」**（`(?:^|/)sql/`），不能写成 `/sql/`：
 # 后者要求前导斜杠，而 git 的 `Commit.path` 是**不带前导斜杠**的相对路径，于是
 # 「命中关键路径 → 升级为全量分析」这条通道在 git 仓库上一次都没触发过，且不报错。
-# 写成分量起点之后，`config/x` 与 `/config/x`（SVN 风格）都命中，而 `myconfig/x`、
-# `deconfig/x` **不**命中 —— 那两种路径跟 `config/` 这个目录没有关系。
+# 写成分量起点之后，`sql/x` 与 `/sql/x`（SVN 风格）都命中，而 `mysql/x`、
+# `nosql/x` **不**命中 —— 那两种路径跟 `sql/` 这个目录没有关系。
+#
+# **`config/` 与 `configs/` 不在默认清单里**（2026-11-01）。它们原来在这里，于是
+# 配表驱动项目**每次动一张表**都命中：实测线上 4/6 次「增量退回全量」都是
+# `critical_path_detected`，hits 原文就是 `config/10_role/角色等级表_CfgPlayerLevel.xlsx`。
+# 配表目录是这类项目的主体内容，把它当危险路径等于「永远建议整窗重跑」。
+# 项目若确实认为某个目录危险，仍可用知识包里的 `critical_path_patterns` 自己声明。
 #
 # 这份清单是**平台默认**，不是「通用真理」：它带着 Web 后端的口味（`auth`/`payment`/
 # `billing`），对配表驱动的项目基本用不上。真正的项目事实由项目自己声明 ——
 # 表名走 `Repository.important_tables`，路径模式走知识包里的 `critical_path_patterns`。
 DEFAULT_CRITICAL_PATH_PATTERNS = (
-    r"(?:^|/)config/",
-    r"(?:^|/)configs/",
     r"(?:^|/)sql/",
     r"(?:^|/)schema/",
     r"(?:^|/)migrations/",
@@ -151,6 +158,12 @@ DEFAULT_CRITICAL_PATH_PATTERNS = (
     r"(?:^|/)billing/",
     r"\.sql$",
 )
+
+# 配表仓库的**常规内容目录**：同一个 `config/` 对代码仓库可能意味着「发布配置」，
+# 对配表仓库只是它每天在改的那堆表。判定因此要带上仓库类型 —— 见
+# `is_routine_table_path`。
+TABLE_RESOURCE_TYPE = "table"
+_TABLE_ROUTINE_DIRS = ("config/", "configs/")
 
 # 「值写成这些」＝ 项目明确声明「没有」。
 _NONE_TOKENS = frozenset({"none", "无", "-", "null"})
@@ -285,6 +298,34 @@ def declared_important_tables(raw: object) -> tuple[str, ...]:
     )
 
 
+def is_table_repository(resource_type: Optional[str]) -> bool:
+    """这个仓库是不是配表仓库（`resource_type == "table"`，大小写与空白不敏感）。"""
+    return str(resource_type or "").strip().lower() == TABLE_RESOURCE_TYPE
+
+
+def is_routine_table_path(path: str, resource_type: Optional[str]) -> bool:
+    """配表仓库的 `config(s)/` 是**常规目录**，不能算关键路径。
+
+    为什么默认清单里已经没有 `config/` 了还要这一条：项目可以在知识包里自己声明
+    `critical_path_patterns`，而配表项目最容易写进去的就是 `config/` —— 一写，
+    「每次动表都建议整窗重跑」就又回来了。判据要回答的是「这个改动**对这个仓库**
+    危险吗」：对配表仓库，`config/` 下的改动就是它的日常工作，那之外（`code/`、
+    `sql/` …）才是异常信号。
+
+    **只作用于路径模式那一侧**：`Repository.important_tables` 是项目明确指名的重点表，
+    指名了就该命中 —— 见 `CriticalPathFacts.why` 的判定顺序。
+    """
+    if not is_table_repository(resource_type):
+        return False
+    normalized = normalize_path(str(path or "")).lower()
+    if not normalized:
+        return False
+    return any(
+        normalized == directory.rstrip("/") or normalized.startswith(directory)
+        for directory in _TABLE_ROUTINE_DIRS
+    )
+
+
 def important_table_hit(path: str, declared: Sequence[str]) -> str:
     """改动路径是否命中项目声明的「重点表」，命中则返回命中的那一条声明原文。
 
@@ -345,18 +386,26 @@ class CriticalPathFacts:
             return "路径模式=项目声明「没有」"
         return f"路径模式=平台默认 {len(self.patterns)} 条"
 
-    def why(self, path: str, declared_tables: Sequence[str] = ()) -> str:
+    def why(
+        self, path: str, declared_tables: Sequence[str] = (), *, resource_type: str = ""
+    ) -> str:
         """命中则返回「为什么算关键路径」，未命中返回空串。
 
         先看项目声明的**重点表**再看**路径模式**：前者是项目自己写下的确切事实，
         后者是平台（或项目）给的模式。两者语义不重合（一个是「表」，一个是「路径」），
         命中**任一**即算关键路径。
+
+        `resource_type` 是这条路径所属仓库的类型：配表仓库的 `config(s)/` 是常规目录，
+        **路径模式那一侧**对它不生效（见 `is_routine_table_path`）。不传时按「不知道
+        类型」处理 —— 与从前的行为一致，不因为缺一个参数而放宽判定。
         """
         table = important_table_hit(path, declared_tables)
         if table:
             return f"项目声明的重点表「{table}」"
         normalized = normalize_path(str(path or ""))
         if not normalized:
+            return ""
+        if is_routine_table_path(normalized, resource_type):
             return ""
         lower = normalized.lower()
         for pattern in self.patterns:
@@ -394,8 +443,10 @@ class CriticalPathScan:
     """一批改动文件的关键路径扫描结果。
 
     `reasons` 里每条是「路径（为什么算关键路径）」，最多留 `_MAX_REASONS` 条：
-    范围判定说「升级为全量」的时候必须说得出**是谁**把它升上来的，否则「关键路径」
-    这四个字只是个无法核对的结论。
+    范围判定据此给出「建议整窗重跑」的时候必须说得出**是谁**把它建议上来的，否则
+    「关键路径」这四个字只是个无法核对的结论。命中**不再改输入口径**（`scope` 仍是
+    增量，见 `services/ai/scope_sampling.decide_scope`），所以这一串只进日志、
+    `policy.decision.critical_hits` 与界面提示。
     """
 
     hit: bool
@@ -407,9 +458,14 @@ class CriticalPathScan:
         return self.facts.patterns_source
 
     def log_line(self) -> str:
-        """升级为全量时写进日志的那一行。"""
+        """命中关键路径时写进日志的那一行。
+
+        措辞是「建议整窗重跑」而不是「升级为全量」：2026-11-01 起命中只置
+        `suggested_full`，**输入口径仍是增量**（`scope` 不改、基线不清空）。日志还写
+        「升级为全量」的话，事后查库会以为输入真的换成了整窗。
+        """
         return (
-            f"⚠️ AI 分析：命中关键路径，范围判定升级为全量（{self.facts.detail}）："
+            f"⚠️ AI 分析：命中关键路径，建议整窗重跑（{self.facts.detail}，输入口径仍为增量）："
             + "；".join(self.reasons)
         )
 
@@ -417,14 +473,19 @@ class CriticalPathScan:
 def scan_critical_paths(
     entries: Iterable[tuple], facts: CriticalPathFacts = DEFAULT_CRITICAL_PATH_FACTS
 ) -> CriticalPathScan:
-    """扫一批 `(路径, 该仓库声明的重点表)`，返回命中情况。
+    """扫一批 `(路径, 该仓库声明的重点表[, 仓库类型])`，返回命中情况。
 
     `facts` 是路径模式那一侧（平台默认或项目声明）；表名那一侧逐条传进来，因为
-    **不同仓库可以声明不同的重点表**。
+    **不同仓库可以声明不同的重点表**。第三位是可选的仓库类型：配表仓库的 `config(s)/`
+    是常规目录、不算关键路径（见 `is_routine_table_path`）；不传时与从前一致。
     """
     reasons: list[str] = []
-    for path, declared_tables in entries:
-        reason = facts.why(path, declared_tables)
+    for entry in entries:
+        # 两元组是既有形状，三元组多带一位仓库类型。用星号解包而不是强制三元组：
+        # 老调用方（与既有测试）不改也不会静默失效。
+        path, declared_tables, *tail = entry
+        resource_type = str(tail[0] or "") if tail else ""
+        reason = facts.why(path, declared_tables, resource_type=resource_type)
         if reason and len(reasons) < _MAX_REASONS:
             reasons.append(f"{path}（{reason}）")
     return CriticalPathScan(hit=bool(reasons), reasons=tuple(reasons), facts=facts)
@@ -618,11 +679,73 @@ def dimensions_of(declarations: Declarations) -> DimensionsDeclaration:
     )
 
 
+def _analysis_profile(project_id: Optional[int]) -> Optional[str]:
+    """项目配置里的 `analysis_profile`；拿不到（没给 id / 读不出来）时返回 `None`。
+
+    **凭什么在这里读库**：`analysis_profile` 是项目配置（`ai_project_analysis_config`
+    的一行），而本模块其余入口只拿得到项目代号 —— 它不在知识包里，抄一份事实源就会
+    重演「声明写了 A、平台按 B」的老毛病（见模块开头）。
+    读不到不算错误：`None` 时调用方沿用改动前的行为（出厂 9 个维度），因为
+    `skill_revision`、知识包校验、离线脚本都会在**没有库会话**的情况下加载 skill。
+    """
+    if not project_id:
+        return None
+    try:
+        # 函数内导入：`project_config_source` 会拖进 endpoint/pricing 一整条链，而本模块
+        # 的其余入口（声明解析、生成物前缀）是纯文件读取，不该被这条链拖慢或成环。
+        from services.ai.project_config_source import get_project_analysis_config
+
+        return str(get_project_analysis_config(int(project_id)).get("analysis_profile") or "")
+    except Exception:  # noqa: BLE001 —— 读配置失败不该让一次分析起不来
+        return None
+
+
 def dimensions(
-    project_code: Optional[str], *, repo_root: Path = _REPO_ROOT
+    project_code: Optional[str],
+    *,
+    repo_root: Path = _REPO_ROOT,
+    project_id: Optional[int] = None,
+    profile: Optional[str] = None,
 ) -> DimensionsDeclaration:
-    """读一个项目声明的检查维度清单。取不到就用平台默认（出厂那九个）。"""
-    return dimensions_of(read_declarations(project_code, repo_root=repo_root))
+    """本次分析生效的检查维度清单：**声明优先**，没声明才看 `analysis_profile`。
+
+    ## 为什么声明优先、且不与 profile 取交集
+
+    知识包里的 `dimensions:` 是项目的**显式意图**（性能、协议、资源引用这类）。按
+    profile 与它取交集会把非配表项目的清单交成空集，而协议硬要求 `final.dimensions`
+    非空 —— 空清单的后果是每条异常都只能进「未归类」，读报告的人看不出「维度被筛没了」。
+
+    ## 为什么有 `profile` 这个显式参数（P2-1）
+
+    项目配置里的档位与**本次 payload 生效的**档位不是一回事：周版本在没有配表仓库时
+    会回退 `all`，单提交分析也是 `all`（代码分析不该只过 5 个配表维度）。调用方手上
+    已经有生效值，传进来就不必让它再和配置分叉。
+
+    ## `profile=None` 且没有 `project_id` 时保持旧行为
+
+    只给项目代号时**不知道 profile**，返回出厂那 9 个维度 —— 与改动前逐字一致。
+    生产路径（`skill_loader.load_skills`）会带上项目 id，于是拿得到配置里的档位；
+    `skill_revision`、知识包校验、脚本这类没有库会话的入口照旧能回答「声明了什么」。
+    """
+    declaration = dimensions_of(read_declarations(project_code, repo_root=repo_root))
+    if declaration.source == SOURCE_PROJECT:
+        return declaration
+    if profile is None:
+        profile = _analysis_profile(project_id)
+    if profile is None:
+        return declaration
+    specs = dimension_specs_for_profile(profile)
+    if specs == declaration.dimensions:
+        # `all`（或声明坏掉后回落、恰好等于默认那一份）不额外改写 detail，行为逐字不变。
+        return declaration
+    return replace(
+        declaration,
+        dimensions=specs,
+        detail=(
+            f"{declaration.detail}；按项目分析范围「{normalize_analysis_profile(profile)}」"
+            f"生效 {len(specs)} 个维度"
+        ),
+    )
 
 
 def generated_prefixes(

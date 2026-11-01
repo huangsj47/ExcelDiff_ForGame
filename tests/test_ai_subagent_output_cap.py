@@ -133,3 +133,20 @@ def test_the_run_cap_still_wins_at_the_aggregation_step():
     """分片额度是**额度**不是承诺：项目把全次上限调大时，分片额度仍然管着自己那一段。"""
     limits = _engine_limits({"max_anomalies_per_subagent": 4, "max_anomalies_per_run": 50})
     assert limits.max_anomalies_per_subagent == 4
+
+
+def test_the_engine_caps_each_members_output_by_default():
+    """WP17：**单次输出上限**的默认值也跟着 `EngineLimits` 进到家族计划里。
+
+    这一条与「每片报几条」是两件事：那个管内容条数，这个管一次调用最多能写多长的正文。
+    两者都进任务/调用参数，也都从同一份 `EngineLimits` 出发 —— 出厂默认被封顶时，
+    家族路径（`subagent` 读 `plan.limits`）不能还是「不传 `max_tokens`」。
+    """
+    from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS
+
+    limits = _engine_limits({})
+    assert limits.max_output_tokens == DEFAULT_OUTPUT_TOKENS
+
+    plan = plan_family(mode="weekly", enabled=True, count=3, limits=limits)
+    assert plan is not None
+    assert plan.limits.max_output_tokens == DEFAULT_OUTPUT_TOKENS

@@ -281,6 +281,72 @@ def test_an_invalid_update_writes_nothing(client, project_id, monkeypatch):
     assert config["api_model"] == "good-model", "失败的那次不该动已存的配置"
 
 
+# ==========================================================================
+# 分析 profile（契约 §1.7）
+# ==========================================================================
+#
+# 本轮**不做配置面板 UI**，所以这一栏只能通过 API（或直接改配置 JSON）设置。
+# 但「不设置」的那条最常见路径必须已经收敛到只分析配表 —— 否则这一轮的改造等于没做，
+# 而恰恰是「没人会去设它」的项目最需要那个默认值。
+
+
+def test_the_profile_defaults_to_tables_and_is_served_with_the_schema(
+    client, project_id, monkeypatch
+):
+    """没配置过的项目读出来是 `tables`，而且它作为可配置字段出现在 schema 里。
+
+    读 `field_schema` 而不只是读值：schema 是前端渲染选项的事实源，「能存」与
+    「界面上认得出这一栏」是两件事，而这一轮只保证前者也必须先保证后者。
+    """
+    _allow(monkeypatch)
+    body = client.get(f"/ai-analysis/projects/{project_id}/config").get_json()
+
+    assert body["analysis_profile"] == "tables"
+    assert body["field_schema"]["analysis_profile"]["label"] == "分析范围"
+    assert body["field_schema"]["analysis_profile"]["choices"] == ["tables", "all"]
+    assert body["field_schema"]["analysis_profile"]["default"] == "tables"
+
+
+def test_saving_the_profile_to_all_survives_a_reread(client, project_id, monkeypatch):
+    """保存 `all` 之后读回来还是 `all`。
+
+    这是反向自检：`resolved()` 对 NULL 兜底 `tables` 是对的，但**存进去的值不能被
+    默认值吃掉** —— 否则 `all` 这个档就永远打不开，而且保存接口还会回 200。
+    """
+    _allow(monkeypatch)
+    resp = client.post(
+        f"/ai-analysis/projects/{project_id}/config", json={"analysis_profile": "all"}
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)[:300]
+
+    body = client.get(f"/ai-analysis/projects/{project_id}/config").get_json()
+    assert body["analysis_profile"] == "all"
+
+
+def test_an_unknown_profile_is_a_field_level_error(client, project_id, monkeypatch):
+    """值域外的 profile 必须 400 + 字段级错误，且**不写库**。
+
+    静默忽略会制造「存了但没生效」：用户把 `code_only` 发上来、保存成功，
+    而分析照旧跑配表那一档 —— 他找不到任何地方说明为什么。
+    """
+    _allow(monkeypatch)
+    resp = client.post(
+        f"/ai-analysis/projects/{project_id}/config", json={"analysis_profile": "code-only"}
+    )
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["success"] is False
+    errors = {item["field"]: item for item in body["errors"]}
+    assert "analysis_profile" in errors
+    assert errors["analysis_profile"]["label"] == "分析范围"
+    assert "tables" in errors["analysis_profile"]["message"]
+
+    with flask_app.app_context():
+        config = ai_service.get_project_analysis_config(project_id)
+    assert config["analysis_profile"] == "tables", "校验失败的那次不该动已存的配置"
+
+
 def _logged_in_client(username: str = "cfg-actor"):
     """一个**带会话**的 test_client。
 

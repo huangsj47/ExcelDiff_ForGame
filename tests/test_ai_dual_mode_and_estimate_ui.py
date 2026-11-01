@@ -143,7 +143,10 @@ def test_the_two_weekly_drawers_carry_a_byte_identical_p0_03_block():
         script = _script(rel)
         blocks.append(
             _const_object_source(script, "WEEKLY_AI_UPGRADE_REASONS")
+            + "\n" + _function_source(script, "weeklyAiUpgradeReasonText")
+            + "\n" + _function_source(script, "weeklyAiModeDecision")
             + "\n" + _function_source(script, "weeklyAiChooseMode")
+            + "\n" + _function_source(script, "weeklyAiUpgradeChoiceDialog")
             + "\n" + _function_source(script, "weeklyAiEstimateLines")
             + "\n" + _function_source(script, "weeklyAiSplitEstimateLines")
             + "\n" + _function_source(script, "weeklyAiUpgradeNotice")
@@ -476,6 +479,8 @@ def _probe_source(rel: str) -> str:
     script = _script(rel)
     extracted = "\n".join([
         _const_object_source(script, "WEEKLY_AI_UPGRADE_REASONS"),
+        _function_source(script, "weeklyAiUpgradeReasonText"),
+        _function_source(script, "weeklyAiModeDecision"),
         _function_source(script, "weeklyAiUpgradeNotice"),
         _function_source(script, "weeklyAiFormatInt"),
         # 预算按 M 读的那个小函数（2026-09-26）：`weeklyAiEstimateLines` 现在调它，
@@ -487,11 +492,14 @@ def _probe_source(rel: str) -> str:
         _function_source(script, "weeklyAiDurationText"),
         _function_source(script, "weeklyAiBaselineText"),
         _function_source(script, "weeklyAiMoneyText"),
+        _function_source(script, "weeklyAiMoneyRangeText"),
+        _function_source(script, "weeklyAiCostCompare"),
         _function_source(script, "weeklyAiEstimateLines"),
         _function_source(script, "weeklyAiSplitEstimateLines"),
         _function_source(script, "weeklyAiEstimateNote"),
         _function_source(script, "weeklyAiNoteMismatchAccepted"),
         _function_source(script, "weeklyAiComparabilityLine"),
+        _function_source(script, "weeklyAiUpgradeChoiceDialog"),
         _function_source(script, "weeklyAiChooseMode"),
         "var weeklyAiMismatchAccepted = false;",
         "var weeklyAiUpgradeNoticeText = '';",

@@ -39,7 +39,7 @@ from typing import Any, Callable, Mapping, MutableMapping, Protocol, Sequence
 
 from services.ai import round_events, trace_evidence
 from services.ai.baseline import DEFAULT_BASELINE_CHARS, digest_fingerprints
-from services.ai.auto_sizing import conservative_tokens_for
+from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS
 from services.ai.budget import (
     DEFAULT_MAX_ITEMS,
     DEFAULT_TOTAL_CHARS,
@@ -244,14 +244,14 @@ class EngineLimits:
     # 不解除循环上界。判据与理由见 `protocol.repair_dsml_tool_calls_payload`。
     max_channel_corrections: int = 1
     temperature: float = 0.0
-    # **单次输出上限**（token）。`None` = 不传这个字段，用端点的默认值（**默认行为逐字节
-    # 不变**，见 `llm_client._request_body`）。
+    # **单次输出上限**（token）。默认 `DEFAULT_OUTPUT_TOKENS`（8192），于是请求体一定带
+    # `max_tokens`；显式传 `None` = 不传这个字段、用端点默认值（旧行为，作为逃生口保留）。
     #
-    # 它管的是「一次模型调用最多能写多长」，与分析逻辑无关：配了它，撞上上限与否就由项目
+    # 它管的是「一次模型调用最多能写多长」，与分析逻辑无关：封顶之后，撞不撞上限由项目
     # 说了算，而不是由网关那个看不见的默认值说了算。**它不掐任何一轮的内容** ——
     # 谁该看多少上下文、该报几条结论，与这个数字无关（`EngineLimits` 里其余那些才管
     # 那些事）。撞上上限时的处理见 `run_analysis` 里 `finish_reason == "length"` 那一支。
-    max_output_tokens: int | None = None
+    max_output_tokens: int | None = DEFAULT_OUTPUT_TOKENS
     tool_limits: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_TOOL_LIMITS))
 
     @classmethod

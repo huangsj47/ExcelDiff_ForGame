@@ -185,7 +185,7 @@ function dump(node, depth) {
     var bits = [];
     if (node.className) bits.push('class="' + node.className + '"');
     if (node.id) bits.push('id="' + node.id + '"');
-    ['data-anomaly-id', 'data-action', 'role', 'title'].forEach(function (key) {
+    ['data-anomaly-id', 'data-action', 'data-category-group', 'role', 'title'].forEach(function (key) {
         var value = node.getAttribute(key);
         if (value !== null) bits.push(key + '="' + value + '"');
     });
@@ -244,6 +244,11 @@ function snap() {
         // 只看整棵树的文本是分不出来的 —— 码值可能藏在 `title` 里。
         severity: collect('ai-anomaly-item-severity'),
         confidence: collect('ai-anomaly-item-confidence'),
+        // 维度那一格印的是中文名（`category_label`）还是英文 id，只看整棵树的文本分不出来
+        // —— 码值按口径只留在 `title` 里，所以两样都收。
+        category: collect('ai-anomaly-item-category'),
+        // 分组标题（配表 / 代码·流程 / 未归类）与它带的机器可读组键。
+        groups: collect('ai-anomaly-group-title'),
         when: collect('ai-anomaly-item-at'),
         state: api.state(),
         calls: calls.slice()
@@ -411,6 +416,10 @@ def _anomalies() -> list:
             "id": 13, "run_id": 2, "fingerprint": "a1b2c3",
             "title": "【道具】ID 被删除但生成文件仍在",
             "category": "config_id",
+            # 服务端 `anomaly.to_dict()` 一并给出的三样（2026-11-01）：中文名 + 分组键 +
+            # 分组标题。界面只许照印，不许自己按 category 猜（见模块头口径 1/2）。
+            "category_label": "配置 ID",
+            "category_group": "table", "category_group_label": "配表",
             "severity": "critical", "severity_label": "严重",
             "confidence": "very_high", "confidence_label": "很高",
             "evidence": ["config/道具表.xlsx 删除了 ID 1001", "build/lua/CfgItem.lua 里 1001 还在"],
@@ -445,6 +454,8 @@ def _anomalies() -> list:
             "id": 14, "run_id": 2, "fingerprint": "d4e5f6",
             "title": "周版本合并后 CfgSkill.lua 少了一个技能",
             "category": "config_id",
+            "category_label": "配置 ID",
+            "category_group": "table", "category_group_label": "配表",
             "severity": "high", "severity_label": "高",
             "confidence": "high", "confidence_label": "高",
             "evidence": ["build/lua/CfgSkill.lua 里 3002 不见了"],
@@ -459,6 +470,10 @@ def _anomalies() -> list:
             "id": 15, "run_id": 2, "fingerprint": "778899aa",
             "title": "提交信息与改动不符",
             "category": "commit_msg",
+            # 平台不认识的 category：`category_label` **原样回落**（不编一个中文名），
+            # 分组由服务端判成「未归类」—— 面板据此把它单独列成一段，而不是与配表结论混排。
+            "category_label": "commit_msg",
+            "category_group": "unclassified", "category_group_label": "未归类",
             "severity": "high", "severity_label": "高",
             "confidence": "high", "confidence_label": "高",
             "evidence": ["提交说「修数值」，实际改的是技能表"],
@@ -535,8 +550,15 @@ def _cases() -> list:
 
         # 2. 服务端给的次序**原样渲染**（喂进去的次序故意不是 severity 降序）。
         #    界面若「顺手再排一次」，这里就会红。
+        #    2026-11-01 起清单按服务端分组切段：这一条要验的是**段内次序**，所以喂进来的
+        #    三条都归同一组（配表）—— 跨组次序由 `test_the_list_groups_by_the_server_group`
+        #    单独钉。
         {"name": "次序照服务端的走",
-         "table": {ANOM_URL: _read_body(anomalies=[_by_id(15), _by_id(13), _by_id(14)])},
+         "table": {ANOM_URL: _read_body(anomalies=[
+             dict(_by_id(15), category="config_value", category_label="配置取值",
+                  category_group="table", category_group_label="配表"),
+             _by_id(13), _by_id(14),
+         ])},
          "ops": ["load:2"]},
 
         # 3. 同一次运行重画（历史面板一次选中会重画两次）：不再取第二遍，
@@ -659,6 +681,16 @@ def _cases() -> list:
              "disposition_at_display": "2026-09-20 10:03:04",
              "disposition_note": "误报，已核对",
          }])},
+         "ops": ["load:2"]},
+
+        # 15. **范围外**（契约 1.8 / WP16）：`out_of_scope=True` 的条目单列一组，
+        #     排在所有 `category_group` 分组之后 —— 它们没有参与风险等级与计数，
+        #     混进「这次要处置的问题」里会让人以为也要处理。
+        {"name": "范围外单列一组",
+         "table": {ANOM_URL: _read_body(anomalies=[
+             _by_id(13),
+             dict(_by_id(15), out_of_scope=True),
+         ])},
          "ops": ["load:2"]},
     ]
 
@@ -961,6 +993,85 @@ def test_the_list_follows_the_order_the_server_gave(run):
     assert first < second < third, "渲染次序与响应里的次序不一致（有人又排了一遍？）"
 
 
+def test_the_category_column_prints_the_server_label_not_the_code(run):
+    """维度那一格印的是**服务端算好的中文名**（`category_label`），不是英文 id。
+
+    以前面板直接印 `row.category`：`config_value` 与 `code_logic` 长得一样，非配表内容
+    无法一眼滤掉（方案 §4.10 第 3 条）。码值必须留在 `title` 里 —— 读的人要拿它对上
+    报告正文里模型写的 category 原文。
+    """
+    last = _last(run, "载入清单")
+
+    assert [item["text"] for item in last["category"]] == ["配置 ID", "配置 ID", "commit_msg"], (
+        "认不出的 category 要原样回落 —— 界面不编中文名，也不许不印"
+    )
+    assert [item["title"] for item in last["category"]] == [
+        "config_id", "config_id", "commit_msg"
+    ], "码值要留在 title 里（正文那一格已经是中文名了）"
+
+
+def test_the_list_groups_by_the_server_group_with_headers(run):
+    """清单按服务端给的 `category_group` 分成「配表 / 代码·流程 / 未归类」三段。
+
+    分组不是重排：**段内**次序仍然照服务端的来（见上面那条用例）。这里钉的是
+    「有分组标题、组的先后固定、组键来自服务端」—— 界面自己按 category 猜的话，
+    加一个维度就会把配表结论归进「代码·流程」，而两种分组看起来都正常。
+    """
+    last = _last(run, "载入清单")
+    body = last["panel"]
+
+    assert [item["text"] for item in last["groups"]] == ["配表（2 条）", "未归类（1 条）"], (
+        "分组标题/条数 不对 —— 组标题与分组本身都必须来自服务端"
+    )
+    # 组键也印在标题上（机器可读的那一份），将来的筛选/折叠按它做。
+    assert 'data-category-group="table"' in body
+    assert 'data-category-group="unclassified"' in body
+
+    # 未归类那一条排在配表两条**之后**（配表 → 代码·流程 → 未归类 的版式次序）。
+    assert body.index("配表（2 条）") < body.index('data-anomaly-id="13"')
+    assert body.index('data-anomaly-id="14"') < body.index("未归类（1 条）")
+    assert body.index("未归类（1 条）") < body.index('data-anomaly-id="15"')
+
+
+def test_a_list_without_server_groups_stays_flat(run):
+    """前后端版本没对齐（没有 `category_group`）时**退回平铺**，不替服务端猜组。
+
+    只有一部分行带分组也不行：给缺字段的那几条编一个组，等于界面断言「它们属于未归类」，
+    而真相是「这一版后端没给」。旧的平铺是那时唯一不会说错的摆法。
+    """
+    last = _last(run, "认不出的码值照印")
+
+    assert last["groups"] == [], "没有服务端分组却画了分组标题（界面自己猜了组）"
+    # 那一行连 `category_label` 都没有：维度那一格什么都不印（不回落到码值）。
+    assert last["category"] == [], last["category"]
+
+
+def test_out_of_scope_rows_get_their_own_group_after_the_known_ones(run):
+    """`out_of_scope=True` 的条目单列一组「范围外」，**排在已知分组之后**。
+
+    判据只认服务端那个布尔（`result_payload._out_of_scope` 按 `allowed_paths` 判好的）：
+    界面自己按 category / 文件路径猜，要么把一条越界结论当成这次要处置的问题，要么反过来
+    把一条正常结论藏进「范围外」—— 而两种错看起来都正常。
+
+    分组标题由界面给（服务端没有这一组），所以这里同时钉住「组键是 `out_of_scope`」——
+    将来做筛选 / 折叠时按它取。**字段缺失时退回 `category_group` 的旧分组**，
+    见 `test_the_list_groups_by_the_server_group`（那三条里没有这个字段）。
+    """
+    last = _last(run, "范围外单列一组")
+
+    assert [item["text"] for item in last["groups"]] == ["配表（1 条）", "范围外（1 条）"], (
+        "范围外的条目没有单列一组（或者被塞进了「未归类」）"
+    )
+    body = last["panel"]
+    assert 'data-category-group="out_of_scope"' in body
+    # **排在最后**：`category_group` 那几组先走，范围外跟在它们后面（见 `GROUP_ORDER`）。
+    assert body.index("配表（1 条）") < body.index("范围外（1 条）")
+    assert body.index('data-anomaly-id="13"') < body.index("范围外（1 条）")
+    # 那条越界结论**仍然画出来了**（报告要能看见模型报过什么），只是归到了新组。
+    assert "提交信息与改动不符" in body
+    assert body.index("范围外（1 条）") < body.index('data-anomaly-id="15"')
+
+
 def test_the_counts_and_the_selection_start_from_the_response(run):
     last = _last(run, "载入清单")
     assert "共 3 条 · 待确认 2 · 已确认 0 · 已忽略 1" in last["panel"]
@@ -1168,3 +1279,51 @@ def test_every_drawer_loads_the_disposition_module():
         assert source.index("ai_anomaly_disposition.js") > source.index(
             "js/ai_report_history.js"
         ), f"{name} 里处置模块引在了历史模块前面"
+
+
+# --------------------------------------------------------------------------
+#  覆盖段前置（WP5 同一轮改的另一个前端模块）
+# --------------------------------------------------------------------------
+# 这条为什么借住在这个文件里：WP5 只拥有这一个前端测试文件，而 `ai_context_notice.js`
+# 是同一轮改的另一个前端模块（覆盖段前置到正文之前）。单独新建一个测试文件会越过
+# 「文件所有权」，所以放在这里，用与上面同一套 node 真跑的做法。
+NOTICE_SCRIPT = PROJECT_ROOT / "static" / "js" / "ai_context_notice.js"
+
+
+def test_the_coverage_section_comes_before_the_report_body():
+    """「这次看了多少」必须**在正文之前**读，与导出那份 `.md` 一致。
+
+    缺陷形态（方案 §4.10 第 1 条）：真机上一份 4000 字的报告，覆盖段拼在末尾，读者要
+    读完才看到「版本 996 → 输入 120 → 取证 60」，第一眼只剩元信息里「范围：全量」。
+    而 `withContextNotice` 自己的注释当时已经写着「覆盖段在前」——注释与实现相反。
+    """
+    if not shutil.which("node"):
+        pytest.skip("环境里没有 Node，跳过真实运行的拼接断言")
+    payload = {
+        "coverage_notice": "**本次覆盖与缺口（平台补充）**\n\n- 版本 4 个文件 → 输入 2 → 取证 1",
+        "status": "succeeded",
+        "degradation": "", "degradation_label": "", "context": {},
+    }
+    body = "## 变更理解\n\n道具表删了一行。"
+    driver = f"""
+const fs = require('fs'); const vm = require('vm');
+const sandbox = {{window: {{}}}}; sandbox.window = sandbox; vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync({json.dumps(str(NOTICE_SCRIPT))}, 'utf8'), sandbox);
+const payload = {json.dumps(payload, ensure_ascii=False)};
+const body = {json.dumps(body, ensure_ascii=False)};
+process.stdout.write(JSON.stringify(sandbox.AiContextNotice.withContextNotice(body, payload)));
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "notice.js"
+        path.write_text(driver, encoding="utf-8")
+        proc = subprocess.run(["node", str(path)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"Node 执行失败：\n{proc.stdout}\n{proc.stderr}"
+    composed = json.loads(proc.stdout)
+
+    coverage_at = composed.index("本次覆盖与缺口")
+    body_at = composed.index("## 变更理解")
+    assert coverage_at < body_at, "覆盖段又拼到正文后面了（与导出的次序相反）"
+    assert body in composed, "前置覆盖段把正文改写了"
+    assert composed.endswith(body), "正文必须在覆盖段之后原样出现"
+    # 只出现一次：前置之后原来的追加位置不能再留一份。
+    assert composed.count("本次覆盖与缺口") == 1

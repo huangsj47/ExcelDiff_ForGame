@@ -31,6 +31,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from models import WeeklyVersionConfig, db
 from models.ai_analysis import AiProjectAnalysisConfig, AiProjectApiKey
 from models.ai_analysis.project_config import (
+    DEFAULT_ANALYSIS_PROFILE,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     REQUEST_TIMEOUT_RANGE,
 )
@@ -98,6 +99,12 @@ def get_project_analysis_config(project_id: int) -> dict:
             "updated_by": row.updated_by,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
+
+    # 两条读取路径的**键集合必须一致**：没有配置行时这一栏来自 `FIELD_DEFAULTS`，
+    # 有配置行时来自 `resolved()`。少一边的后果是「有的项目读得到、有的读不到」——
+    # 而 `analysis_profile` 的消费方（payload 组装、维度清单选择）拿到的是缺键，
+    # 那要么 KeyError，要么被 `dict.get` 悄悄当成 `all`，两种都不是想要的。
+    values.setdefault("analysis_profile", DEFAULT_ANALYSIS_PROFILE)
 
     key_state = get_project_api_key_status(project_id)
     return {

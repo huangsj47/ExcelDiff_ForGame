@@ -28,8 +28,9 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from models import db
 from models.ai_analysis import (
@@ -44,6 +45,12 @@ from models.ai_analysis import (
     now_utc_naive,
 )
 from services.ai.analysis_budget import as_utc
+from services.ai.baseline import FORCE_FULL_REBUILD_REASON
+from services.ai.job_service import (
+    UPGRADE_REASON_FIRST_RUN,
+    UPGRADE_REASON_NO_CONCLUSION_BASELINE,
+)
+from services.ai.usage import aggregate_runs
 from utils.logger import log_print
 from utils.timezone_utils import (
     beijing_wallclock_to_utc_naive,
@@ -314,3 +321,218 @@ def statistics_public(*, can_manage: bool, excluded_runs: int = 0) -> dict[str, 
         payload["in_flight_runs"] = in_flight_runs()
         payload["total_runs"] = total_runs()
     return payload
+
+
+# ---------------------------------------------------------------------------
+#  成本指标（契约 WP9）：三个**只读纯函数**
+# ---------------------------------------------------------------------------
+#
+# 它们不查库、不读时钟、不碰会话：输入是一批 `AiAnalysisRun` / `AiAnalysisJob` 行（或
+# 任何带同样属性的对象），输出是普通字典。与 `services/ai/usage.py` 的估算一节同一条
+# 纪律 —— 调用方拿到的必须是「已经取好的数」，而不是一条会自己查库的链路。
+#
+# 本轮**不新增页面、不改路由**（契约 WP9 原文），所以这三个指标今天只有测试在读；它们
+# 存在的意义是把「花了多少冤枉钱」变成可测量的数：同一份快照被重复跑了几次、多少运行
+# 仍在整窗读、升级原因分布在哪一档。
+
+
+def _payload_of(run: Any) -> dict:
+    """`request_payload` → dict（JSON 文本 / 已解析对象 / 坏数据一律不抛）。"""
+    raw = getattr(run, "request_payload", None)
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
+
+
+def _snapshot_digest_of(run: Any) -> str:
+    """这次运行的**做差快照指纹**；读不出来返回空串（未知不当成 0）。
+
+    优先目标快照 `request_payload.snapshot.content_digest`（2026-11 起每次运行都冻一份）；
+    老运行没有那一块，退回 `baseline.content_digest`（那一次是拿哪份快照做差的）。
+    """
+    payload = _payload_of(run)
+    for key in ("snapshot", "baseline"):
+        section = payload.get(key)
+        if isinstance(section, Mapping):
+            digest = str(section.get("content_digest") or "").strip()
+            if digest:
+                return digest
+    return ""
+
+
+def _scope_of(item: Any) -> str:
+    """输入口径：run 行读 `scope`，job 行读 `effective_mode`（两者都缺时看 payload）。"""
+    for attr in ("scope", "effective_mode"):
+        value = str(getattr(item, attr, "") or "").strip().lower()
+        if value:
+            return value
+    return str(_payload_of(item).get("scope") or "").strip().lower()
+
+
+def _canonical_upgrade_reason(code: str) -> str:
+    """历史值 `first_run` → `no_conclusion_baseline`；其余原样（读侧兼容，契约 1.5）。"""
+    return (
+        UPGRADE_REASON_NO_CONCLUSION_BASELINE if code == UPGRADE_REASON_FIRST_RUN else code
+    )
+
+
+def _upgrade_reason_of(item: Any) -> str:
+    """这条记录能读到的**升级原因**；读不出来返回空串。
+
+    job 行有 `upgrade_reason` 列，直接用（真值）。run 行没有这一列，只能按 payload 还原：
+    只有**整窗**运行才谈得上「为什么整窗」，且 `baseline.reason == force_full_rebuild`
+    优先于 `policy.reason`（强制重建时后者仍写着首跑口径）。
+
+    **已知边界**：run 行分不出「用户显式要全量」与「真首跑」（`requested_mode` 只在 job
+    上）。所以统计升级原因时应尽量喂 job 行；喂 run 行得到的是「为什么整窗」的近似分布。
+    """
+    raw = str(getattr(item, "upgrade_reason", "") or "").strip().lower()
+    if raw:
+        return _canonical_upgrade_reason(raw)
+    if _scope_of(item) != "full":
+        return ""
+    payload = _payload_of(item)
+    baseline = payload.get("baseline")
+    if isinstance(baseline, Mapping):
+        base_reason = str(baseline.get("reason") or "").strip().lower()
+        if base_reason == FORCE_FULL_REBUILD_REASON:
+            return base_reason
+    policy = payload.get("policy")
+    if isinstance(policy, Mapping):
+        return _canonical_upgrade_reason(str(policy.get("reason") or "").strip().lower())
+    return ""
+
+
+def _group_key_of(run: Any) -> str:
+    """这条运行属于哪个周版本分组；读不出来返回空串。"""
+    group = _payload_of(run).get("group")
+    if not isinstance(group, Mapping):
+        return ""
+    return str(group.get("key") or "").strip()
+
+
+def duplicate_snapshot_runs(runs: Sequence[Any], *, price_table: Any = None) -> dict[str, Any]:
+    """同一份快照被跑了多次的那些组 —— 「同一快照重复付费」的度量。
+
+    分组键是 payload 里的快照指纹（见 `_snapshot_digest_of`）。每组里**第一条**是必要的
+    （它产出了结论），第二条起是同一份输入的重复付费：这就是 `wasted_*` 的口径。
+
+    `price_table` 不传时只给 token、**不给金额**（`cost` / `wasted_cost` 是 `None`）：
+    没有单价表就没有金额可算，写 0 会把「算不出」说成「没花钱」（与 `usage.aggregate_runs`
+    同一条纪律）。没有任何重复时 `wasted_tokens` 是**真的 0**、`wasted_runs` 也是 0。
+
+    返回的每个组都带 `group_keys`：`content_digest` 只哈希文件内容、不含分组键，带上它
+    才能一眼看出「重复的是不是同一个周版本」。
+    """
+    buckets: dict[str, list] = {}
+    missing_digest = 0
+    for run in runs:
+        digest = _snapshot_digest_of(run)
+        if not digest:
+            missing_digest += 1
+            continue
+        buckets.setdefault(digest, []).append(run)
+
+    records: list[dict[str, Any]] = []
+    wasted_runs: list = []
+    for digest, members in buckets.items():
+        if len(members) < 2:
+            continue
+        wasted = members[1:]
+        wasted_runs.extend(wasted)
+        total = aggregate_runs(members, price_table=price_table)
+        wasted_total = aggregate_runs(wasted, price_table=price_table)
+        records.append(
+            {
+                "content_digest": digest,
+                "group_keys": sorted({key for key in map(_group_key_of, members) if key}),
+                "run_ids": [getattr(run, "id", None) for run in members],
+                "runs": len(members),
+                "duplicate_runs": len(wasted),
+                "tokens": total["tokens"]["total"],
+                "wasted_tokens": wasted_total["tokens"]["total"],
+                "cost": total["cost"],
+                "wasted_cost": wasted_total["cost"],
+            }
+        )
+    # 稳定排序：多用得多的组排前面，同样多时按指纹排 —— 面板/断言不依赖传入顺序。
+    records.sort(key=lambda record: (-record["duplicate_runs"], record["content_digest"]))
+
+    if wasted_runs:
+        wasted_total = aggregate_runs(wasted_runs, price_table=price_table)
+        wasted_tokens = wasted_total["tokens"]["total"]
+        wasted_cost = wasted_total["cost"]
+    else:
+        # 没有重复运行 = 真的没有浪费（0 是确定的数）；金额仍算不出（没有可加的条目）。
+        wasted_tokens, wasted_cost = 0, None
+    return {
+        "runs": len(runs),
+        "missing_digest_runs": missing_digest,
+        "groups": records,
+        "duplicate_groups": len(records),
+        "duplicate_runs": len(wasted_runs),
+        "wasted_tokens": wasted_tokens,
+        "wasted_cost": wasted_cost,
+    }
+
+
+def full_scope_share(runs: Sequence[Any]) -> dict[str, Any]:
+    """整窗运行（`scope == "full"`）的占比 —— 「问题 B 还剩多少」的直接度量。
+
+    增量链路的收益**主要不是省钱**，而是不再整窗重跑（审查报告 4.9 的结论修正），所以
+    「还有多少比例在整窗读」要能一眼看到趋势。
+
+    `full_share` 在**没有运行**时返回 `None`：分母为 0 没有比例可言，写 0 会被读成
+    「一次全量都没有」。认不出口径的运行单独计数（`unknown_scope_runs`），不混进分子分母。
+    """
+    full = incremental = unknown = 0
+    for run in runs:
+        scope = _scope_of(run)
+        if scope == "full":
+            full += 1
+        elif scope == "incremental":
+            incremental += 1
+        else:
+            unknown += 1
+    total = full + incremental + unknown
+    known = full + incremental
+    return {
+        "runs": total,
+        "full_runs": full,
+        "incremental_runs": incremental,
+        "unknown_scope_runs": unknown,
+        # 认不出口径的不进分子分母 —— 把它算进分母会让比例看起来比实际低。
+        "full_share": (full / known) if known else None,
+    }
+
+
+def upgrade_reason_distribution(runs: Sequence[Any]) -> dict[str, Any]:
+    """升级原因（`upgrade_reason`）的分布 —— 「平台为什么把这次跑成全量」的账。
+
+    原因短码的归一与写侧同一口径：`first_run` 折成 `no_conclusion_baseline`（读侧兼容）。
+    没有原因的运行不编一个桶：它们是「不是升级」或「读不出来」，两者都不该冒充某一种原因，
+    只计入 `no_reason_runs`（**等于 0 才是「每条都说得清」**）。
+    """
+    distribution: dict[str, int] = {}
+    full_runs = 0
+    for run in runs:
+        if _scope_of(run) == "full":
+            full_runs += 1
+        reason = _upgrade_reason_of(run)
+        if reason:
+            distribution[reason] = distribution.get(reason, 0) + 1
+    ordered = dict(sorted(distribution.items(), key=lambda item: (-item[1], item[0])))
+    counted = sum(ordered.values())
+    return {
+        "runs": len(runs),
+        "full_runs": full_runs,
+        "distributed_runs": counted,
+        "distribution": ordered,
+        "no_reason_runs": len(runs) - counted,
+    }

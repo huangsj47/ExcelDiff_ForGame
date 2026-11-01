@@ -467,6 +467,24 @@
         /* 数字用等宽：区间上下两行的位数对得上，扫一眼就能比 */
         font-variant-numeric: tabular-nums;
     }
+    /* 两档代价**并排**（升级那两处）：同一个指标一行，增量 / 全量各一列 —— 只给全量
+       一个数等于替用户做了「只能按全量」的决定（方案 §4.10 第 4 条）。 */
+    .weekly-ai-dialog__compare {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+        gap: 4px var(--space-4, 16px);
+        margin: 0 0 var(--space-3, 12px);
+        font-size: var(--font-size-sm, 13px);
+        line-height: 1.7;
+    }
+    .weekly-ai-dialog__compare-head,
+    .weekly-ai-dialog__compare-row { display: contents; }
+    .weekly-ai-dialog__compare-head > div {
+        color: var(--color-text-muted, var(--ai-text-muted, #656d76));
+        font-size: var(--font-size-sm, 12px);
+        font-weight: 600;
+    }
+    .weekly-ai-dialog__compare-row > div { font-variant-numeric: tabular-nums; }
     /* 「展开预算与运行计划」：那几行是运行计划的内部账（窗口水位、单条上限、共享池…），
        不参与「这次要不要跑」这个决定，默认收起来 —— 框里那一屏只剩决定要用的几行。 */
     .weekly-ai-dialog__more {
@@ -1426,6 +1444,7 @@
         <div class="d-flex align-items-center gap-2 mb-2">
             <label class="form-label mb-0 text-muted small" for="weeklyAiFocus">分析范围</label>
             <select class="form-select form-select-sm" id="weeklyAiFocus" style="max-width: 18rem"
+                    aria-describedby="weeklyAiFocusHelp"
                     title="只影响下次分析；下面显示的是已保存结果所覆盖的范围">
                 <option value="all">全部仓库（{{ all_configs|length }} 个）</option>
                 {% if repo_ns.has_table %}<option value="table">只看配表仓库</option>{% endif %}
@@ -1434,6 +1453,14 @@
                 <option value="{{ cfg.repository.id }}">只看「{{ cfg.repository.name }}」</option>
                 {% endfor %}
             </select>
+        </div>
+        <!-- 审查报告 P2-2：项目分析范围（配置页那一栏 `analysis_profile`）只含配置表
+             仓库时，这里选「只看代码仓库」筛完就是空集，服务端回 `focus_empty` ——
+             界面只说「范围里没有改动」会让人以为代码仓库这周真的一点没改。
+             这句是**静态说明**：不新增任何请求，只把两个「分析范围」的关系与改法说清；
+             两份周版本模板逐字相同（`tests/test_ai_upgrade_notice_no_baseline.py` 钉着）。 -->
+        <div class="form-text mb-2" id="weeklyAiFocusHelp">
+            项目分析范围只含配置表仓库时，「只看代码仓库」会得到空范围；要分析代码仓库，请把项目概览页「AI 分析配置」里的分析范围改为「全部仓库」。
         </div>
         {% endif %}
         <!-- 超预算横幅：`role="alert"` 是因为它在跑的过程中**会出现**（一次分析可能把
@@ -2238,10 +2265,11 @@ function parseWeeklyAiEvent(event) {
 //    2. **这次增量与基线不可比**（规则/提示词/模型变了）—— 结论本身仍然有效，但拿它
 //       与基线做对比是错的，报告上要写明。
 //
-//  「平台在执行中把增量升级为全量，事前让用户选」这一条**做不到**（升级决策发生在
-//  worker 里、快照冻结之后，见 `scope_sampling._decide_scope` 的唯一调用点
-//  `build_weekly_payload`），所以这里只做**事前能看见的那个原因**（没有可复用基线
-//  → `first_run`）与**事后把原因说清**，不假装有一个事前确认点。
+//  「平台在执行中把增量升级为全量」的最终决策仍发生在 worker 里（`scope_sampling._decide_scope`
+//  的唯一调用点 `build_weekly_payload`），事前拿不到那个裁决；但**升级原因与「建议整窗重跑」
+//  在预检里已经看得见**（`estimate.mode_decision`），所以这里做的是「事前把两个口径的代价
+//  并排摆出来让用户选」：默认键「继续增量」，只有明确选「改跑全量」才发 `full`。
+//  事后真正生效的口径与原因仍由 `weeklyAiUpgradeNotice` 说清，不静默。
 // ---------------------------------------------------------------------------
 
 // 「忙」是**两个按钮一起**的状态：只禁用其中一个的话另一个还亮着，用户点下去就会在
@@ -2269,25 +2297,102 @@ function weeklyAiProjectIdOf() {
     return null;
 }
 
-// 平台把增量升级为全量的**原因码 → 人话**。取值与
-// `services/ai/scope_sampling._decide_scope` 的第二返回值同一套词；认不出来时如实写出
-// 那个码，而不是编一句解释（编出来的解释会让人以为平台说了它没说过的话）。
+// 平台把增量升级为全量的**原因码 → 人话**。取值与服务端 `mode_decision` 的
+// `upgrade_reason` / `suggestion_reason`，以及历史 `upgrade_reason` 同一套词；认不出来时
+// 如实写出那个码，而不是编一句解释（编出来的解释会让人以为平台说了它没说过的话）。
+//
+// 2026-11-01 补齐了三个运行期真的会出现的码（`no_conclusion_baseline` /
+// `force_full_rebuild` / `runtime_scope_upgrade`）：它们原先走兜底那句
+// 「平台给出的原因码：xxx」，用户读到的是一串机器字（方案 §4.10 第 6 条）。
 const WEEKLY_AI_UPGRADE_REASONS = {
     first_run: '这个分组还没有可复用的结论基线，首次分析按全量跑',
+    no_conclusion_baseline: '这个分组还没有可继承的结论基线（上一轮没有产出可用的结构化结论）',
+    force_full_rebuild: '这一轮被判定必须整窗重建（用户请求全量，或规则/快照整体变化）',
+    runtime_scope_upgrade: '执行过程中平台把这次分析的范围升级成了全量',
     delta_count_high: '本次变化的文件数超过了全量阈值',
     delta_ratio_high: '本次变化的文件占比超过了全量阈值',
     critical_path_detected: '变更命中了关键路径',
     empty_total: '这一批没有可比对的文件，做不了增量差集'
 };
 
-/** 平台把这次增量改成了全量时该说的那句话。**没升级就返回空串**（不许无话找话）。 */
+/** 原因码 → 人话。**认不出来也不印「平台给出的原因码：xxx」那种机器话。** */
+function weeklyAiUpgradeReasonText(reason) {
+    if (!reason) return '';
+    return WEEKLY_AI_UPGRADE_REASONS[reason]
+        || ('前端还没收录这个原因码（' + reason + '）');
+}
+
+/**
+ * 预检载荷里的「模式裁决」（WP2 的 `estimate.mode_decision`）—— **只在这一个函数里读**。
+ *
+ * 字段缺失（旧服务端）时退回现有 `estimate.upgrade_reason` / `estimate.mode`：这一层必须
+ * 能同时跑在两种服务端上，前端先上线不该让弹窗报错，更不该把平台没说过的话印出来。
+ *
+ * `suggested_full` 是「建议整窗重跑」而不是「已经升级」：输入口径仍是增量、基线也不清空，
+ * 所以它只能用于提示，不能当成「只能按全量」（方案 §4.8 第 2 条）。
+ */
+function weeklyAiModeDecision(estimate) {
+    const source = estimate || {};
+    const raw = source.mode_decision || {};
+    const pick = function (key, fallback) {
+        return raw[key] === undefined || raw[key] === null ? fallback : raw[key];
+    };
+    return {
+        requested: pick('requested', 'incremental'),
+        effective: pick('effective', source.mode || 'incremental'),
+        suggested_full: pick('suggested_full', false) === true,
+        suggestion_reason: String(pick('suggestion_reason', '') || ''),
+        upgrade_reason: String(pick('upgrade_reason', source.upgrade_reason || '') || ''),
+        // 「项目一张配表都没有 → 回退为全部分析」的原因码（WP14 的
+        // `policy.decision.profile_fallback`；WP16 把它带进预检的 `mode_decision`）。
+        // 缺失 / null 一律读成空串：旧服务端没有这个键，界面不许因此显示一句话。
+        profile_fallback: String(pick('profile_fallback', '') || ''),
+        // 缺省按「可以继续增量」：它既是默认键，也是用户点了会真的按增量发出去的那一个。
+        can_continue_incremental: pick('can_continue_incremental', true) !== false
+    };
+}
+
+/**
+ * 这一次「平台为什么按整窗跑」该说的那句话。**没说头就返回空串**（不许无话找话）。
+ *
+ * 2026-11-01（审查报告 P2-3）：`no_conclusion_baseline` 与历史值 `first_run` 这一档
+ * **不是**「平台把增量升级成了全量」—— 用户点的仍是增量，只是没有可复用的历史结论，
+ * 输入只能按整窗读（`job.effective_mode` 跟着 `run.scope` 记成 `full`）。旧文案把它
+ * 说成升级，恰好与预检「仍为增量、只是没有历史结论、输入按整窗读」正面矛盾。
+ *
+ * 建议原因（`delta_count_high` / `delta_ratio_high` / `critical_path_detected`）**不再
+ * 产生** `effective_mode=full`（契约 1.1 / 1.6）：旧 job 上还挂着它们时只按「平台建议
+ * 整窗重跑」说，同样不许说成已经发生的升级。
+ *
+ * 判据只用 `job` 上的两个字段（`requested_mode` / `effective_mode`）与原因码：这句话
+ * 在「刚创建」「刷新后接回」两条路上都要说同一句，不能一条读 job、另一条读 estimate。
+ */
 function weeklyAiUpgradeNotice(job) {
     if (!job) return '';
     if (job.requested_mode !== 'incremental' || job.effective_mode !== 'full') return '';
-    const reason = WEEKLY_AI_UPGRADE_REASONS[job.upgrade_reason]
-        || (job.upgrade_reason ? ('原因码 ' + job.upgrade_reason) : '');
-    return '平台把这次增量升级成了全量' + (reason ? '：' + reason : '')
-        + '，本次按全量执行（预计消耗按全量算）。';
+    const code = String(job.upgrade_reason || '');
+    const reason = weeklyAiUpgradeReasonText(code);
+    // 没有可复用的历史结论：输入口径就是整窗，但模式仍是用户点的那一个。
+    // `first_run` 是 2026-11-01 之前的历史字面值（读侧仍认），说的是同一件事。
+    if (code === 'no_conclusion_baseline' || code === 'first_run') {
+        return (code === 'first_run' ? '这是这个分组的首次分析，' : '')
+            + '没有可复用的历史结论：输入按整窗读取（不是平台把这次增量改成了全量），'
+            + '本次按整窗输入执行；报告里这次的口径会写成「全量（无可用基线）」。';
+    }
+    // 平台判的「整窗重建」：旧结论不可复用（规则 / 模型变了），输入被重建了一次。
+    // 可以说「重建了整窗输入」，但同样不是「升级」。
+    if (code === 'force_full_rebuild') {
+        return '这次没有可复用的历史结论：平台重建了整窗输入 —— ' + reason
+            + '，本次按全量执行；报告里这次的口径会写成「全量（平台重建基线）」。';
+    }
+    // 建议原因：只说明「平台建议整窗重跑」，不许写成已经发生的升级。
+    if (code === 'delta_count_high' || code === 'delta_ratio_high'
+        || code === 'critical_path_detected') {
+        return '平台建议整窗重跑：' + reason + '；这次输入按整窗读取，本次按全量执行。';
+    }
+    // 其余（`runtime_scope_upgrade` 与前端还没收录的码）：运行期范围确实扩到了整窗。
+    return '平台把这次增量的输入范围扩成了整窗（全量）'
+        + (reason ? '：' + reason : '') + '；本次按全量执行。';
 }
 
 function weeklyAiFormatInt(value) {
@@ -2347,6 +2452,48 @@ function weeklyAiMoneyText(value) {
         return value.amount === undefined || value.amount === null ? '' : String(value.amount);
     }
     return String(value);
+}
+
+/** 费用的展示区间（`2.00 ~ 5.25 CNY`）。**算不出价格时返回空串**，由调用方决定怎么说。 */
+function weeklyAiMoneyRangeText(estimate) {
+    const cost = (estimate && estimate.cost) || {};
+    if (!cost.computable || cost.low === undefined) return '';
+    const low = weeklyAiMoneyText(cost.low);
+    const high = weeklyAiMoneyText(
+        cost.high === undefined || cost.high === null ? cost.low : cost.high
+    );
+    const unit = cost.currency || cost.unit || '';
+    return low === high ? (low + ' ' + unit) : (low + ' ~ ' + high + ' ' + unit);
+}
+
+/**
+ * 两个模式**并排**的代价对照：同一个指标一行，增量一列、全量一列。
+ *
+ * 两个区间都来自服务端的 `/ai-analysis/usage/estimate`（调用方各调一次
+ * `fetchWeeklyAiEstimate`），前端一个数都不折算 —— 「只给全量一个数」等于替用户做了
+ * 「只能按全量」的决定（方案 §4.10 第 4 条）。
+ */
+function weeklyAiCostCompare(incrementalEstimate, fullEstimate) {
+    function cells(estimate) {
+        const files = estimate && estimate.planned_files
+            ? (weeklyAiFormatInt(estimate.planned_files) + ' 个')
+            : '估不出来';
+        return [
+            files,
+            weeklyAiTokensText(estimate),
+            weeklyAiDurationText(estimate),
+            // 与 `weeklyAiEstimateLines` 的「预计费用」同一句话：不许伪造费用。
+            weeklyAiMoneyRangeText(estimate) || '未配置模型单价，只给 token 与时间'
+        ];
+    }
+    const incremental = cells(incrementalEstimate);
+    const full = cells(fullEstimate);
+    return {
+        columns: ['代价对照', '增量（只覆盖本轮新增）', '全量（整窗重跑）'],
+        rows: ['预计文件数', '预计 token', '预计耗时', '预计费用'].map(function (label, index) {
+            return [label, incremental[index], full[index]];
+        })
+    };
 }
 
 /**
@@ -2432,12 +2579,12 @@ function weeklyAiEstimateLines(estimate) {
     } else {
         lines.push(['基线 run', '这个分组还没有可复用的结论基线']);
     }
-    // 升级原因：**有才说，没有就如实说没有**。原因码由 `job_service._decide_effective_mode`
-    // 定，翻成中文的那张表与「平台把增量升成了全量」那句通知**共用同一份**
-    // （`WEEKLY_AI_UPGRADE_REASONS`），不在这里另写一套词。
-    const upgradeReason = (estimate && estimate.upgrade_reason) || '';
+    // 升级原因：**有才说，没有就如实说没有**。原因码只认 `mode_decision.upgrade_reason`
+    // （缺失时由 `weeklyAiModeDecision` 退回 `estimate.upgrade_reason`）—— 与弹窗同一处
+    // 判定，不在这里另读一套字段。
+    const upgradeReason = weeklyAiModeDecision(estimate).upgrade_reason;
     lines.push(['升级原因', upgradeReason
-        ? (WEEKLY_AI_UPGRADE_REASONS[upgradeReason] || ('平台给出的原因码：' + upgradeReason))
+        ? weeklyAiUpgradeReasonText(upgradeReason)
         : '没有升级：这次跑的就是你选的那个模式']);
     const budget = (estimate && estimate.budget_plan) || {};
     const promptChars = budget.prompt_chars || {};
@@ -2542,6 +2689,14 @@ function weeklyAiEstimateLines(estimate) {
 
 function weeklyAiEstimateNote(estimate) {
     const notes = ((estimate && estimate.notes) || []).slice(0, 2);
+    // 「没有配表仓库 → 回退全部分析」排在**最前**：它改变的是这次分析的**输入范围**，
+    // 不是某个数字的精度。没有回退时这句不出现（判据返回空串）。
+    // 文案写成内联而不是顶层 helper：`tests/test_ai_upgrade_dialog_incremental.py` 的
+    // node 探针只抽一个固定函数集，新 helper 在它的沙箱里会是 undefined。
+    const fallback = weeklyAiModeDecision(estimate).profile_fallback === 'no_table_repository'
+        ? '项目没有配置表仓库，本次已回退为全部分析。'
+        : '';
+    if (fallback) notes.unshift(fallback);
     // 服务端的 `notes` 里带 markdown 的星号（`**全量没有实测样本**` 这种），而确认框是
     // 纯文本（`textContent`）—— 原样落上去就是把星号印给用户看。与用量面板同一个口径。
     // 这句前提每次都要出现，所以压到最短：端点路径（`/ai-analysis/usage/estimate`）留给
@@ -2625,6 +2780,29 @@ function weeklyAiChoiceDialog(options) {
             });
             parent.appendChild(list);
         }
+        // 两档代价**并排**（升级那两处）：同一个指标一行，增量 / 全量各一列。
+        // 只给一个数等于替用户做了「只能按全量」的决定（方案 §4.10 第 4 条）。
+        function appendCompare(parent, compare) {
+            const columns = (compare && compare.columns) || [];
+            const rows = (compare && compare.rows) || [];
+            if (!columns.length || !rows.length) return;
+            const table = document.createElement('div');
+            table.className = 'weekly-ai-dialog__compare';
+            [columns].concat(rows).forEach(function (cells, rowIndex) {
+                const row = document.createElement('div');
+                row.className = rowIndex === 0
+                    ? 'weekly-ai-dialog__compare-head'
+                    : 'weekly-ai-dialog__compare-row';
+                cells.forEach(function (text) {
+                    const cell = document.createElement('div');
+                    cell.textContent = text;
+                    row.appendChild(cell);
+                });
+                table.appendChild(row);
+            });
+            parent.appendChild(table);
+        }
+        if (spec.compare) appendCompare(box, spec.compare);
         const lines = spec.lines || [];
         if (lines.length) appendFacts(box, lines);
         // 运行计划的内部账收进一个折叠块（见 `WEEKLY_AI_PRIMARY_FACTS` 上面那段说明）。
@@ -2679,6 +2857,11 @@ function weeklyAiChoiceDialog(options) {
             btn.className = 'btn btn-sm ' + (choice.className || 'btn-outline-secondary');
             btn.textContent = choice.label;
             btn.setAttribute('data-weekly-ai-choice', choice.value);
+            if (choice.disabled) {
+                // 平台判定不能继续增量时，第三键**留在框里**（用户看得到它为什么不可用），
+                // 只是点不动 —— 直接藏掉会让人以为平台根本没给这个选项。
+                btn.disabled = true;
+            }
             btn.addEventListener('click', function () { close(choice.value); });
             actions.appendChild(btn);
         });
@@ -2690,7 +2873,14 @@ function weeklyAiChoiceDialog(options) {
         });
         document.addEventListener('keydown', onKey, true);
         document.body.appendChild(overlay);
-        const primary = actions.querySelector('[data-weekly-ai-choice="ok"]')
+        // Enter 要落在**默认键**上：升级框的默认键是「继续增量」（那是本轮的核心改动），
+        // 其余框保持原样（`ok` → 全量 → 最后一个）。默认键被置灰（平台判定不能增量）时
+        // 落到后面那个可点的键上。
+        const preferred = actions.querySelector(
+            '[data-weekly-ai-choice="' + (spec.defaultChoice || 'ok') + '"]'
+        );
+        const primary = (preferred && !preferred.disabled ? preferred : null)
+            || actions.querySelector('[data-weekly-ai-choice="ok"]')
             || actions.querySelector('[data-weekly-ai-choice="full"]')
             || actions.lastChild;
         if (primary && primary.focus) primary.focus();
@@ -2703,8 +2893,9 @@ function weeklyAiChoiceDialog(options) {
  * * `mismatch` —— 结论还在，但它是**旧规则/旧提示词/旧模型**产出的
  *   （`stale_reason === 'rules_changed'`，服务端拿 `current_provenance` 比出来的）。
  *   服务端只给一句话、不给逐字段明细，所以这里**只转述那句话**，不编一串变化项；
- * * `noBaseline` —— 这个窗口里还没有任何可用结论 → 平台会把这次增量**升级为全量**
- *   （`first_run`）。这是唯一一个能在**调用模型之前**看见的升级原因。
+ * * `noBaseline` —— 这个窗口里还没有任何可用结论 → 这次没有可继承的基线判断
+ *   （`no_conclusion_baseline`，历史值 `first_run`）。这是**调用模型之前**就能看见的
+ *   那类原因，弹窗据此把两个口径的代价摆出来，但**不替用户决定按全量跑**。
  */
 async function fetchWeeklyAiBaselineState() {
     try {
@@ -2745,6 +2936,80 @@ function prependWeeklyAiLine(text) {
 }
 
 /**
+ * 「平台可能改口径」时的那一份确认框：**三键，默认「继续增量」**。
+ *
+ * 为什么必须有第三键：`suggested_full` 只是平台按变化量给的**建议**，输入口径仍是增量、
+ * 基线也不清空；而旧版把「原因码非空」直接做成「只能按全量」，于是用户点一次增量、
+ * 平台升一次全量、基线被抹掉，下一轮又全量（方案 §4.8 第 2 条）。
+ *
+ * 两个代价区间**并排**给（都来自服务端预估，各要一次）——只给全量一个数，等于替用户
+ * 做了这个决定。文案里必须写明增量的真实代价：只覆盖本轮新增，上轮未取证的部分仍然不看。
+ *
+ * @param {Object} decision 形如 {upgrade_reason, suggestion_reason, suggested_full,
+ *          can_continue_incremental}，见 `weeklyAiModeDecision`
+ * @param {object|null} incrementalEstimate 增量口径的预估（`fetchWeeklyAiEstimate('incremental')`）
+ * @param {object|null} fullEstimate 全量口径的预估（`fetchWeeklyAiEstimate('full')`）
+ * @param {string} [extraIntro] 调用方补的一句前提（例如「还没有可复用的结论基线」）
+ * @returns {Promise<'incremental'|'full'|null>} `null` = 取消，调用方什么都不做
+ */
+async function weeklyAiUpgradeChoiceDialog(decision, incrementalEstimate, fullEstimate, extraIntro) {
+    const spec = decision || {};
+    const reason = weeklyAiUpgradeReasonText(spec.upgrade_reason);
+    const suggestion = weeklyAiUpgradeReasonText(spec.suggestion_reason);
+    const intro = [];
+    // 有原因码时说原因（那句已经是完整的一句）；没有原因码时才用调用方补的那句前提。
+    // 两句都说会读成「同一个理由讲了两遍」。
+    if (extraIntro && !reason) intro.push(extraIntro);
+    if (reason) intro.push('平台给出的原因：' + reason + '。');
+    if (suggestion) intro.push('平台建议整窗重跑：' + suggestion + '。');
+    intro.push('「继续增量」只覆盖本轮新增的文件，上轮未取证的部分仍然不看；'
+        + '「改跑全量」会把整个窗口重跑一遍，代价与耗时都更高。');
+    const note = [];
+    // 回退提示排在最前：它解释的是「为什么这次连代码仓库一起看」，与下面的建议/决策
+    // 是两件事。没有回退时不出现（判据返回空串）。
+    const fallbackNote = weeklyAiModeDecision(incrementalEstimate).profile_fallback === 'no_table_repository'
+        ? '项目没有配置表仓库，本次已回退为全部分析。'
+        : '';
+    if (fallbackNote) note.push(fallbackNote);
+    if (spec.suggested_full) {
+        note.push('「整窗重跑」只是平台按变化量给的建议：选「继续增量」照样按增量创建，'
+            + '输入口径与基线都不变。');
+    }
+    if (spec.can_continue_incremental === false) {
+        note.push('平台判定这次不能只做增量，所以「继续增量」是灰的 —— 只能改跑全量或取消。');
+    }
+    note.push('两个区间都来自历史实测，不是精确值；没配模型单价时只给 token 与时间。');
+    // 四行代价由上面的对照表负责、「升级原因」由 intro 说过了，事实表里都不再重复
+    // （重复会把框撑长，而「框太长」正是上一轮刚修过的问题）；这里只留基线 / delta
+    // 这几种**只有增量才有**的事实。
+    const compared = ['预计文件数', '预计 token', '预计耗时', '预计费用', '升级原因'];
+    const facts = weeklyAiSplitEstimateLines(
+        weeklyAiEstimateLines(incrementalEstimate), 'incremental'
+    );
+    const context = facts.primary.filter(function (row) { return compared.indexOf(row[0]) < 0; });
+    const choice = await weeklyAiChoiceDialog({
+        title: (spec.suggested_full && !spec.upgrade_reason)
+            ? '平台建议整窗重跑' : '这次增量的口径需要你确认',
+        intro: intro.join(''),
+        compare: weeklyAiCostCompare(incrementalEstimate, fullEstimate),
+        lines: context,
+        detailLines: facts.detail,
+        note: note.join(''),
+        choices: [
+            { value: 'incremental', label: '继续增量（默认）', className: 'btn-primary',
+              disabled: spec.can_continue_incremental === false },
+            { value: 'full', label: '改跑全量', className: 'btn-danger' },
+            { value: 'cancel', label: '取消', className: 'btn-outline-secondary' }
+        ],
+        defaultChoice: 'incremental'
+    });
+    // 三个键**必须在这里各自落地**：取消返回 null，调用方据此什么都不做。
+    if (choice === 'incremental') return 'incremental';
+    if (choice === 'full') return 'full';
+    return null;
+}
+
+/**
  * 点下去之后到底跑哪个模式 —— **两个按钮共用的那一段决策**，返回 `'full'` /
  * `'incremental'`，用户取消时返回 `null`（调用方据此**什么也不做**）。
  *
@@ -2753,12 +3018,17 @@ function prependWeeklyAiLine(text) {
  * （否则「看一眼结果」这类动作可能自己把分析跑起来）。开跑调用留在点击回调里，
  * 决策（可能弹窗、要 await）放在这里，两边各得其所。
  *
+ * **默认键是「继续增量」**：`suggested_full` / `upgrade_reason` 只说明平台对口径有看法，
+ * 只有用户明确选「改跑全量」才返回 `'full'` —— 旧版这两处只给「继续（按全量）/取消」，
+ * 于是点一次增量就被永久升成全量、基线被抹掉（方案 §4.8 第 2 条）。
+ *
  * @param {'incremental'|'full'} requested 用户点的是哪个按钮
  */
 async function weeklyAiChooseMode(requested) {
     if (requested === 'full') {
-        // 全量：**先把代价与基线状况摆出来**（预计文件数 / token 区间 / 最近一次耗时 /
-        // 能不能复用基线），用户点了才发起。
+        // 用户**自己**点的全量：先把代价与基线状况摆出来（预计文件数 / token 区间 /
+        // 最近一次耗时 / 能不能复用基线），确认之后才发起。这条分支不需要第三键 ——
+        // 他已经明确要全量，这里只问「确定花这笔钱吗」。
         const estimate = await fetchWeeklyAiEstimate('full');
         const facts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), 'full');
         const choice = await weeklyAiChoiceDialog({
@@ -2795,22 +3065,18 @@ async function weeklyAiChooseMode(requested) {
         weeklyAiNoteMismatchAccepted();
         return 'incremental';
     }
+    // 增量那一份预估**先要**：它既是普通预检的全部数字，也是升级/建议那一档
+    // 「本次增量文件数 / 补偿文件数 / 基线 run」的来源（服务端借它带回 `delta_files`）。
+    const estimate = await fetchWeeklyAiEstimate('incremental');
     if (baseline && !baseline.hasResult) {
-        // 还没有可复用的结论基线 → 平台会把这次增量**升级为全量**（`upgrade_reason=first_run`）。
-        // 这是唯一一个**在调用模型之前**看得见的升级原因，所以先把代价摆出来再问。
-        const estimate = await fetchWeeklyAiEstimate('full');
-        const facts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), 'full');
-        const choice = await weeklyAiChoiceDialog({
-            title: '这次会被升级为全量',
-            intro: '这个分组还没有可复用的结论基线，平台对增量的口径是「没有基线就按全量跑」'
-                + '（`upgrade_reason=first_run`）。全量的预计代价如下：',
-            lines: facts.primary,
-            detailLines: facts.detail,
-            note: weeklyAiEstimateNote(estimate),
-            okText: '继续（按全量）',
-            okClass: 'btn-danger'
-        });
-        return choice === 'ok' ? 'full' : null;
+        // 还没有可复用的结论基线：这次没有可继承的上轮判断（`no_conclusion_baseline`，
+        // 历史值 `first_run`）。**照样三键**：能不能接受「只覆盖本轮新增」是用户的成本
+        // 决定，平台不能替他做 —— 旧版在这里只有「继续（按全量）/取消」。
+        const fullEstimate = await fetchWeeklyAiEstimate('full');
+        return weeklyAiUpgradeChoiceDialog(
+            weeklyAiModeDecision(estimate), estimate, fullEstimate,
+            '这个分组还没有可复用的结论基线，这次没有可继承的上轮判断。'
+        );
     }
     // provenance 没变、基线也在 → **先把这次要做的事摆出来**，再让用户点确认。
     //
@@ -2819,26 +3085,13 @@ async function weeklyAiChooseMode(requested) {
     // 基线 Run 22 和升级原因；这仍不满足用户要求的『调用模型前选择』」。所以现在连最普通
     // 的那一次也要先给一份预检。
     //
-    // **它是只读的，不是决策框**：只摆事实（本次增量文件数 / 补偿文件数 / 基线 run /
-    // 区间），选项就是「开始增量分析 / 取消」两个默认键 —— 「换成全量」那个决策在
-    // `mismatch` / `first_run` 两条分支里，这里不重复问一次（同一件事问两次会让人以为
-    // 第一次的答案没用）。
-    const estimate = await fetchWeeklyAiEstimate('incremental');
-    if (estimate && estimate.upgrade_reason) {
-        const reason = WEEKLY_AI_UPGRADE_REASONS[estimate.upgrade_reason]
-            || ('平台给出的原因码：' + estimate.upgrade_reason);
-        const upgradeFacts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), estimate && estimate.mode);
-        const upgradeChoice = await weeklyAiChoiceDialog({
-            title: '这次会被升级为全量',
-            intro: '平台已经根据当前周版本的真实输入账判定：增量范围不足以保证结论完整。'
-                + '确认之后将明确按全量模式创建任务。',
-            lines: upgradeFacts.primary,
-            detailLines: upgradeFacts.detail,
-            note: reason + ' ' + weeklyAiEstimateNote(estimate),
-            okText: '继续（按全量）',
-            okClass: 'btn-danger'
-        });
-        return upgradeChoice === 'ok' ? 'full' : null;
+    // **平台对口径有看法时（升级原因 / 建议整窗重跑），这里升级成三键决策框**；没有看法时
+    // 仍是只读预检：只摆事实（本次增量文件数 / 补偿文件数 / 基线 run / 区间），选项就是
+    // 「开始增量分析 / 取消」两个默认键 —— 不把「要不要改全量」问两遍。
+    const decision = weeklyAiModeDecision(estimate);
+    if (decision.upgrade_reason || decision.suggested_full) {
+        const fullEstimate = await fetchWeeklyAiEstimate('full');
+        return weeklyAiUpgradeChoiceDialog(decision, estimate, fullEstimate, '');
     }
     const incrementalFacts = weeklyAiSplitEstimateLines(weeklyAiEstimateLines(estimate), estimate && estimate.mode);
     const choice = await weeklyAiChoiceDialog({
@@ -2929,8 +3182,9 @@ async function startWeeklyAiAnalysis(mode = 'incremental') {
     }
 
     rememberWeeklyAiJobId(created.job_id);
-    // **平台把这次增量升级成了全量时必须说出来**（验收第 5 条）：用户点的是增量、
-    // 跑的是全量，理由（`upgrade_reason`）不许静默。文本只有一处（`weeklyAiUpgradeNotice`）。
+    // **这一次为什么按整窗跑必须说出来**（验收第 5 条）：用户点的是增量、`effective_mode`
+    // 却是 `full`，理由（`upgrade_reason`）不许静默 —— 但「没有可复用的历史结论」不是
+    // 「平台把增量升级成了全量」（审查报告 P2-3）。那句话只有一处（`weeklyAiUpgradeNotice`）。
     weeklyAiUpgradeNoticeText = weeklyAiUpgradeNotice(created.job || created);
     if (weeklyAiUpgradeNoticeText) {
         setWeeklyAiMeta(weeklyAiUpgradeNoticeText);

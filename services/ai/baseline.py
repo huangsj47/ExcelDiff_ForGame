@@ -29,7 +29,6 @@
 from __future__ import annotations
 
 import re
-
 from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence, Tuple
 
@@ -121,6 +120,7 @@ class BaselineFinding:
     commit_ref: str = ""
     disposition: str = DISPOSITION_PENDING
     state: str = STATE_OPEN
+    background: bool = False
 
     @property
     def suppressed(self) -> bool:
@@ -142,6 +142,10 @@ def classify(
     for finding in findings:
         path = normalize_path(finding.file_path) if finding.file_path else ""
         if path and path in changed:
+            # 「文件又变了」优先于人工忽略：这是「忽略」不会变成「永远看不见」的**唯一**
+            # 出口，也是被忽略条目复活的**全部**来源。复活不该是静默的 ——
+            # `incremental_baseline.reconcile_result` 会给这类行打 `suppressed_previous`，
+            # 于是报告与处置面板看得到「这条曾被人工忽略」（2026-11 产品审查第 5 条）。
             state = STATE_NEEDS_RECHECK
         elif finding.disposition == DISPOSITION_IGNORED:
             state = STATE_SUPPRESSED
@@ -241,12 +245,23 @@ def _render_header(
     counts = "、".join(
         f"{_STATE_LABELS[state]} {len(groups[state])}" for state in _STATE_ORDER if groups[state]
     )
+    if any(item.background for item in classified):
+        risk_instruction = (
+            "这些是**已知问题，不要再当成「本轮新发现」**；其中正式风险**必须出现在「风险评估」"
+            "那一节**并标出「（上次遗留，仍成立）」。背景发现只作历史参考，不计入风险等级；"
+            "背景发现不要列为当前风险。两类结论都须在 baseline_updates 中逐条交代状态。"
+        )
+    else:
+        risk_instruction = (
+            "这些是**已知问题，不要再当成「本轮新发现」**；但它们**必须出现在「风险评估」那一节"
+            "里**并标出「（上次遗留，仍成立）」—— 那一节是**当前仍成立的问题全集**，不是本轮"
+            "增量。逐条给出它现在的状态：仍成立 / 已修复 / 已被推翻（说明依据）。"
+        )
     return (
         "# 这个版本截至上次分析已经报过的问题\n"
         f"共 {len(classified)} 条：{counts or '无'}。\n"
-        "这些是**已知问题，不要再当成「本轮新发现」**；但它们**必须出现在「风险评估」那一节"
-        "里**并标出「（上次遗留，仍成立）」—— 那一节是**当前仍成立的问题全集**，不是本轮"
-        "增量。逐条给出它现在的状态：仍成立 / 已修复 / 已被推翻（说明依据）。"
+        + risk_instruction
+        +
         "**旧结论与「本轮确认」用同一种写法**（`R#（等级，模块）现象与后果`，整节连续编号），"
         "但只许用下面清单里已有的信息（标题、等级）——**不要为它补写证据或位置**，它本轮"
         "没有被重新取证，补出来的「证据」是编的。"
@@ -325,7 +340,8 @@ def digest_fingerprints(digest: str) -> tuple[str, ...]:
 def _render_entry(item: BaselineFinding) -> str:
     where = f" ({item.file_path})" if item.file_path else ""
     commit = f" @{item.commit_ref[:12]}" if item.commit_ref else ""
-    return f"- [{_prompt_severity(item.severity)}] {item.title}{where}{commit} #{item.fingerprint}"
+    background = "[背景发现：不计入风险等级] " if item.background else ""
+    return f"- {background}[{_prompt_severity(item.severity)}] {item.title}{where}{commit} #{item.fingerprint}"
 
 
 # 平台赋值的等级 → 写进**提示词**的那个等级。

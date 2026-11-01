@@ -151,6 +151,93 @@ def exclusion_reason(path: str) -> str:
     return ""
 
 
+def normalize_allowed_paths(value: Any) -> Optional[frozenset]:
+    """本次分析**允许读的路径**归一化；`None` = 不限制（旧行为）。
+
+    ## `None` 与空集合必须分开
+
+    `None` 是**没有声明范围**（老 payload、`profile=all`、单提交模式）：冻结仓库照旧可读
+    任意跟踪文件，与加这个参数之前逐字相同。空集合是**明确声明了一条都不许**（写侧给了
+    `allowed_paths=[]`）—— 把它当成「不限制」是一处安全口子，与
+    `change_set._allowed_path_set` 的判据、理由完全一致。
+
+    ## 为什么要归一化
+
+    `allowed_paths` 是写侧从 `delta_files` 抄下来的，可能带反斜杠或 `./` 前缀。不归一化
+    会制造**过严的假拒绝**：模型问的路径本来在白名单里，却因为写法差异被判越界 ——
+    它收到的是「你没资格读」，于是把一条产品口径写成平台信息缺口。
+    """
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        value = (value,)
+    paths = set()
+    for item in value:
+        text = normalize_path(str(item or ""))
+        if text:
+            paths.add(text)
+    return frozenset(paths)
+
+
+def allowed_paths_of(scope: Any) -> Optional[frozenset]:
+    """从一个范围对象上取 `allowed_paths`（鸭子类型）；拿不到 = 不限制。
+
+    用鸭子类型而不是把参数加进 `ContextProvider` 协议：那个协议是有意做窄的（见
+    `provider_repo_paths` 的说明），而 `RepoReadScope` 是**本模块自己的**范围对象 ——
+    它的 `allowed_paths` 就是唯一事实源，不需要调用方各自再传一份。
+    """
+    if scope is None:
+        return None
+    return normalize_allowed_paths(getattr(scope, "allowed_paths", None))
+
+
+def out_of_scope_text(path: str, allowed_paths: Any = None) -> str:
+    """「这条路径不在本次分析范围里」那句。**必须与「读不到 / 不存在」分开说**。
+
+    范围收窄是**产品决定**（例如 `profile=tables` 只分析配置表仓库），不是故障：说成
+    「读不到」会让模型把一条产品口径写成平台信息缺口，或者原样再要一次。实测里「被拒」
+    被读成「平台取数失败」已经让报告多出过假的信息缺口（见模块抬头）。
+    """
+    count = len(allowed_paths) if allowed_paths is not None else 0
+    return (
+        f"[不在本次分析范围] `{path}`：本次分析声明的可读范围只有 {count} 条路径"
+        "（`allowed_paths`，由项目配置的分析范围决定，例如「只分析配置表仓库」），"
+        "这一条不在其中。\n"
+        "**这不是「读不到」，也不是「这个文件不存在」** —— 它被本次的**范围**挡住了。"
+        "如果它确实是本次评审需要的证据，请把这件事写成信息缺口；"
+        "或者在项目配置里把分析范围改成「全部仓库」后重跑。"
+    )
+
+
+def allowed_paths_matches_prefix(allowed_paths: Any, prefix: str) -> bool:
+    """这个前缀匹配到**本次分析范围**里的路径吗（`None` 时恒 `False`）。
+
+    与 `RepoReadScope.matches_prefix` 是同一个形状的两件事：那个问「仓库里有没有」，
+    这个问「这次准不准读」。前缀只匹配到仓库里、却匹配不到本次范围的路径时，放行它
+    等于让模型先把范围外的命中位置搜出来，再按位置去读。
+    """
+    if allowed_paths is None:
+        return False
+    text = str(prefix or "")
+    if not text:
+        return False
+    return any(item == text or item.startswith(text) for item in allowed_paths)
+
+
+def out_of_scope_reason(allowed_paths: Any) -> str:
+    """「不在本次分析范围」那条**丢弃理由**（**与「不在跟踪树里」分开说**）。
+
+    两句都成立时（路径在跟踪树里、只是被范围挡住的），说「不在跟踪树里」是一句假话：
+    模型下一轮会去核对拼写或换一条路径，永远改不对。
+    """
+    count = len(allowed_paths) if allowed_paths is not None else 0
+    return (
+        f"不在本次分析范围里（`allowed_paths` 只允许 {count} 条路径，"
+        "按项目配置的分析范围收窄，例如「只分析配置表仓库」）—— "
+        "**这不是「读不到」，也不是「这个文件不存在」**"
+    )
+
+
 def reject_text(path: str, reason: str) -> str:
     """把一次拒绝渲染成**给模型看的一句话**。
 
@@ -183,6 +270,20 @@ class FrozenRepository:
     local_path: str = ""
     #: 这个 tip 是怎么定下来的（给人看，进日志与回执）。
     source: str = ""
+    #: 本次分析**允许读的路径**（`None` = 不限制，冻结仓库可读任意跟踪文件 —— 旧行为）。
+    #:
+    #: ## 为什么挂在冻结对象上，而不是只在 reader 上
+    #:
+    #: 同一个 tip 会被很多个 reader 打开（协议层、引用检索、正文取数），而它们都从
+    #: 「这一份冻结版本」出发。范围挂在冻结对象上，`FrozenTreeReader(frozen)` 无论从哪条
+    #: 路创建都拿到同一个范围 —— 不会出现「正文那条路收了、检索那条路没收」这种只在一半
+    #: 路径上生效的收口。
+    allowed_paths: Optional[frozenset] = None
+
+    def __post_init__(self) -> None:
+        # 归一化放在构造时做一次：判据（`out_of_scope`）与回执里的条数都读这一份，
+        # 两个读者各归一化一遍迟早会漂移（与 `change_set._allowed_path_set` 同一手法）。
+        object.__setattr__(self, "allowed_paths", normalize_allowed_paths(self.allowed_paths))
 
     @property
     def available(self) -> bool:
@@ -334,10 +435,53 @@ class FrozenTreeReader:
     方法都遵守它（`git.Repo` 打开失败、`ls-tree` 失败、blob 解不出来……全部折成 `None`）。
     """
 
-    def __init__(self, frozen: FrozenRepository, *, repo: Any = None):
+    def __init__(
+        self,
+        frozen: FrozenRepository,
+        *,
+        repo: Any = None,
+        allowed_paths: Any = None,
+        scope: Any = None,
+    ):
         self.frozen = frozen
         self._repo = repo
         self._repo_failed = False
+        # 范围的三个来源，优先级从高到低：显式参数 → 冻结对象上那一份 → 传进来的范围对象。
+        #
+        # 为什么允许三种：调用点分两类 —— `resolve_frozen_repository` 从库里的仓库行造
+        # 冻结对象（那时还没有范围），而 provider 是在**知道本次 allowed_paths 之后**才
+        # 造 reader 的。显式参数给后者用；冻结对象上那一份让「同一个 tip 的不同 reader」
+        # 共享同一个范围；`scope` 让只拿得到范围对象（`RepoReadScope`）的调用点也能收口。
+        declared = allowed_paths
+        if declared is None:
+            declared = getattr(frozen, "allowed_paths", None)
+        if declared is None:
+            declared = allowed_paths_of(scope)
+        self.allowed_paths = normalize_allowed_paths(declared)
+        # 过滤后的清单只算一次（一次 `find_references` 会对同一个 reader 问很多次）。
+        self._scoped_paths: Optional[Tuple[str, ...]] = None
+
+    # -- 本次分析范围（`allowed_paths`） -------------------------------------
+
+    @property
+    def restricted(self) -> bool:
+        """这次的读取是不是被**范围**收窄过（`False` = 旧行为：任意跟踪文件都能读）。"""
+        return self.allowed_paths is not None
+
+    def out_of_scope(self, path: str) -> bool:
+        """这条路径是否被**本次分析范围**挡住（不限制时恒 `False`）。
+
+        与 `is_tracked` 分开：那个回答「仓库里有没有它」（`None` = 判不出来），这个回答
+        「这次准不准读它」。两条理由在给模型的话里必须长得不一样 —— 把「范围外」说成
+        「不在跟踪树里」是**一句假话**，模型会改成去核对拼写。
+        """
+        if self.allowed_paths is None:
+            return False
+        return normalize_path(str(path or "")) not in self.allowed_paths
+
+    def scope_refusal(self, path: str) -> str:
+        """范围外的那句拒绝（`out_of_scope` 为真时才该用）。"""
+        return out_of_scope_text(str(path or ""), self.allowed_paths or ())
 
     # -- 内部 ---------------------------------------------------------------
 
@@ -384,11 +528,34 @@ class FrozenTreeReader:
     # -- 跟踪清单 -----------------------------------------------------------
 
     def tracked_paths(self) -> Optional[Tuple[str, ...]]:
-        """冻结 tip 上**全部 Git 跟踪文件**的路径（按仓库树顺序，确定性）。
+        """冻结 tip 上**本次可读**的跟踪文件路径（按仓库树顺序，确定性）。
 
-        返回 `None` 表示**判不出来**（对象库读不到、tip 不在）—— 调用方必须把它与
-        「空列表」分开：空列表是「这个仓库一个文件都没跟踪」，那是另一件（几乎不可能
-        发生的）事。
+        ## 有 `allowed_paths` 时返回的是**交集**
+
+        这是「读不到」在**检索**那条路上的落点：`find_references` 按 `tracked_paths()`
+        建索引，收窄之后范围外的文件根本不会被索引 —— 否则「范围外」只挡得住正文，
+        挡不住「搜出一个代码仓库的命中位置，再按位置去读」这条路。
+
+        `allowed_paths` 为 `None` 时返回整棵树，与加这个参数之前**逐字相同**。
+
+        ## 返回 `None` 表示**判不出来**
+
+        （对象库读不到、tip 不在）—— 调用方必须把它与「空列表」分开：空列表是
+        「这个仓库一个文件都没跟踪」或「范围内的文件一个也不在树上」，那是另一件事。
+        """
+        paths = self.all_tracked_paths()
+        if paths is None or self.allowed_paths is None:
+            return paths
+        if self._scoped_paths is None:
+            self._scoped_paths = tuple(path for path in paths if path in self.allowed_paths)
+        return self._scoped_paths
+
+    def all_tracked_paths(self) -> Optional[Tuple[str, ...]]:
+        """冻结 tip 上**全部** Git 跟踪文件（**忽略 `allowed_paths`**）。
+
+        只给「范围说明」组装用（`build_read_scope*`）：`RepoReadScope.paths` 回答的是
+        「仓库里有没有它」，收窄它是另一件事（`allowed_paths` 那一栏）。两者混成一个
+        字段，协议层就会把「不在本次分析范围」说成「不在跟踪树里」—— 一句假话。
         """
         key = (self.frozen.repository_id, self.frozen.tip, str(self.frozen.local_path))
         cached = _TREE_CACHE.get(key)
@@ -410,7 +577,12 @@ class FrozenTreeReader:
         return paths
 
     def is_tracked(self, path: str) -> Optional[bool]:
-        """这个路径在冻结 tip 上是不是一个跟踪文件。`None` = 判不出来。"""
+        """这个路径在冻结 tip 上是不是一个跟踪文件。`None` = 判不出来。
+
+        **范围外的路径这里返回 `False`**（因为判断用的是收窄后的清单）。要回一句
+        「不在本次分析范围」，调用方必须先用 `out_of_scope()` 判一次 —— 否则「范围外」
+        会被说成「不在跟踪树里」，而那是两句含义不同的话。
+        """
         paths = self.tracked_paths()
         if paths is None:
             return None
@@ -436,6 +608,10 @@ class FrozenTreeReader:
         """
         text = str(path or "").strip()
         if not text:
+            return None
+        if self.out_of_scope(text):
+            # **范围外不碰对象库**：这不是「读不到」，是这次根本不该读它。返回 `None`
+            # 是因为这个方法的契约只有字节 —— 要理由的调用方走 `read_within_limit`。
             return None
         key = (self.frozen.repository_id, self.frozen.tip, text)
         cached = _BLOB_CACHE.get(key)
@@ -463,9 +639,14 @@ class FrozenTreeReader:
         """读一份正文，并**先说清限制**：`(字节, 理由)`。
 
         * `(data, "")` —— 读到了；`data` 为 `None` 时理由非空。
+        * **范围外** → `(None, "不在本次分析范围…")`：这是**第一条**判据，排在「读不到」
+          之前 —— 反过来的话，范围外会被说成「不在跟踪树里 / 对象库缺 blob」，
+          而模型下一轮会去核对拼写，永远改不对。
         * 超过 `MAX_READ_BYTES` → `(None, "太大")`：**不是**「读到了但截断了」——
           读一半再解码只会得到一份看起来完整的半截文件。
         """
+        if self.out_of_scope(path):
+            return None, self.scope_refusal(path)
         data = self.read_bytes(path)
         if data is None:
             return None, "这个路径在本次冻结版本里读不到（不在跟踪树里，或对象库缺这个 blob）"
@@ -535,10 +716,26 @@ class RepoReadScope:
     #: 路径 -> 跟踪它的仓库 id 元组（**顺序确定**，按 id 升序）。同一条相对路径在两个仓库里
     #: 都存在时，它就是「该读哪一个」的歧义判据 —— 调用方必须据此报可操作错误，不许猜。
     repositories_by_path: Mapping[str, tuple] = field(default_factory=dict)
+    #: 本次分析**允许读的路径**（`None` = 不限制，旧行为）。与 `paths` 是两个维度：
+    #: `paths` 回答「仓库里有没有它」（冻结 tip 的跟踪树），这个回答「这次准不准读它」
+    #: （写侧声明 `allowed_paths`）。越界请求必须按后者拒绝，理由才是「不在本次分析范围」
+    #: 而不是「不在跟踪树里」。
+    allowed_paths: Optional[frozenset] = None
 
     @property
     def available(self) -> bool:
         return bool(self.paths) and not self.reason
+
+    @property
+    def restricted(self) -> bool:
+        """这次的可读范围有没有被 `allowed_paths` 收窄过（`False` = 旧行为）。"""
+        return self.allowed_paths is not None
+
+    def out_of_scope(self, path: str) -> bool:
+        """这条路径是否被**本次分析范围**挡住（不限制时恒 `False`）。"""
+        if self.allowed_paths is None:
+            return False
+        return normalize_path(str(path or "")) not in self.allowed_paths
 
     def contains(self, path: str) -> bool:
         return str(path or "") in self.paths
@@ -707,13 +904,16 @@ def resolve_frozen_read(
 
     1. **路径形状**（`resolve_repo_path`：绝对路径 / 盘符 / `..` / 控制字符）；
     2. **凭证排除**（`exclusion_reason`）；
-    3. 点名了仓库（`repository_id`）→ **只认那一个**，点错就说清在范围内的是谁、
+    3. **本次分析范围**（`allowed_paths`）—— 范围外回「不在本次分析范围」，这条必须排在
+       「不在跟踪树里」之前：两句都成立时，后者是一句假话（文件明明在树里）；
+    4. 点名了仓库（`repository_id`）→ **只认那一个**，点错就说清在范围内的是谁、
        跟踪这条路径的又是谁；
-    4. 没点名而**多个仓库都跟踪**这条路径 → 不猜，回一份列出候选的可操作拒绝；
-    5. 否则用跟踪它的那个仓库，或第一个（只用来渲染「不在跟踪树里」那句）。
+    5. 没点名而**多个仓库都跟踪**这条路径 → 不猜，回一份列出候选的可操作拒绝；
+    6. 否则用跟踪它的那个仓库，或第一个（只用来渲染「不在跟踪树里」那句）。
 
-    1 与 2 排在 3、4 **之前**，且与加多仓支持之前逐字相同 —— 扩大范围只放宽了路径集合，
-    这两条判据一步都没绕过（`protocol.sanitize_requests` 的同一套判据在协议层也各判一次）。
+    1 与 2 排在 3、4 **之前**，且与加多仓支持、范围收窄之前逐字相同 —— 扩大范围只放宽了
+    路径集合，这几条判据一步都没绕过（`protocol.sanitize_requests` 的同一套判据在协议层
+    也各判一次）。`allowed_paths is None` 时第 3 步什么都不做（旧行为逐字不变）。
 
     `readers` 为空时的处理**不在这里**：那是「这一层读不了」而不是「这条路不合法」，
     调用方据此返回 `None`（`ContextProvider` 契约里 `None` 与「没有内容」是两件事）。
@@ -724,11 +924,16 @@ def resolve_frozen_read(
     blocked = exclusion_reason(normalized)
     if blocked:
         return FrozenRead(refusal=reject_text(normalized, blocked))
+    allowed = allowed_paths_of(scope)
+    if allowed is not None and normalized not in allowed:
+        return FrozenRead(refusal=out_of_scope_text(normalized, allowed))
     wanted = "" if repository_id is None else str(repository_id).strip()
     if wanted:
         reader = reader_for_repository(readers, wanted)
         if reader is None:
             return FrozenRead(refusal=unknown_repository_text(scope, normalized, wanted))
+        if getattr(reader, "out_of_scope", None) and reader.out_of_scope(normalized):
+            return FrozenRead(refusal=reader.scope_refusal(normalized))
         if reader.is_tracked(normalized) is False:
             return FrozenRead(
                 refusal=not_tracked_in_repository_text(scope, normalized, wanted)
@@ -740,6 +945,10 @@ def resolve_frozen_read(
     reader = reader_for_repository(
         readers, candidates[0] if candidates else None
     ) or (readers[0] if readers else None)
+    if reader is not None and getattr(reader, "out_of_scope", None) and reader.out_of_scope(
+        normalized
+    ):
+        return FrozenRead(refusal=reader.scope_refusal(normalized))
     return FrozenRead(reader=reader, path=normalized)
 
 
@@ -750,7 +959,10 @@ def build_read_scope(
     if frozen is None:
         return RepoReadScope(reason="本次没有可用的冻结仓库")
     reader = reader or FrozenTreeReader(frozen)
-    paths = reader.tracked_paths()
+    # `paths` 要的是**整棵树**（「仓库里有没有它」），范围收窄单独放 `allowed_paths`。
+    # 拿 `tracked_paths()`（已收窄）当 `paths`，协议层就会把范围外的路径说成
+    # 「不在跟踪树里」—— 而它明明在。
+    paths = reader.all_tracked_paths()
     if paths is None:
         return RepoReadScope(
             frozen=frozen,
@@ -764,6 +976,9 @@ def build_read_scope(
         repositories_by_path={
             path: (getattr(frozen, "repository_id", None),) for path in paths
         },
+        # reader 上那一份已经是「显式参数 / 冻结对象 / scope」三档合一的结果（见它的
+        # `__init__`），范围对象直接沿用 —— 不在这里重新推一遍，两处推导必然漂移。
+        allowed_paths=reader.allowed_paths,
     )
 
 
@@ -781,17 +996,25 @@ def build_read_scope_multi(
     临时读不了」变成「这次什么都不能读」—— 那是把一次局部故障放大成全面降级。
 
     全都没成时 `paths` 为空、`reason` 非空：调用方据此退回「只搜本批次」（既有语义）。
+
+    ## `allowed_paths` 是**并集**，但不能把没声明的仓库算成「全不准」
+
+    某个仓库声明了范围、另一个没声明时：声明过的按它那一份，没声明的按它自己的整棵
+    跟踪树 —— 后者是「这个仓库不限制」的原义。写成「一律按声明过的那份」会把另一个
+    仓库整个关掉，而那句拒绝（「不在本次分析范围」）在模型那里读起来像是它问错了。
     """
     kept: list[FrozenRepository] = []
     by_repo: dict = {}
     by_path: dict = {}
     failures: list[str] = []
+    restricted: list[tuple[Any, Optional[frozenset]]] = []
     for frozen in frozens or ():
         if frozen is None:
             continue
         reader = (readers or {}).get(getattr(frozen, "repository_id", None))
         reader = reader or FrozenTreeReader(frozen)
-        paths = reader.tracked_paths()
+        # 与 `build_read_scope` 同一条：`paths` 是整棵树，收窄的是 `allowed_paths`。
+        paths = reader.all_tracked_paths()
         if paths is None:
             failures.append(
                 f"{getattr(frozen, 'name', '') or frozen.repository_id}"
@@ -802,6 +1025,7 @@ def build_read_scope_multi(
         repository_id = getattr(frozen, "repository_id", None)
         cleaned = frozenset(str(path) for path in paths if str(path or "").strip())
         by_repo[repository_id] = cleaned
+        restricted.append((repository_id, reader.allowed_paths))
         for path in cleaned:
             by_path.setdefault(path, []).append(repository_id)
     if not kept:
@@ -809,6 +1033,12 @@ def build_read_scope_multi(
         if failures:
             reason += "：" + "；".join(failures)
         return RepoReadScope(reason=reason)
+    allowed: Optional[frozenset] = None
+    if any(item[1] is not None for item in restricted):
+        merged: set = set()
+        for repository_id, declared in restricted:
+            merged |= set(declared) if declared is not None else set(by_repo[repository_id])
+        allowed = frozenset(merged)
     return RepoReadScope(
         frozen=kept[0],
         paths=frozenset(by_path),
@@ -819,6 +1049,7 @@ def build_read_scope_multi(
             path: tuple(sorted(ids, key=lambda item: (item is None, item)))
             for path, ids in by_path.items()
         },
+        allowed_paths=allowed,
     )
 
 
@@ -869,13 +1100,18 @@ __all__ = [
     "FrozenRepository",
     "FrozenTreeReader",
     "RepoReadScope",
+    "allowed_paths_matches_prefix",
+    "allowed_paths_of",
     "ambiguous_path_text",
     "build_read_scope",
     "build_read_scope_multi",
     "cache_sizes",
     "exclusion_reason",
+    "normalize_allowed_paths",
     "not_tracked_in_repository_text",
     "not_tracked_text",
+    "out_of_scope_reason",
+    "out_of_scope_text",
     "provider_repo_paths",
     "reader_for_repository",
     "reject_text",

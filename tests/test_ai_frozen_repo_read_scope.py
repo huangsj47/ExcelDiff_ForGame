@@ -34,12 +34,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from services.ai import provider_search as agent_mode_module
 from services.ai.frozen_repo import (
     FrozenRepository,
     FrozenTreeReader,
     build_read_scope,
     exclusion_reason,
     reset_caches,
+    resolve_frozen_read,
     resolve_frozen_repository,
     resolve_repo_path,
 )
@@ -47,7 +49,6 @@ from services.ai.platform_provider import PlatformContextProvider
 from services.ai.protocol import ContextRequest, sanitize_requests
 from services.ai.repo_reference import search_frozen_repository
 from services.ai.scope import AnalysisScope
-from services.ai import provider_search as agent_mode_module
 
 # 旧名 / 新名：fixture 的公共函数更名（只改定义处，不改调用方）。
 OLD_NAME = "CalcDamage"
@@ -691,7 +692,9 @@ class _ScriptedClient:
         self._result = ChatResult
         self.calls: list[list[dict]] = []
 
-    def complete(self, messages, *, temperature=None):
+    def complete(self, messages, *, temperature=None, **kwargs):
+        # WP17 起引擎默认带 `max_tokens`：假 client 要能收下它，否则引擎把 TypeError
+        # 记成 transport_error，把「两条请求都执行了」测成「一条都没发出去」。
         self.calls.append([dict(item) for item in messages])
         index = min(len(self.calls) - 1, len(self._replies) - 1)
         return self._result(text=self._replies[index], model="fake", prompt_tokens=10,
@@ -767,3 +770,31 @@ def test_one_round_carries_both_the_hits_and_the_frozen_window(
     )
     assert f"{CALLER}:3" in second_round_text
     assert f"冻结版本 {renames_only_the_definition.tip[:12]}" in second_round_text
+
+
+# ---------------------------------------------------------------------------
+#  九、WP17：`allowed_paths=None` 时冻结仓库仍然不限制（旧行为逐字不变）
+# ---------------------------------------------------------------------------
+
+
+def test_without_allowed_paths_the_frozen_reader_is_unrestricted(
+    renames_only_the_definition,
+):
+    """范围收口是**可选**的一层：没给 `allowed_paths` 时与加这个参数之前逐字相同。
+
+    老 payload / `profile=all` 走的就是这一档 —— 冻结仓库存在的意义（读**未改动**的
+    调用方）靠它；收口只能收「声明了范围」的那一档，不能把这一档一起关掉。
+    """
+    frozen = _frozen(renames_only_the_definition)
+    reader = FrozenTreeReader(frozen)
+
+    assert reader.allowed_paths is None
+    assert reader.restricted is False
+    assert reader.out_of_scope(CALLER) is False
+    assert reader.read_bytes(CALLER) is not None
+    assert set(reader.tracked_paths()) == {DEFINER, CALLER, ".env"}
+
+    scope = build_read_scope(frozen)
+    assert scope.allowed_paths is None
+    assert scope.restricted is False
+    assert resolve_frozen_read(scope, (reader,), CALLER).ok

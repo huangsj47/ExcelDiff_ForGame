@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import inspect, text as sa_text
+from sqlalchemy import inspect
+from sqlalchemy import text as sa_text
 from sqlalchemy.exc import SQLAlchemyError
 
 from migrations.ai_run_claim_columns import apply as apply_ai_run_claim_columns
@@ -350,6 +351,9 @@ def _migrate_ai_analysis_columns(db, log_print):
         "ai_analysis_anomaly",
         {
             "claims": "claims LONGTEXT",
+            # 「曾被人工忽略」的来历（P0 处置闭环）。老行是 NULL —— 而那正是它们的语义：
+            # 加列之前没有任何地方记过「这条曾被忽略」，回填成 False 也不会更对。
+            "suppressed_previous": "suppressed_previous BOOLEAN",
         },
         log_print,
     )
@@ -392,6 +396,10 @@ def _migrate_ai_analysis_columns(db, log_print):
             # 每个分片报几条（2026-09）。同样无 DEFAULT 子句，老行 NULL → `resolved()`
             # 读成 10。
             "max_anomalies_per_subagent": "max_anomalies_per_subagent INTEGER",
+            # 分析 profile（2026-11，契约 §1.7）：`tables` / `all`。
+            # 没有 DEFAULT 子句 —— 老行是 NULL，而 NULL 经 `resolved()` 读出来正是
+            # 保守默认值 `tables`（只分析配表），所以不回填。
+            "analysis_profile": "analysis_profile VARCHAR(20)",
         },
         log_print,
     )
@@ -464,6 +472,136 @@ def _migrate_ai_analysis_columns(db, log_print):
         },
         log_print,
     )
+
+
+# 人工忽略台账（`models/ai_analysis/anomaly.AiAnalysisIgnoredFingerprint`，P0 处置闭环）。
+#
+# **这张表为什么还要一段迁移**：全新库里 `db.create_all()` 会把它建出来；但「保留数据的
+# 老库」上真正的风险点不在建表本身（`create_all` 确实只建不存在的表），而在于
+# **以后给这张表加列**——那时它就已经是「已存在的表」，`create_all` 什么都不做。
+# 所以这里一次把三件事都按 `_migrate_*` 的纪律写全：建表、补列、补索引，各自判存在。
+IGNORED_FINGERPRINT_TABLE = "ai_analysis_ignored_fingerprint"
+
+_IGNORED_FINGERPRINT_COLUMNS = {
+    "project_id": "project_id INTEGER",
+    "target_key": "target_key VARCHAR(200)",
+    "fingerprint": "fingerprint VARCHAR(32)",
+    "title": "title VARCHAR(500)",
+    # 抑制判据要用的文件路径（理由见模型类 docstring：少了它，一次忽略会变成永久封条）。
+    "file_path": "file_path VARCHAR(500)",
+    "ignored_at": "ignored_at DATETIME",
+    "last_run_id": "last_run_id INTEGER",
+}
+
+# 台账上的三个索引：身份唯一键（`(target_key, fingerprint)`）+ 两个普通索引。
+# 名字必须与模型层 `index=True` / `db.Index(...)` 生成的名字逐字一致 —— 否则老库上会
+# 多出一个谁也不认识的重复索引，而新建库与新库各有一套（两套索引的差异没有任何地方会报错）。
+_IGNORED_FINGERPRINT_INDEXES = (
+    ("uq_ai_ignored_fingerprint_target", ("target_key", "fingerprint"), True),
+    ("ix_ai_analysis_ignored_fingerprint_project_id", ("project_id",), False),
+    ("ix_ai_analysis_ignored_fingerprint_last_run_id", ("last_run_id",), False),
+)
+
+
+def _build_unique_index_sql(dialect_name, table_name, index_name, columns):
+    """按后端拼 `CREATE UNIQUE INDEX`（入参只来自本文件的常量，且逐个校验过标识符）。
+
+    与 `_build_create_index_sql` 同一套后端差异：MySQL 不支持 `IF NOT EXISTS`，走
+    「照建 + 吞 1061」；SQLite / PostgreSQL 交给数据库自己保证幂等。
+    """
+    body = f"{index_name} ON {table_name} ({', '.join(columns)})"
+    if dialect_name == "mysql":
+        return f"CREATE UNIQUE INDEX {body}"
+    return f"CREATE UNIQUE INDEX IF NOT EXISTS {body}"
+
+
+def _migrate_ai_ignored_fingerprint_table(db, log_print):
+    """建「人工忽略台账」表、补齐它的列与索引（幂等）。
+
+    ## 为什么必须接进启动链路
+
+    P0 修复（人工忽略持久化）的读侧在 `baseline_source`：它按 `target_key` 查这张表，
+    决定「下一轮还要不要报这一条」。表不存在时那条查询不是「查不到」，而是直接抛
+    `no such table` —— 而那一步发生在**一轮分析跑到一半**（读基线）的时候，整轮 20 多
+    分钟的结论作废。所以建表这件事要在启动期做完，不能指望「反正 create_all 会建」
+    （精简测试库、或者只跑了 `_migrate_*` 的库上，它不会）。
+
+    ## 为什么建表用 `CreateTable` 而不是 `create_all`
+
+    `create_all` 是 `MetaData` 级别的操作，会去解析整张表的依赖（还会带上别的表）；
+    这里只要**这一张**。DDL 由模型自己渲染出来 —— 表名、列名、唯一键只有模型一个来源，
+    手抄一份 DDL 迟早与模型漂（本文件抬头那段「模型加了列、迁移清单漏了」就是同一个坑）。
+    """
+    # 函数内 import：`models.ai_analysis.anomaly` 会拉进 SQLAlchemy 模型层，而本模块
+    # 在 `app.py` 的导入链上比模型层更早（模块级 import 会成环）。
+    from sqlalchemy.schema import CreateTable
+
+    from models.ai_analysis.anomaly import AiAnalysisIgnoredFingerprint
+
+    table = AiAnalysisIgnoredFingerprint.__table__
+    try:
+        existing = set(inspect(db.engine).get_table_names())
+    except DB_MIGRATION_RUNTIME_ERRORS as exc:
+        log_print(f"⚠️ 读取数据库结构失败，跳过 {IGNORED_FINGERPRINT_TABLE} 迁移: {exc}", "DB", force=True)
+        return
+    if IGNORED_FINGERPRINT_TABLE not in existing:
+        try:
+            db.session.execute(sa_text(str(CreateTable(table).compile(db.engine))))
+            db.session.commit()
+            log_print(
+                f"✅ 自动建表 {IGNORED_FINGERPRINT_TABLE}（人工忽略台账）", "DB", force=True
+            )
+        except DB_MIGRATION_RUNTIME_ERRORS as exc:
+            log_print(
+                f"⚠️ 建表 {IGNORED_FINGERPRINT_TABLE} 失败: {exc}", "DB", force=True
+            )
+            try:
+                db.session.rollback()
+            except SQLAlchemyError:
+                pass
+            # 建不出来就没有列/索引可补：再往下跑只会重复报同一个错。
+            return
+    # 表已存在（或刚建出来）时补列：给「这张表以后再加列」与「部分迁移过的库」留的路。
+    _migrate_table_columns(db, IGNORED_FINGERPRINT_TABLE, _IGNORED_FINGERPRINT_COLUMNS, log_print)
+    _migrate_ai_ignored_fingerprint_indexes(db, log_print)
+
+
+def _migrate_ai_ignored_fingerprint_indexes(db, log_print):
+    """补台账的唯一键与两个普通索引（与 `apply_index_migrations` 同一套幂等写法）。"""
+    dialect_name = db.engine.dialect.name
+    for index_name, columns, unique in _IGNORED_FINGERPRINT_INDEXES:
+        identifiers = (IGNORED_FINGERPRINT_TABLE, index_name, *columns)
+        if not all(_INDEX_IDENTIFIER_RE.match(part) for part in identifiers):
+            log_print(
+                f"⚠️ 索引定义含非法标识符，已跳过: {IGNORED_FINGERPRINT_TABLE}.{index_name}",
+                "DB",
+                force=True,
+            )
+            continue
+        create_sql = (
+            _build_unique_index_sql(
+                dialect_name, IGNORED_FINGERPRINT_TABLE, index_name, columns
+            )
+            if unique
+            else _build_create_index_sql(
+                dialect_name, IGNORED_FINGERPRINT_TABLE, index_name, columns
+            )
+        )
+        try:
+            db.session.execute(sa_text(create_sql))
+            db.session.commit()
+        except SQLAlchemyError as exc:
+            try:
+                db.session.rollback()
+            except SQLAlchemyError:
+                pass
+            if _is_index_already_exists_error(exc):
+                continue  # MySQL 没有 IF NOT EXISTS：已存在就是这条 1061，不算失败
+            log_print(
+                f"⚠️ 创建索引失败 {IGNORED_FINGERPRINT_TABLE}.{index_name}: {exc}",
+                "DB",
+                force=True,
+            )
 
 
 def _migrate_round_event_diagnostics_columns(db, log_print):
@@ -541,6 +679,10 @@ def apply_schema_migrations(db, log_print):
     _migrate_background_task_columns(db, log_print)
     _migrate_ai_weekly_analysis_state_columns(db, log_print)
     _migrate_ai_analysis_columns(db, log_print)
+    # 人工忽略台账（P0 处置闭环）。**必须接上**：读基线时按 `target_key` 查这张表，
+    # 表不存在不是「查不到」而是 `no such table` —— 那一步发生在一轮分析跑到一半，
+    # 整轮结论作废。建表/补列/补索引各自判存在，重复跑无害。
+    _migrate_ai_ignored_fingerprint_table(db, log_print)
     # 逐轮事件账的诊断列。这张表在上线时就已经建出来了，`create_all()` 不会给它补列；
     # 漏了这一段，诊断值会**静默**恒为「未上报」（写入侧被 except 咽掉），与上游真没
     # 上报分不开。

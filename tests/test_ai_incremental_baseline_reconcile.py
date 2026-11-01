@@ -2,20 +2,28 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from app import app as flask_app
 from app import create_tables, db
 from models import Project
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
+from models.ai_analysis.anomaly import AiAnalysisIgnoredFingerprint
+from services.ai.anomaly_disposition import persist_suppressed_previous, set_disposition
+from services.ai.baseline import classify, digest_fingerprints, suppressed_fingerprints
 from services.ai.baseline_closures import (
     DECLARED_FIXED,
     DECLARED_STANDING,
     BaselineClosure,
 )
-from services.ai.baseline_source import baseline_findings, previous_anomaly_rows
+from services.ai.baseline_source import (
+    baseline_digest,
+    baseline_findings,
+    previous_anomaly_rows,
+)
 from services.ai.engine import STATUS_SUCCEEDED, EngineOutcome
 from services.ai.incremental_baseline import reconcile_result
-from services.ai.protocol import AnalysisPayload, DimensionReview
+from services.ai.protocol import AnalysisPayload, Anomaly, Claim, DimensionReview
 from services.ai.result_payload import result_payload
 
 
@@ -50,6 +58,40 @@ def _current(fingerprint, path):
     }
 
 
+def test_unchanged_in_scope_critical_remains_a_risk_after_an_unrelated_delta():
+    old = _old("table-critical", "tables/a.xlsx", severity="critical")
+    old["out_of_scope"] = False
+    current = {
+        "report_markdown": "", "anomalies": [], "final_findings": [],
+        "risk_level": "low", "risk_reasons": [],
+    }
+
+    merged = reconcile_result(
+        current, [old], changed_paths={"tables/b.xlsx"},
+        previous_run_id=42, allowed_paths=None,
+    )
+
+    assert merged["anomalies"][0]["out_of_scope"] is False
+    assert merged["risk_level"] == "high"
+
+
+def test_historical_background_critical_stays_background_on_an_unrelated_delta():
+    old = _old("background-critical", "code/unrelated.lua", severity="critical")
+    old["out_of_scope"] = True
+    current = {
+        "report_markdown": "", "anomalies": [], "final_findings": [],
+        "risk_level": "low", "risk_reasons": [],
+    }
+
+    merged = reconcile_result(
+        current, [old], changed_paths={"tables/b.xlsx"},
+        previous_run_id=42, allowed_paths=None,
+    )
+
+    assert merged["anomalies"][0]["out_of_scope"] is True
+    assert merged["risk_level"] == "low"
+
+
 def test_incremental_result_carries_forward_and_marks_changed_history_for_recheck():
     result = {
         "report_markdown": "# Current report\n",
@@ -82,7 +124,10 @@ def test_incremental_result_carries_forward_and_marks_changed_history_for_rechec
     assert by_id["untouched"]["disposition"] == "confirmed"
     assert by_id["changed-missing"]["baseline_state"] == "needs_recheck"
     assert by_id["changed-missing"]["disposition"] == "pending"
-    assert merged["risk_level"] == "high"
+    # WP28：`untouched` 是**继承来的背景发现**（文件不在本轮 changed 里、也没有指向
+    # changed 的断言）。它照旧列在清单里，但不许把等级抬到 high —— 审查复现的正是
+    # 「上一轮的背景发现经继承后变成正式风险」。
+    assert merged["risk_level"] == "mid_high"
     assert merged["baseline_reconciliation"] == {
         "previous_run_id": 22,
         "previous_total": 4,
@@ -95,6 +140,9 @@ def test_incremental_result_carries_forward_and_marks_changed_history_for_rechec
         "declared_overturned": 0,
         "declarations_ignored": 0,
         "suppressed": 1,
+        # `untouched`（继承的背景发现 critical）+ `fresh`（本轮报的、不在 changed 里也
+        # 没有关联断言）—— 两条被单列，都没有参与等级判定。
+        "out_of_scope": 2,
     }
     assert "历史结论延续（平台）" in merged["report_markdown"]
     assert "不能因为模型没有逐条回应就视为已修复" in merged["report_markdown"]
@@ -604,3 +652,634 @@ def _seed_a_previous_run_with_one_finding(path="code/qz_pub/team.lua"):
     )
     db.session.commit()
     return run, fingerprint
+
+
+# ==========================================================================
+# 「曾被人工忽略」的条目又回来了：结果里要留着这个标记
+# ==========================================================================
+#
+# 产品审查（2026-11-01）第 5 条的第 2 点（**代码可证**的那一半）：复活判据是**本轮**
+# 的 `change.paths`（`baseline.classify`）—— 一条被忽略的结论只要所在文件又变一次，
+# 就一定会重新出现在清单里。这是刻意的（「忽略」不许变成「永远看不见」），但从行上看
+# 它和一条全新发现一模一样：重新看到它的人不知道上一轮已经有人判定过「这条不用管」。
+# 所以合并器要留下 `suppressed_previous`。
+
+
+def test_a_previously_ignored_item_that_comes_back_is_marked():
+    """两条复活路径都要带标记，且**没被忽略过的条目不许带**（否则标记失去区分力）。
+
+    * 平台路径：文件又变了、模型本轮没提 → `needs_recheck` 重新进清单；
+    * 模型路径：文件又变了、模型自己又报了一遍 → `reconfirmed`。
+
+    第三种（已忽略**且**文件没再变）照旧被抑制：它连清单都不进，自然也不该被数进
+    「曾被忽略又回来了」那一句 —— 否则报告会把它读成「忽略没生效」。
+    """
+    fingerprint = "aaaa1111bbbb2222"
+    rereported = "cccc3333dddd4444"
+    never_ignored = "eeee5555ffff6666"
+    still_suppressed = "99990000aaaa1111"
+    result = {
+        "report_markdown": "本轮",
+        "anomalies": [_current(rereported, "code/changed.lua")],
+        "final_findings": [{"fingerprint": rereported, "active": True}],
+    }
+    previous = [
+        _old(fingerprint, "code/changed.lua", disposition="ignored"),
+        _old(rereported, "code/changed.lua", disposition="ignored"),
+        _old(never_ignored, "code/changed.lua"),
+        _old(still_suppressed, "code/stable.lua", disposition="ignored"),
+    ]
+
+    merged = reconcile_result(
+        result, previous, changed_paths={"code/changed.lua"}, previous_run_id=22
+    )
+
+    by_id = {item["fingerprint"]: item for item in merged["anomalies"]}
+    assert by_id[fingerprint]["baseline_state"] == "needs_recheck"
+    assert by_id[fingerprint]["suppressed_previous"] is True, (
+        "文件又变而被提回清单的条目没有「曾被忽略」标记 —— 它看起来是一条全新发现"
+    )
+    assert by_id[fingerprint]["disposition"] == "pending", "复活的条目要重新处置，不能沿用 ignored"
+    assert by_id[rereported]["baseline_state"] == "reconfirmed"
+    assert by_id[rereported]["suppressed_previous"] is True, (
+        "模型重新报出来的条目丢了「曾被忽略」标记"
+    )
+    assert "suppressed_previous" not in by_id[never_ignored], (
+        "从没被忽略过的条目也带了标记 —— 这个字段就没有区分力了"
+    )
+    assert still_suppressed not in by_id, "文件没再变的忽略项又被放回了在挂清单"
+    assert merged["baseline_reconciliation"]["suppressed"] == 1
+
+    # 结论载荷是面板与导出读的那一列：同一个事实必须也在那里。
+    finals = {
+        row["fingerprint"]: row for row in merged["final_findings"] if row.get("active")
+    }
+    assert finals[fingerprint]["suppressed_previous"] is True
+    assert finals[rereported]["suppressed_previous"] is True
+    assert "suppressed_previous" not in finals[never_ignored]
+
+    # 报告那一节只报数，但这一句必须说：读者最容易把它读成「平台的忽略没生效」。
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+    assert "2 条**曾被人工忽略**" in section, section
+    assert "「忽略」不是删除" in section, section
+
+
+def test_the_ignored_marker_stays_silent_when_nothing_resurfaced():
+    """没有复活条目时一个字都不许多 —— 那一句是**状态句**，不是常驻免责声明。"""
+    merged = reconcile_result(
+        {
+            "report_markdown": "本轮",
+            "anomalies": [_current("aaaa1111bbbb2222", "code/stable.lua")],
+            "final_findings": [{"fingerprint": "aaaa1111bbbb2222", "active": True}],
+        },
+        [
+            _old("aaaa1111bbbb2222", "code/stable.lua"),
+            _old("cccc3333dddd4444", "code/stable.lua", disposition="ignored"),
+        ],
+        changed_paths=set(),
+        previous_run_id=22,
+    )
+
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+    assert "曾被人工忽略" not in section, section
+    assert merged["anomalies"][0].get("suppressed_previous") is None
+    assert merged["baseline_reconciliation"]["suppressed"] == 1
+
+
+# ==========================================================================
+# 三、人工忽略跨「结构化 0 行」的持久化（P0 真漏口，2026-11）
+#
+# 病灶与修法写在 `services/ai/baseline_source.py` 的模块抬头。这一组从**真入口**走：
+# 库里的处置 → 台账 → `previous_anomaly_rows` / `baseline_findings` → 合并 → 落库。
+# 手写上一轮行形状的写法证明不了台账真的被读进来了。
+# ==========================================================================
+
+
+def _ledger_context():
+    """一个项目 + 一个周版本分组键（测试库会话级共用，键必须唯一）。"""
+    project = Project(code=f"P{uuid.uuid4().hex[:8]}", name=f"台账{uuid.uuid4().hex[:6]}")
+    db.session.add(project)
+    db.session.flush()
+    return project, f"grp-{uuid.uuid4().hex[:8]}"
+
+
+def _run_at(project_id, target_key, when):
+    run = AiAnalysisRun(
+        project_id=project_id,
+        target_type="weekly",
+        target_key=target_key,
+        status="succeeded",
+        scope="incremental",
+        conclusion_structured=True,
+        created_at=when,
+    )
+    db.session.add(run)
+    db.session.flush()
+    return run
+
+
+def _seed_an_ignored_finding(run, *, title="【道具】ID 被删除但生成文件仍在"):
+    """在 `run` 上落一条结论并**人工忽略**它（处置走统一写路径 → 台账一起落）。"""
+    anomaly = AiAnalysisAnomaly(
+        run_id=run.id,
+        project_id=run.project_id,
+        fingerprint=uuid.uuid4().hex[:16],
+        title=title,
+        category="config_id",
+        severity="high",
+        confidence="high",
+        evidence=json.dumps(["config/道具表.xlsx 删除了 ID 1001"], ensure_ascii=False),
+        commit_ref="a" * 40,
+        file_path="config/道具表.xlsx",
+        impact="老存档引用的道具失效",
+        suggestion="确认是否有意下线",
+    )
+    db.session.add(anomaly)
+    db.session.flush()
+    set_disposition(anomaly, disposition="ignored", username="张三")
+    db.session.commit()
+    return anomaly
+
+
+def _reported_anomaly(*, path="config/道具表.xlsx"):
+    """模型报出来的那一条（指纹由引擎算法算 —— 台账按指纹匹配，不能手编）。"""
+    return Anomaly(
+        title="【道具】ID 被删除但生成文件仍在",
+        category="config_id",
+        severity="high",
+        confidence="high",
+        evidence=(f"{path} 删除了 ID 1001",),
+        commit="b" * 40,
+        file_path=path,
+        impact="老存档引用的道具失效",
+        suggestion="确认是否有意下线",
+    )
+
+
+def _seed_an_ignored_finding(run):
+    """在 `run` 上落一条结论并**人工忽略**它（处置走统一写路径 → 台账一起落）。
+
+    指纹用**引擎那一份算法**从 `_reported_anomaly()` 算出来：台账是按指纹匹配的，
+    行上的指纹与下一轮模型算出来的对不上，整条链路会静默失效 —— 而这条用例会以
+    「随便给一个指纹」的写法把这个真 bug 糊过去。
+    """
+    from services.ai.rules import anomaly_fingerprint
+
+    reported = _reported_anomaly()
+    anomaly = AiAnalysisAnomaly(
+        run_id=run.id,
+        project_id=run.project_id,
+        fingerprint=anomaly_fingerprint(reported),
+        title=reported.title,
+        category=reported.category,
+        severity=reported.severity,
+        confidence=reported.confidence,
+        evidence=json.dumps(list(reported.evidence), ensure_ascii=False),
+        commit_ref=reported.commit,
+        file_path=reported.file_path,
+        impact=reported.impact,
+        suggestion=reported.suggestion,
+    )
+    db.session.add(anomaly)
+    db.session.flush()
+    set_disposition(anomaly, disposition="ignored", username="张三")
+    db.session.commit()
+    return anomaly
+
+
+def _drop_ledger_case(target_key, run_ids):
+    AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).delete()
+    for run_id in run_ids:
+        AiAnalysisAnomaly.query.filter_by(run_id=run_id).delete()
+        AiAnalysisRun.query.filter_by(id=run_id).delete()
+    db.session.commit()
+
+
+def test_a_zero_row_run_still_feeds_the_ignored_ledger_into_reconciliation():
+    """**P0 的形状**：忽略 → 结构化 0 行 → 下一轮同指纹再报 → 仍被抑制。
+
+    0 行那一次是基线；它的行是空的，但台账里那条「不用再报」还在。对账器拿到台账补
+    进来的行之后，按「已忽略 + 文件没再变」把它挡掉（`suppressed` 计数），而不是让它
+    以 `pending` 身份重新出现在清单里。
+    """
+    with flask_app.app_context():
+        create_tables()
+        project, key = _ledger_context()
+        now = datetime.now(timezone.utc)
+        first = _run_at(project.id, key, now - timedelta(hours=2))
+        ignored = _seed_an_ignored_finding(first)
+        fingerprint = ignored.fingerprint
+        zero_row = _run_at(project.id, key, now - timedelta(hours=1))
+        try:
+            assert AiAnalysisAnomaly.query.filter_by(run_id=zero_row.id).count() == 0, "前提不成立"
+
+            rows = previous_anomaly_rows(zero_row.id)
+            assert [row["fingerprint"] for row in rows] == [fingerprint], (
+                "0 行那次没有把台账补进对账输入 —— 对账器会直接早退，"
+                "「曾被忽略」这个事实在这一轮彻底消失"
+            )
+            assert rows[0]["disposition"] == "ignored"
+            # 形状要**完整**（不是从台账拼出来的残缺行）：对账器要把历史等级、证据、
+            # 断言一路带进本轮结果，缺键的表现是面板上少一段内容而不是报错。
+            assert rows[0]["evidence"] == ["config/道具表.xlsx 删除了 ID 1001"]
+            assert rows[0]["title"] == ignored.title
+
+            findings = baseline_findings("weekly", key)
+            suppressed = suppressed_fingerprints(classify(findings))
+            assert suppressed == frozenset({fingerprint})
+
+            outcome = EngineOutcome(
+                status=STATUS_SUCCEEDED,
+                anomalies=(_reported_anomaly(),),
+                report_markdown="# 本轮\n",
+            )
+            result = result_payload(outcome, {}, suppressed=suppressed)
+            assert result["anomalies"] == [], "被忽略的条目又被当成新结论交付了"
+
+            merged = reconcile_result(
+                result,
+                rows,
+                changed_paths=set(),
+                previous_run_id=zero_row.id,
+            )
+            assert merged["anomalies"] == []
+            assert merged["baseline_reconciliation"]["suppressed"] == 1
+            # 这一节以前会印「共 0 条：。」（读起来像坏了）：被抑制的条目不进任何一组，
+            # 于是「它们去哪了」必须单独说一句。
+            section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+            assert "共 0 条" in section, section
+            assert "人工已忽略" in section and "放回清单" in section, section
+        finally:
+            _drop_ledger_case(key, [first.id, zero_row.id])
+
+
+def test_the_revival_after_a_zero_row_run_is_marked_and_persisted():
+    """0 行缺口之后文件又变了 → 复活条目要带「曾被忽略」，而且要**落进库**。
+
+    只把标记写在这一次的 `result` 字典里是不够的：面板、导出、下一轮基线读的都是
+    `ai_analysis_anomaly.suppressed_previous` 那一列（刷新一次页面就消失的字段等于没有）。
+    `_persist_outcome` 不在本工作包的文件所有权内，所以落库走
+    `anomaly_disposition.persist_suppressed_previous` 这个辅助（一行接入，理由见它的
+    docstring）；这里从真入口走一遍，证明那一列真的落得下去。
+    """
+    from services.ai_analysis_service import _persist_outcome
+
+    with flask_app.app_context():
+        create_tables()
+        project, key = _ledger_context()
+        now = datetime.now(timezone.utc)
+        first = _run_at(project.id, key, now - timedelta(hours=2))
+        ignored = _seed_an_ignored_finding(first)
+        fingerprint = ignored.fingerprint
+        zero_row = _run_at(project.id, key, now - timedelta(hours=1))
+        current = _run_at(project.id, key, now)
+        try:
+            rows = previous_anomaly_rows(zero_row.id)
+            assert [row["fingerprint"] for row in rows] == [fingerprint], "前提不成立"
+
+            outcome = EngineOutcome(
+                status=STATUS_SUCCEEDED,
+                anomalies=(_reported_anomaly(),),
+                report_markdown="# 本轮\n",
+            )
+            # 文件变了 → 抑制不再命中（`baseline.classify` 的复活判据），这一条会进清单。
+            change_paths = {"config/道具表.xlsx"}
+            suppressed = suppressed_fingerprints(
+                classify(baseline_findings("weekly", key), changed_paths=change_paths)
+            )
+            assert suppressed == frozenset(), "前提不成立：文件变了还抑制，复活无从谈起"
+            result = result_payload(outcome, {}, suppressed=suppressed)
+            assert [row["fingerprint"] for row in result["anomalies"]] == [fingerprint]
+
+            merged = reconcile_result(
+                result,
+                rows,
+                changed_paths=change_paths,
+                previous_run_id=zero_row.id,
+            )
+            revivals = [item for item in merged["anomalies"] if item["fingerprint"] == fingerprint]
+            assert len(revivals) == 1
+            assert revivals[0]["suppressed_previous"] is True, (
+                "跨 0 行缺口复活的条目没有「曾被忽略」标记 —— 它看起来是一条全新发现"
+            )
+            assert revivals[0]["disposition"] == "pending", (
+                "复活的条目沿用了 ignored —— 下一轮它又会被当成「人工已忽略」静默抹掉"
+            )
+
+            _persist_outcome(current, outcome, merged)
+            # `_persist_outcome` 落库后**已经**调用过 `persist_suppressed_previous`
+            # （WP15 接线），所以这里再调一次是幂等的、改 0 行；真正要钉的是下面
+            # 读库那一条（列已置 True）。
+            assert persist_suppressed_previous(current.id, merged["anomalies"]) == 0
+
+            db.session.expire_all()
+            stored = AiAnalysisAnomaly.query.filter_by(
+                run_id=current.id, fingerprint=fingerprint
+            ).one()
+            assert stored.suppressed_previous is True, (
+                "标记没有落进库 —— 面板/导出/下一轮基线读的是这一列，不是这一次的返回体"
+            )
+            assert stored.disposition == "pending"
+            assert stored.to_dict()["suppressed_previous"] is True
+            # 撤销处置（paging/confirming）不许把「来历」抹掉：那是两件事。
+            assert stored.to_dict()["disposition"] == "pending"
+        finally:
+            _drop_ledger_case(key, [first.id, zero_row.id, current.id])
+
+
+def test_a_closure_for_a_ledger_only_entry_is_not_counted_as_unmatched():
+    """摘要里列出的台账条目，模型对它给交代时**不许**被记成「指纹对不上」。
+
+    这是把台账并进**对账输入**（而不只是摘要）的理由：模型按协议必须对「清单上的每
+    一条」给出 `baseline_updates`，而合并器的「认识哪些指纹」来自对账输入。两边不同源
+    时，一条台账条目的合法交代会被记账成 `declarations_ignored`，并在报告里写成
+    「有收口声明没有生效（指纹对不上本次清单）」—— 那句错误提示本身是假的，读者会去
+    找一个不存在的抄写错误。
+
+    **形状是「上一轮还有别的行」**（不是 0 行）：这一档正好证明台账的并入与上一轮报了
+    几条无关。
+    """
+    from services.ai.change_set import ChangeSet
+    from services.ai.scope import AnalysisScope
+
+    with flask_app.app_context():
+        create_tables()
+        project, key = _ledger_context()
+        now = datetime.now(timezone.utc)
+        first = _run_at(project.id, key, now - timedelta(hours=2))
+        ignored = _seed_an_ignored_finding(first)
+        fingerprint = ignored.fingerprint
+        # 上一轮不是 0 行：另有一条普通结论（它的文件本轮没变，会被 carried_forward）。
+        later = _run_at(project.id, key, now - timedelta(hours=1))
+        current_row = AiAnalysisAnomaly(
+            run_id=later.id,
+            project_id=project.id,
+            fingerprint=uuid.uuid4().hex[:16],
+            title="另一条仍然成立的结论",
+            category="code_logic",
+            severity="high",
+            file_path="code/stable.lua",
+        )
+        db.session.add(current_row)
+        db.session.commit()
+        try:
+            # 前提：摘要里确实有那条台账条目的指纹（否则模型根本没被告知它）。
+            change = ChangeSet(summary="", scope=AnalysisScope(), paths=())
+            digest = baseline_digest("weekly", key, change)
+            assert fingerprint in digest_fingerprints(digest), digest
+
+            rows = previous_anomaly_rows(later.id)
+            assert {row["fingerprint"] for row in rows} == {
+                fingerprint,
+                current_row.fingerprint,
+            }, "台账条目没有并进对账输入 —— 模型对它的交代会被当成「指纹对不上」"
+
+            merged = reconcile_result(
+                {
+                    "report_markdown": "本轮",
+                    "anomalies": [],
+                    "final_findings": [],
+                    "baseline_updates": [
+                        _closure(fingerprint, status=DECLARED_STANDING, reason="")
+                    ],
+                },
+                rows,
+                changed_paths=set(),
+                previous_run_id=later.id,
+            )
+            assert merged["baseline_reconciliation"]["declarations_ignored"] == 0, (
+                "模型对台账条目的交代被记成了「指纹对不上本次清单」—— 那条提示是假的"
+            )
+            assert merged["baseline_reconciliation"]["declared_standing"] == 1
+        finally:
+            _drop_ledger_case(key, [first.id, later.id])
+
+
+# ==========================================================================
+# 五、继承条目的范围标记（WP28）：背景发现不许在下一轮变成正式风险
+#
+# 案情（审查 P1，已复现）：WP27 把与本次配表差异无关的结论标 `out_of_scope=True`、
+# 不计本轮等级；可下一轮增量继承时，`_historical_anomaly` 不带这个键（库里也没有这一
+# 列），`:567` 的 critical 升级又对所有继承条目生效 —— 一条范围外 critical 背景发现
+# 经继承后标记消失，风险 low→high。
+#
+# 修法：合并之后按**本轮**的 `allowed_paths` / `changed_paths` / `claims` 重算，再定级。
+# 这一节钉住三件事：标记不丢、等级不被背景发现抬高、本轮自己的 in-scope critical 照旧
+# 抬等级（不许修过头）。
+# ==========================================================================
+
+
+DELTA_TABLE = "config/[30]道具表_CfgItem.xlsx"
+BACKGROUND_CODE = "code/qz_server/chat_service.lua"
+
+
+def _old_with_claims(fingerprint, path, refs, *, severity="critical"):
+    """上一轮落库形状的一行：断言清单存的是 JSON 文本（`AiAnalysisAnomaly.claims`）。
+
+    **故意不带 `out_of_scope` 键**：库里没有这一列，继承项拿到的就是这种行。标记必须
+    由本轮重算得出；如果实现只是把上一轮的键抄过来，这条用例就会红。
+    """
+    return {
+        **_old(fingerprint, path, severity=severity),
+        "claims": json.dumps(
+            [
+                {
+                    "claim_id": "C1",
+                    "kind": "fact",
+                    "statement": "这段代码会读到改过的表",
+                    "evidence_refs": list(refs),
+                }
+            ],
+            ensure_ascii=False,
+        ),
+    }
+
+
+def _empty_result(risk="mid_high"):
+    return {
+        "report_markdown": "# 本轮\n",
+        "anomalies": [],
+        "final_findings": [],
+        "risk_level": risk,
+        "risk_reasons": [],
+    }
+
+
+def test_an_inherited_background_critical_keeps_out_of_scope_and_does_not_raise_the_level():
+    """审查复现的形状：claims 只引代码路径 ⇒ 背景发现；继承后标记还在、等级不升高。
+
+    上一轮它就是**范围外**的（与配表 delta 无关），这一轮更不会因为「被继承」而变成
+    正式风险。若没有这次重算，`out_of_scope` 在继承行上根本不存在，下面那句 critical
+    升级会把它当成正式 critical → `risk_level` 被顶到 high。
+    """
+    previous = [
+        _old_with_claims("bg-critical", BACKGROUND_CODE, [f"{BACKGROUND_CODE}:88"])
+    ]
+
+    merged = reconcile_result(
+        _empty_result(),
+        previous,
+        changed_paths={DELTA_TABLE},
+        previous_run_id=22,
+        allowed_paths=None,
+    )
+
+    item = merged["anomalies"][0]
+    assert item["baseline_state"] == "carried_forward"
+    assert item["out_of_scope"] is True, (
+        "继承来的背景发现没有重算标记 —— 下一轮它会以正式结论身份参与定级"
+    )
+    assert merged["risk_level"] == "mid_high", (
+        "继承来的背景发现 critical 把等级抬到了 high（审查复现的 low→high）"
+    )
+    assert merged["baseline_reconciliation"]["out_of_scope"] == 1
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+    assert "另有 1 条为背景发现/关联不足，未计入等级" in section, (
+        "被单列的条数没有交代 —— 正文里一条 critical、等级却不是 high，读者会以为报告自相矛盾"
+    )
+
+
+def test_an_inherited_critical_whose_claims_touch_the_delta_still_raises_the_level():
+    """防过头：上一轮 critical 的断言命中**本轮**配表 delta ⇒ 有关联，照常抬 high。
+
+    这条同时证明重算不是「把所有继承项一律判成背景发现」—— 那会把真问题一起按下
+    去，而它恰好是 WP27 要保住的那一档（代码消费方对改过的表的结论）。
+    """
+    previous = [_old_with_claims("related-critical", BACKGROUND_CODE, [f"{DELTA_TABLE}:12"])]
+
+    merged = reconcile_result(
+        _empty_result(),
+        previous,
+        changed_paths={DELTA_TABLE},
+        previous_run_id=22,
+        allowed_paths=None,
+    )
+
+    item = merged["anomalies"][0]
+    assert item["out_of_scope"] is False, "断言指向本轮改过的表，却被判成背景发现"
+    assert merged["risk_level"] == "high", "有可核实关联的继承 critical 没有参与定级"
+    assert merged["baseline_reconciliation"]["out_of_scope"] == 0
+    section = merged["report_markdown"].split("## 历史结论延续（平台）", 1)[1]
+    assert "另有 0 条" not in section, "没有单列条目，却报告了「另有 N 条」"
+
+
+def test_an_in_scope_critical_this_round_keeps_the_level_high():
+    """本轮自己的 in-scope critical 照旧抬 high —— 背景发现不许抬，正常的不许被压。"""
+    critical = _current("current-critical", DELTA_TABLE)
+    critical["severity"] = "critical"
+    result = {
+        **_empty_result("high"),
+        "anomalies": [critical],
+        "final_findings": [{"fingerprint": "current-critical", "active": True}],
+    }
+    previous = [
+        _old_with_claims("bg-critical", BACKGROUND_CODE, [f"{BACKGROUND_CODE}:88"])
+    ]
+
+    merged = reconcile_result(
+        result,
+        previous,
+        changed_paths={DELTA_TABLE},
+        previous_run_id=22,
+        allowed_paths=None,
+    )
+
+    by_id = {item["fingerprint"]: item for item in merged["anomalies"]}
+    assert by_id["current-critical"]["out_of_scope"] is False
+    assert by_id["bg-critical"]["out_of_scope"] is True
+    assert merged["risk_level"] == "high", (
+        "本轮 in-scope critical 的 high 被背景发现的过滤一起压掉了"
+    )
+    assert merged["baseline_reconciliation"]["out_of_scope"] == 1
+
+
+def test_a_current_finding_whose_claims_point_at_the_delta_stays_in_scope():
+    """本轮条目的标记**不许被载荷里那份 claims 覆盖**（重算的边界）。
+
+    没有复核轮的运行里，`result_payload._anomaly_entry` 的 `claims` 取自复核行，取不到
+    就是空数组；而它的 `out_of_scope` 是用模型原始 `Anomaly.claims` 算的（那份才带着
+    `evidence_refs`）。合并器若拿载荷里的 claims 再算一遍，一条「断言指向改过的表」的
+    本轮 critical 会在继承合并这一步被误判成背景发现 —— 等级与报告口径一起漂。
+    """
+    outcome = EngineOutcome(
+        status="succeeded",
+        anomalies=(
+            Anomaly(
+                title="消费方没有处理新 ID",
+                category="code_logic",
+                severity="critical",
+                confidence="high",
+                evidence=(f"{BACKGROUND_CODE}:3",),
+                commit="a" * 40,
+                file_path=BACKGROUND_CODE,
+                claims=(
+                    Claim(
+                        claim_id="C1",
+                        kind="fact",
+                        statement="这段代码会读到改过的表",
+                        evidence_refs=(f"{DELTA_TABLE}:12",),
+                    ),
+                ),
+            ),
+        ),
+        report_markdown="# 本轮\n",
+    )
+    payload = {
+        "mode": "weekly",
+        "summary": {},
+        "allowed_paths": None,
+        "delta_files": [{"file_path": DELTA_TABLE, "latest_commit_id": "a" * 40}],
+    }
+    result = result_payload(outcome, payload)
+    # 前提：载荷里这条**已经是 in-scope**（result_payload 用的是模型原始 claims）。
+    assert result["risk_level"] == "high"
+    assert result["anomalies"][0]["out_of_scope"] is False
+    assert result["anomalies"][0]["claims"] == [], (
+        "前提不成立：这条用例要的是「载荷里的 claims 已经丢了证据」的那个形状"
+    )
+
+    merged = reconcile_result(
+        result,
+        [_old("old-background", "code/other.lua")],
+        changed_paths={DELTA_TABLE},
+        previous_run_id=7,
+        allowed_paths=None,
+    )
+
+    current = next(
+        item for item in merged["anomalies"] if item["title"] == "消费方没有处理新 ID"
+    )
+    assert current["out_of_scope"] is False, (
+        "本轮的有可核实关联结论被合并器拿载荷里的空 claims 重算成了背景发现"
+    )
+    assert merged["risk_level"] == "high"
+    assert merged["baseline_reconciliation"]["out_of_scope"] == 1, (
+        "被单列的只有那条继承来的背景发现；本轮 in-scope 的那条被算进去了"
+    )
+
+
+def test_an_explicit_empty_allow_list_marks_inherited_rows_out_of_scope():
+    """显式 `allowed_paths=[]`（一条都不许读）对**继承条目**同样生效。
+
+    这一档走的是旧口径：文件不在白名单里就是越界，断言指向 delta 也不能翻案。继承
+    条目原先完全绕过这条判据（它只看 `risk_level`），等于旧范围的声明对历史结论失效。
+    """
+    previous = [
+        _old_with_claims("inherited-located", BACKGROUND_CODE, [f"{DELTA_TABLE}:12"])
+    ]
+
+    merged = reconcile_result(
+        _empty_result(),
+        previous,
+        changed_paths={DELTA_TABLE},
+        previous_run_id=22,
+        allowed_paths=[],
+    )
+
+    item = merged["anomalies"][0]
+    assert item["out_of_scope"] is True, (
+        "显式空白名单没有作用到继承条目上 —— 读取范围的声明对历史结论失效"
+    )
+    assert merged["risk_level"] == "mid_high"
+    assert merged["baseline_reconciliation"]["out_of_scope"] == 1
+

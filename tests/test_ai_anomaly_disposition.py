@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -33,6 +33,7 @@ import routes.ai_analysis_routes as ai_routes
 from app import app, create_tables, db
 from models import Project, Repository, WeeklyVersionConfig
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun
+from models.ai_analysis.anomaly import AiAnalysisIgnoredFingerprint
 from services.ai import baseline_source
 from services.ai.anomaly_disposition import (
     DISPOSITION_NOTE_MAX_CHARS,
@@ -358,6 +359,211 @@ class TestTheLoopActuallyCloses:
 
 
 # ==========================================================================
+# 二·五、人工忽略的持久台账（P0 真漏口）
+#
+# 病灶：被忽略的条目交付时会被 `result_payload` 从 `anomalies` 里剔掉，而基线读侧只读
+# 「最近一次有结构化结论的运行」那批行。中间夹一次「有结论但 0 行」的运行，人工的判断
+# 就从读侧彻底消失 —— 下一轮同一条误报以 `pending` 身份重新报出来，而且没有任何地方
+# 说得出这是为什么。这一组用例钉的就是这条闭环。
+# ==========================================================================
+
+
+def _engine_anomaly(*, title="【道具】ID 被删除但生成文件仍在", path="config/道具表.xlsx"):
+    """模型报出来的那条结论（指纹由引擎算法算，不能手编 —— 抑制是按指纹匹配的）。"""
+    from services.ai.protocol import Anomaly
+
+    return Anomaly(
+        title=title,
+        category="config_id",
+        severity="high",
+        confidence="high",
+        evidence=(f"{path} 删除了 ID 1001",),
+        commit="a" * 40,
+        file_path=path,
+        impact="老存档引用的道具失效",
+        suggestion="确认是否有意下线",
+    )
+
+
+def _run_at(project_id, target_key, when: datetime) -> AiAnalysisRun:
+    run = _run(project_id, target_key)
+    # `previous_run` 只按 `created_at` 排序，同一秒内造出来的两条运行谁算基线是不确定的。
+    # 显式错开时间，「上一轮是谁」在用例里才是一个事实而不是运气。
+    run.created_at = when
+    run.finished_at = when
+    db.session.commit()
+    return run
+
+
+def _drop(target_key: str, run_ids) -> None:
+    """清掉本用例造的行（测试库是会话级共用的，不清理会串到下一条用例）。"""
+    AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).delete()
+    for run_id in run_ids:
+        AiAnalysisAnomaly.query.filter_by(run_id=run_id).delete()
+        AiAnalysisRun.query.filter_by(id=run_id).delete()
+    db.session.commit()
+
+
+def test_ignored_stays_suppressed_after_a_zero_row_concluded_run():
+    """**P0 的核心形状**：忽略 → 结构化 0 行 → 下一轮同指纹再报 → 仍被抑制。
+
+    三个动作都要断言，少一个这条链就没被证明：
+    1. 台账里有那条指纹（忽略真的落到了**分组**上，不只是行上）；
+    2. 基线读侧（`baseline_findings` / `suppressed`）在 0 行之后仍看得见它；
+    3. 交付（`result_payload`）把它剔掉了 —— 「下一轮同一条误报以 pending 重新报出来」
+       这件事没有发生。
+    """
+    from services.ai.engine import STATUS_SUCCEEDED, EngineOutcome
+    from services.ai.rules import anomaly_fingerprint
+
+    with app.app_context():
+        project, cfg = _project()
+        target_key = _uid("k")
+        now = datetime.now(timezone.utc)
+        first = _run_at(project.id, target_key, now - timedelta(hours=2))
+        anomaly = _engine_anomaly()
+        fingerprint = anomaly_fingerprint(anomaly)
+        row = _anomaly(first, fingerprint=fingerprint)
+        set_disposition(row, disposition="ignored", username="张三")
+        db.session.commit()
+
+        # 中间这一轮：**有结构化结论，但 0 行**（被忽略的那条交付时被剔掉了，
+        # 所以它也「不在这一轮的行里」—— 这正是漏口）。
+        zero_row = _run_at(project.id, target_key, now - timedelta(hours=1))
+        assert AiAnalysisAnomaly.query.filter_by(run_id=zero_row.id).count() == 0, "前提不成立"
+        assert baseline_source.previous_run("weekly", target_key).id == zero_row.id, (
+            "前提不成立：0 行那一次必须是「上一轮」（否则这条用例证明的是别的形状）"
+        )
+        try:
+            ledger = AiAnalysisIgnoredFingerprint.query.filter_by(
+                target_key=target_key
+            ).all()
+            assert [item.fingerprint for item in ledger] == [fingerprint], (
+                "处置没有写进分组台账 —— 行被剔掉之后，这份判断就再没有地方可读了"
+            )
+            assert ledger[0].title == row.title, "台账没有留下标题，基线摘要里只剩一个指纹"
+            assert ledger[0].file_path == "config/道具表.xlsx", (
+                "台账没有留下文件路径 —— 「文件又变了就复活」这条保证会失效"
+            )
+            assert ledger[0].last_run_id == first.id
+
+            findings = baseline_source.baseline_findings("weekly", target_key)
+            assert [item.fingerprint for item in findings] == [fingerprint], (
+                "上一轮 0 行之后，基线读侧再也读不到那条人工忽略 —— P0 漏口原样还在"
+            )
+            assert findings[0].disposition == "ignored"
+            suppressed = suppressed_fingerprints(classify(findings))
+            assert suppressed == frozenset({fingerprint})
+
+            outcome = EngineOutcome(status=STATUS_SUCCEEDED, anomalies=(anomaly,))
+            payload = result_payload(outcome, {}, suppressed=suppressed)
+            assert payload["anomalies"] == [], (
+                "同一条误报又以新结论的身份重新报出来了 —— 人工的忽略被静默作废"
+            )
+            assert payload["suppressed_count"] == 1
+        finally:
+            _drop(target_key, [first.id, zero_row.id])
+
+
+@pytest.mark.parametrize("disposition", ["pending", "confirmed"])
+def test_undoing_the_ignore_deletes_the_ledger_row(disposition):
+    """`pending` / `confirmed` 之后**不再抑制**（台账那一行必须被删掉）。
+
+    只改行上的 `disposition` 而不动台账，会在界面上留下一个说谎的状态：面板写着
+    「已确认」，下一轮那条结论却照旧被静默抹掉 —— 而用户没有任何地方看得出
+    「我其实还忽略着它」。
+    """
+    with app.app_context():
+        project, cfg = _project()
+        target_key = _uid("k")
+        run = _run(project.id, target_key)
+        row = _anomaly(run)
+        set_disposition(row, disposition="ignored", username="张三")
+        db.session.commit()
+        assert AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).count() == 1
+
+        set_disposition(row, disposition=disposition, username="李四")
+        db.session.commit()
+
+        assert AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).count() == 0, (
+            f"改成 {disposition} 之后台账还留着 —— 下一轮同一条仍会被静默抑制"
+        )
+        assert suppressed_fingerprints(
+            classify(baseline_source.baseline_findings("weekly", target_key))
+        ) == frozenset()
+        _drop(target_key, [run.id])
+
+
+def test_the_ledger_is_isolated_by_target_key():
+    """台账按 `target_key` 隔离：在 A 组忽略的指纹，不许在 B 组生效。
+
+    跨组抑制的后果是**另一个版本里真实存在的问题**被静默抹掉，而两边都不报错。
+    """
+    with app.app_context():
+        project, cfg = _project()
+        key_a = _uid("k-a")
+        key_b = _uid("k-b")
+        run_a = _run(project.id, key_a)
+        row = _anomaly(run_a, fingerprint="a" * 16)
+        set_disposition(row, disposition="ignored", username="张三")
+        db.session.commit()
+        try:
+            assert suppressed_fingerprints(
+                classify(baseline_source.baseline_findings("weekly", key_a))
+            ) == frozenset({"a" * 16})
+            assert suppressed_fingerprints(
+                classify(baseline_source.baseline_findings("weekly", key_b))
+            ) == frozenset(), "A 组的忽略串到了 B 组 —— 那会抹掉另一个版本的真实问题"
+            # 分组键为空（单提交分析）时**不查台账**：没有分组可隔离，退回旧逻辑。
+            assert baseline_source.ignored_fingerprints("") == {}
+            assert baseline_source.ignored_fingerprints(None) == {}
+        finally:
+            _drop(key_a, [run_a.id])
+
+
+def test_a_changed_file_revives_a_ledger_only_ignore():
+    """台账是**唯一来源**时，「文件又变了就复活」这条保证仍然成立。
+
+    少了台账里的文件路径，抑制就退化成「只要这条指纹曾经被忽略，就永远不再报」——
+    那正是 `baseline.py` 反复写着的、不允许发生的事（「忽略」不许变成永久封条）。
+    """
+    with app.app_context():
+        project, cfg = _project()
+        target_key = _uid("k")
+        now = datetime.now(timezone.utc)
+        first = _run_at(project.id, target_key, now - timedelta(hours=2))
+        row = _anomaly(first, fingerprint="b" * 16, file_path="config/道具表.xlsx")
+        set_disposition(row, disposition="ignored", username="张三")
+        db.session.commit()
+        zero_row = _run_at(project.id, target_key, now - timedelta(hours=1))
+        try:
+            from services.ai.change_set import ChangeSet
+            from services.ai.scope import AnalysisScope
+
+            unchanged = ChangeSet(summary="", scope=AnalysisScope(), paths=())
+            assert baseline_source.suppressed("weekly", target_key, unchanged) == frozenset(
+                {"b" * 16}
+            )
+
+            changed = ChangeSet(
+                summary="", scope=AnalysisScope(), paths=("config/道具表.xlsx",)
+            )
+            assert baseline_source.suppressed("weekly", target_key, changed) == frozenset(), (
+                "台账只有指纹、没有文件路径（或没有参与 classify）—— 忽略变成了永久封条"
+            )
+            states = {
+                item.fingerprint: item.state
+                for item in classify(
+                    baseline_source.baseline_findings("weekly", target_key),
+                    changed_paths=changed.paths,
+                )
+            }
+            assert states["b" * 16] == "needs_recheck"
+        finally:
+            _drop(target_key, [first.id, zero_row.id])
+
+
+# ==========================================================================
 # 三、路由
 # ==========================================================================
 
@@ -388,6 +594,58 @@ class TestTheReadRoute:
         assert one["disposition_by"] == "张三"
         # 证据出成数组，不是库里那个 JSON 文本（否则界面得自己 parse）。
         assert one["evidence"] == ["config/道具表.xlsx 删除了 ID 1001"]
+
+    def test_it_carries_the_flags_that_only_live_in_the_payload(self):
+        """`out_of_scope`（以及列还没写上的 `suppressed_previous`）只在结论载荷里。
+
+        面板的「范围外 / 曾被忽略」两个分组按这两个字段分桶；不合并的话两个分组会
+        长期空着，而空着看起来像这两类条目根本不存在。载荷取不到时一律 False（老响应
+        形状只多一个字段），分区不会把普通条目误分进去。
+        """
+        with app.app_context():
+            project, cfg = _project()
+            target_key = _uid("k")
+            run = _run(project.id, target_key)
+            flagged = _anomaly(run, title="范围外的结论")
+            plain = _anomaly(run, title="普通结论")
+            # 载荷就是 `result_payload` 落库的那一份形状（这里只放断言用得到的键）。
+            run.response_payload = json.dumps(
+                {
+                    "anomalies": [
+                        {
+                            "fingerprint": flagged.fingerprint,
+                            "out_of_scope": True,
+                            "suppressed_previous": True,
+                        }
+                    ]
+                }
+            )
+            db.session.commit()
+            run_id, flagged_id, plain_id = run.id, flagged.id, plain.id
+            try:
+                with app.test_client() as client:
+                    _login(client)
+                    body = client.get(f"/ai-analysis/runs/{run_id}/anomalies").get_json()
+                by_id = {item["id"]: item for item in body["anomalies"]}
+                assert by_id[flagged_id]["out_of_scope"] is True
+                assert by_id[flagged_id]["suppressed_previous"] is True
+                assert by_id[plain_id]["out_of_scope"] is False
+                assert by_id[plain_id]["suppressed_previous"] is False
+
+                # 载荷坏了（老运行 / 存坏）→ 两个标记都回 False，不把普通条目误分进
+                # 「范围外」组里。
+                run = db.session.get(AiAnalysisRun, run_id)
+                run.response_payload = "{不是 json"
+                db.session.commit()
+                with app.test_client() as client:
+                    _login(client)
+                    broken = client.get(f"/ai-analysis/runs/{run_id}/anomalies").get_json()
+                assert all(
+                    item["out_of_scope"] is False and item["suppressed_previous"] is False
+                    for item in broken["anomalies"]
+                )
+            finally:
+                _drop(target_key, [run_id])
 
     def test_an_unknown_filter_is_a_400_not_a_silent_show_all(self):
         """悄悄当成「全部」的话，用户点「只看已忽略」会看到全部条目而毫无察觉。"""
@@ -462,6 +720,49 @@ class TestTheWriteRoute:
         # 自己 `getattr(user, "username", "")` 会得到空串 —— 而「谁把这条标成已忽略的」
         # 正是最需要留名的一处。
         assert stored["disposition_by"] == "disposition-tester"
+
+    def test_the_write_route_also_writes_the_ignored_ledger(self):
+        """处置端点**只调用**统一写路径，台账由那里落库 —— 但从路由走一遍才算数。
+
+        只看服务层的单测证明不了端点用的是那条路径（另写一段写库逻辑同样能绿）。
+        """
+        with app.app_context():
+            project, cfg = _project()
+            target_key = _uid("k")
+            run = _run(project.id, target_key)
+            row = _anomaly(run)
+            anomaly_id, run_id = row.id, run.id
+            try:
+                with app.test_client() as client:
+                    _login(client)
+                    ignored = client.post(
+                        f"/ai-analysis/anomalies/{anomaly_id}/disposition",
+                        json={"disposition": "ignored", "note": "误报"},
+                        headers={"X-CSRF-Token": _csrf(client)},
+                    )
+                    # **在读的那一刻取成纯值**：下面那次「已确认」会把这一行删掉，
+                    # commit 之后的过期刷新再读属性会抛 `ObjectDeletedError`。
+                    ledger = [
+                        (item.fingerprint, item.last_run_id)
+                        for item in AiAnalysisIgnoredFingerprint.query.filter_by(
+                            target_key=target_key
+                        ).all()
+                    ]
+                    confirmed = client.post(
+                        f"/ai-analysis/anomalies/{anomaly_id}/disposition",
+                        json={"disposition": "confirmed"},
+                        headers={"X-CSRF-Token": _csrf(client)},
+                    )
+                    after = AiAnalysisIgnoredFingerprint.query.filter_by(
+                        target_key=target_key
+                    ).count()
+
+                assert ignored.status_code == 200
+                assert ledger == [(row.fingerprint, run_id)]
+                assert confirmed.status_code == 200
+                assert after == 0, "改成「已确认」之后台账没删 —— 下一轮仍会被静默抑制"
+            finally:
+                _drop(target_key, [run_id])
 
     def test_an_invalid_value_is_a_400_and_nothing_changes(self):
         with app.app_context():
@@ -546,6 +847,45 @@ class TestTheBatchRoute:
         assert body["changed"] == 3
         assert body["counts"]["ignored"] == 3
         assert all(item["disposition"] == "ignored" for item in body["anomalies"])
+
+    def test_the_batch_route_writes_the_ledger_too(self):
+        """批量处置同样要落台账：界面上「全选 + 忽略」是最常见的用法。"""
+        with app.app_context():
+            project, cfg = _project()
+            target_key = _uid("k")
+            run = _run(project.id, target_key)
+            rows = [_anomaly(run, title=f"第{i}条") for i in range(3)]
+            ids = [row.id for row in rows]
+            run_id = run.id
+            try:
+                with app.test_client() as client:
+                    _login(client)
+                    ignored = client.post(
+                        f"/ai-analysis/runs/{run_id}/anomalies/disposition",
+                        json={"ids": ids, "disposition": "ignored"},
+                        headers={"X-CSRF-Token": _csrf(client)},
+                    )
+                    fingerprints = {
+                        item.fingerprint
+                        for item in AiAnalysisIgnoredFingerprint.query.filter_by(
+                            target_key=target_key
+                        ).all()
+                    }
+                    reverted = client.post(
+                        f"/ai-analysis/runs/{run_id}/anomalies/disposition",
+                        json={"ids": ids, "disposition": "pending"},
+                        headers={"X-CSRF-Token": _csrf(client)},
+                    )
+                    left = AiAnalysisIgnoredFingerprint.query.filter_by(
+                        target_key=target_key
+                    ).count()
+
+                assert ignored.status_code == 200, ignored.get_json()
+                assert fingerprints == {row.fingerprint for row in rows}
+                assert reverted.status_code == 200
+                assert left == 0, "批量撤销之后台账还有残留 —— 那几条会被永久抑制"
+            finally:
+                _drop(target_key, [run_id])
 
     def test_ids_from_another_run_are_rejected(self):
         """不按 `run_id` 过滤的实现会改到另一次运行的行上，而计数完全正常。"""

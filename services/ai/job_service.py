@@ -21,8 +21,8 @@
 
 * `idempotency_key`：**客户端**给的动作标识。同一个键重复 POST 只算一次 ——
   「关掉抽屉再打开又点一下」不该变成第二次付费调用。页面在内存里生成，刷新即新动作。
-* `active_key`：**服务端**算的输入指纹（目标身份 + `focus`）。同一个 `active_key`
-  同时只允许一条活动 job，由**唯一索引**裁决。
+* `active_key`：**服务端**算的输入指纹（目标身份 + `focus` + 目标快照）。同一个
+  `active_key` 同时只允许一条活动 job，由**唯一索引**裁决。
 
 **为什么 `active_key` 里没有 `requested_mode`**：同一个目标同时只许有一次分析在跑。
 「先点增量、再点全量」是**同一个动作被加强了**（升级 `requested_mode` 就够），
@@ -118,8 +118,14 @@ MAX_IDEMPOTENCY_KEY_LENGTH = 120
 MAX_FOCUS_LENGTH = 120
 MAX_ACTIVE_KEY_LENGTH = 120
 
-#: 平台把增量升成全量的原因短码之一：**没有可复用的结论基线**（首次运行）。
-#: 取值与 `services/ai/scope_sampling._decide_scope` 的第二返回值同一套词。
+#: 平台**不再**因为没有可复用的结论基线就把增量升成全量（2026-11-01 契约 1.5）：
+#: 模式仍是增量，只是把「为什么会看到一份整窗输入」如实记下来。
+#: 字面值与 `ai_usage_service` 的预检 `mode_decision.upgrade_reason` 是同一套词。
+UPGRADE_REASON_NO_CONCLUSION_BASELINE = "no_conclusion_baseline"
+
+#: **历史值，只留给读侧兼容**：这个字面值在 2026-11-01 之前是「没有结论基线 → 升全量」
+#: 的升级原因。老 job 行、老报告与前端映射里仍然写着它，删掉会让它们变成认不出的短码，
+#: 所以保留常量与字面值；**新写入一律用 `UPGRADE_REASON_NO_CONCLUSION_BASELINE`**。
 UPGRADE_REASON_FIRST_RUN = "first_run"
 
 # `AiAnalysisRun.status` 的取值 → job 终态。**不猜值**：`succeeded` / `degraded` /
@@ -299,16 +305,30 @@ def normalize_idempotency_key(value) -> Optional[str]:
     return key
 
 
-def active_key_for(*, target_type: str, target_key: str, focus: str) -> str:
+def active_key_for(*, target_type: str, target_key: str, focus: str, snapshot="") -> str:
     """活动 job 的输入指纹（**服务端算**，不含 `requested_mode`）。
 
     与 `AiAnalysisRun.active_key` 同一套手法、同一个理由：**唯一索引裁决**。
     散列取 32 位十六进制（远小于列宽 120），装的是「同一份输入」这件事。
 
-    P0-02 的快照指针落地后，`target_key` 会被换成目标快照身份（内容身份，不是
-    `updated_at`）—— 到那时同一个 `group_key` 下内容不同的两份输入才会各得其所。
+    ## 为什么指纹里要有 `snapshot`（目标快照）
+
+    「同一份输入」的身份是**哪一份快照 + 看哪个范围**，不是「哪个周版本 + 哪个范围」：
+    同一个分组下缓存换了一份，输入就换了一份。指纹里不带快照的后果是**两次点击之间
+    已经换版了，也会被当成同一份输入而附着到旧 job 上** —— 那次分析看的是旧清单，
+    而用户以为它看的是刚同步完的新清单（静默差异，比多跑一次贵得多）。
+
+    `snapshot` 传的是**状态行上的快照指针**（`last_complete_snapshot_id`，而不是现算的
+    内容指纹）：它只在一次完整分析跑完时推进，所以「同步正在写缓存 / 连点两次」这些
+    输入还在变的窗口里它是稳定的，重复点击仍然会附着到同一条 job 上。
+
+    **空快照时保持历史指纹逐字不变**（不追加分隔段）：滚动升级期间库里可能还有按旧
+    口径算出来的活动 job，指纹格式一改，那些 job 就再也附着不上了（同一份输入会再建
+    一条，等于第二次付费）。
     """
     raw = f"{target_type}|{target_key or ''}|{focus}"
+    if snapshot not in (None, ""):
+        raw = f"{raw}|{snapshot}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return digest[:MAX_ACTIVE_KEY_LENGTH]
 
@@ -327,6 +347,11 @@ class JobResult:
     created: bool
     #: 这次附着把 `requested_mode` 从增量**升级**成了全量（用户后点的那个意图更强）。
     upgraded: bool = False
+    #: 这次**没有新建运行**：直接复用了「同一份快照」已经交出的结论（契约 WP2 的
+    #: 「同一快照不重复付费」）。非空即表示 `created=False` 且这不是一次新的分析。
+    #: 与 `job.reused_run_id` 分开：那个字段是 `reused` 终态的持久血缘，这一条是
+    #: **本次响应**的事实（一条 succeeded 的 job 也可能被当成本次复用的来源）。
+    reused_run_id: Optional[int] = None
 
     @property
     def job_id(self) -> Optional[int]:
@@ -339,6 +364,9 @@ class JobResult:
     def to_dict(self) -> dict:
         """HTTP 层的响应体（`success` 由路由加）。字段名就是复测文档列的那几个。"""
         job = self.job
+        reused_run_id = (
+            self.reused_run_id if self.reused_run_id is not None else job.reused_run_id
+        )
         return {
             "job_id": self.job_id,
             "state": job.state,
@@ -346,7 +374,9 @@ class JobResult:
             "requested_mode": job.requested_mode,
             "effective_mode": job.effective_mode,
             "upgrade_reason": job.upgrade_reason or "",
-            "reused_run_id": job.reused_run_id,
+            # 同一份快照被复用：这次**一条运行都没建**，`run_id` 是那条已有的结论。
+            "reused_run_id": reused_run_id,
+            "reused": self.reused_run_id is not None,
             "attached": self.attached,
             "job": job.to_dict(),
         }
@@ -446,8 +476,10 @@ def create_or_attach_job(
     裁决顺序（**顺序本身是契约**）：
 
     1. 给了 `idempotency_key` → 先按键查。命中且目标一致 → 直接返回它（`created=False`）；
-    2. 否则算 `active_key` 并查活动 job。命中 → **附着**；新的 `requested_mode` 更强
-       （`full` > `incremental`）时把它升级成 `full` 并落库；
+    2. 否则算 `active_key`（目标 + 范围 + **目标快照**）并查活动 job。命中 → **附着**；
+       新的 `requested_mode` 更强（`full` > `incremental`）时把它升级成 `full` 并落库；
+    2.2. 增量请求、且**同一份快照已经跑完并留下一份仍可复用的结论** → 复用那条结论，
+       返回那条 job（`created=False` + `reused_run_id`，**一条运行都不建**）；
     3. 都没有 → 建一条新的。
 
     第 1、2 步都可能落在「另一个并发请求刚插进去」的窗口里，所以第 3 步的插入撞唯一
@@ -464,8 +496,14 @@ def create_or_attach_job(
     scope = normalize_focus(focus)
     source = normalize_source(trigger_source)
     key = normalize_idempotency_key(idempotency_key)
+    # 状态行在这里**只读**（建行要等到第 3 步）：这一行只用来算输入指纹，
+    # 而一条随后会被项目闸门拒掉的请求不该留下一个空状态行。
+    state_for_key = _weekly_state_row(target_key)
     active_key = active_key_for(
-        target_type=TARGET_TYPE_WEEKLY, target_key=target_key, focus=scope
+        target_type=TARGET_TYPE_WEEKLY,
+        target_key=target_key,
+        focus=scope,
+        snapshot=getattr(state_for_key, "last_complete_snapshot_id", None),
     )
 
     # ---- 第 1 步：客户端幂等键 ----
@@ -483,6 +521,37 @@ def create_or_attach_job(
     existing = _find_by_active_key(active_key)
     if existing is not None and existing.state in ACTIVE_JOB_STATES:
         return _attach(existing, mode)
+
+    # ---- 第 2.2 步：同一份快照**已经跑完** → 复用那份结论，不新建运行 ----
+    # 「跑完再点一次」的意图绝大多数是再确认一遍，不是再付一次费。判据绑在**快照**
+    # 上：当前缓存内容逐字等于某份已冻结快照、而这份快照已经交出了一份**仍然可复用**
+    # 的结论时，直接把那条 job 交回去（`attached=True` + `reused_run_id`，零消耗）。
+    #
+    # 用户显式要全量时**不走这一档**：那是命令，不是确认 —— 他就是要按当前规则再看一遍
+    # （契约 1.1 的第 1 条：只有用户显式请求，`full` 才成立）。
+    #
+    # 位置在**项目互斥之前**：复用已有结论一条模型请求都不发，把它拦在「别的目标正在跑」
+    # 那道闸门后面，只会让用户明明问得到答案却收到 409。
+    target_snapshot = (
+        _current_target_snapshot(config, target_key)
+        if mode == MODE_INCREMENTAL
+        else None
+    )
+    if target_snapshot is not None:
+        reused = _reuse_concluded_job(
+            target_key=target_key,
+            focus=scope,
+            snapshot_id=getattr(target_snapshot, "id", None),
+        )
+        if reused is not None:
+            reused_job, reused_run_id = reused
+            _log(
+                f"♻️ AI 分析：同一份快照（{target_snapshot.id}）已有可复用的结论"
+                f"（run={reused_run_id}）—— 这次点击附着到 job #{reused_job.id}，不新建运行"
+            )
+            return JobResult(
+                job=reused_job, created=False, reused_run_id=reused_run_id
+            )
 
     # ---- 第 2.5 步：项目级互斥 ----
     # 走到这里说明第 2 步没找到可附着的 job —— 这确实是一次**新的**分析。第 1、2 步都是
@@ -518,6 +587,11 @@ def create_or_attach_job(
         active_key=active_key,
         base_run_id=getattr(state_row, "last_concluded_run_id", None),
         base_snapshot_id=getattr(state_row, "last_complete_snapshot_id", None),
+        # 当前内容对得上某份已冻结快照时，**建 job 的这一刻**就知道目标是哪一份
+        # （运行侧 `record_plan` 会再写一次，两者同一份值）。写在这里是为了让
+        # 「跑完再点一次」的复用判据有据可依 —— 不发这一笔，job 上就查不到它看的是
+        # 哪一份快照，复用只能退化成「这个目标跑过一次」（那是错的）。
+        target_snapshot_id=getattr(target_snapshot, "id", None),
         focus=scope,
         created_at=created_at,
     )
@@ -598,21 +672,177 @@ def _weekly_state(config, target_key):
     )
 
 
+def _weekly_state_row(target_key):
+    """**只读**状态行（没有就 `None`，不建行）。
+
+    输入指纹要在第 3 步建 job 之前算出来，而 `_weekly_state` 会**建行并提交** ——
+    一条随后被项目闸门拒掉的请求不该留下一个空状态行（那会让面板上多出一个
+    「跑过但没结论」的分组）。读不到时按「没有快照身份」算，退回历史行为。
+    """
+    if not target_key:
+        return None
+    from models.ai_analysis import AiWeeklyAnalysisState
+
+    try:
+        return AiWeeklyAnalysisState.query.filter_by(group_key=target_key).first()
+    except Exception as exc:  # noqa: BLE001 —— 读不到指纹不该让「点一下」变成 500
+        _log(f"⚠️ 读不到分组状态行（按「没有目标快照」算）: group={target_key} {exc}")
+        return None
+
+
 def _decide_effective_mode(requested_mode: str, state_row):
     """`requested_mode` → `(effective_mode, upgrade_reason)`。
 
+    **平台不再替用户把增量改成全量**（2026-11-01 契约 1.5）：
+
     1. 要的就是全量 → 全量，没有「升级原因」（那本来就是用户要的）；
     2. 要的是增量、但**没有可复用的结论基线**（`last_concluded_run_id` 为 NULL）→
-       平台升成全量，`upgrade_reason="first_run"`。**这一条必须落库**：否则
-       「我点的是增量，为什么跑了全量」只能靠日志回答；
+       **仍然是增量**，只记下原因 `no_conclusion_baseline`。这一条必须落库：否则
+       「这一次为什么没有增量文件数、直接读了整窗」只能靠日志回答；
     3. 其余 → 增量，没有升级原因。
+
+    为什么不再回 full：`scope == "full"` 的语义已经收窄成「输入口径就是整窗」。
+    平台把模式偷偷改成 full 之后，前端只会给「继续（按全量）」、执行侧会
+    `force_full=True`、基线被清空 —— 用户点的是增量，拿到的却是「他本人要求的
+    从零重判」。实测「首次全量之后一直全量」那条固化链就是这么形成的。
     """
     if requested_mode == MODE_FULL:
         return MODE_FULL, ""
     concluded = getattr(state_row, "last_concluded_run_id", None)
     if concluded is None:
-        return MODE_FULL, UPGRADE_REASON_FIRST_RUN
+        return MODE_INCREMENTAL, UPGRADE_REASON_NO_CONCLUSION_BASELINE
     return MODE_INCREMENTAL, ""
+
+
+def _target_config_ids(config) -> list:
+    """这个目标**实际装进输入**的配置 id（`build_weekly_payload` 按 profile 收窄之后）。
+
+    `seal_snapshot` 冻的是 `payload["group"]["config_ids"]`，那一份来自收窄后的
+    `configs`（`tables` 只剩配表仓库的配置）。这里必须与它同源，否则混合仓库项目
+    两边的指纹永远不等（P1-4）：同快照复用与自动调度去重会同时失效。
+    """
+    from services.ai.analysis_scope_filter import effective_config_ids
+    from services.ai.project_config_source import (
+        get_project_analysis_config,
+        weekly_batch_configs,
+    )
+
+    configs = weekly_batch_configs(config)
+    profile = get_project_analysis_config(
+        getattr(config, "project_id", None)
+    ).get("analysis_profile")
+    return effective_config_ids(configs, profile)
+
+
+def _current_target_snapshot(config, target_key):
+    """当前缓存内容对应的**已冻结快照**（`AiDiffSnapshot`）；判不出来返回 `None`。
+
+    只在「当前清单与最近一份冻结快照**逐字相同**」时返回它。三条理由：
+
+    * 同步正在写缓存时清单不是一份快照 —— 半份清单做差会把没写进来的文件全算成
+      新增，拿它当输入身份比不判更坏，所以这时直接返回 `None`；
+    * 内容已经变了（最新冻结快照是旧的）时同样返回 `None`：那份快照**不再是**
+      当前输入，拿它去复用会把用户刚提交的改动静默吞掉；
+    * 判据用 `weekly_snapshot_digest`（与 `seal_snapshot` 逐字同一个指纹），
+      不另写第三份「这份快照算不算同一份」的实现；指纹的 config 集也必须与
+      `seal_snapshot` 同源（`_target_config_ids`，按 profile 收窄），否则混合仓库
+      项目永远判不等（P1-4）。
+    """
+    from services.ai.weekly_sync_gate import group_config_ids, weekly_sync_in_flight
+
+    config_ids = group_config_ids(config)
+    if not config_ids or not target_key:
+        return None
+    try:
+        # 同步在写缓存：清单还在变，此刻没有「当前快照」可言。
+        if weekly_sync_in_flight(config_ids):
+            return None
+        from services.ai.scope_sampling import weekly_snapshot_digest
+        from services.ai.snapshot_store import latest_sealed_snapshot
+
+        digest = weekly_snapshot_digest(_target_config_ids(config))
+        sealed = latest_sealed_snapshot(target_key)
+    except Exception as exc:  # noqa: BLE001 —— 判不出来就退旧行为（不猜一份快照）
+        _log(f"⚠️ 判不出当前目标快照（这次跳过同快照复用）: group={target_key} {exc}")
+        return None
+    if not digest or sealed is None:
+        return None
+    if str(getattr(sealed, "content_digest", "") or "") != digest:
+        return None
+    return sealed
+
+
+def _reuse_concluded_job(*, target_key, focus, snapshot_id):
+    """同一份快照下**已经交出结论**的那条 job 与它复用的运行号；没有就 `None`。
+
+    判据是「快照 + 结论仍然可复用」，不是「这个目标跑过一次」：
+
+    * 必须落在**同一份快照**上 —— 换过版之后，旧结论回答的是另一份输入；
+    * 必须**仍然可复用** —— 溯源变了（改了提示词 / 规则 / 模型）或过了保留期时，
+      旧结论不能当现成结论用；那条判据只有一份实现（`run_cache_source._is_run_fresh`），
+      这里不另写一份；
+    * 只看**有结论**的终态（`succeeded` / `degraded` / `reused`）。失败与被取消的那几档
+      没有结论可复用，照旧建新 job（用户该做的是重试，不是看旧失败）。
+    """
+    if not snapshot_id:
+        return None
+    rows = (
+        AiAnalysisJob.query.filter(
+            AiAnalysisJob.target_type == TARGET_TYPE_WEEKLY,
+            AiAnalysisJob.target_key == target_key,
+            AiAnalysisJob.focus == focus,
+            AiAnalysisJob.state.in_((STATE_SUCCEEDED, STATE_DEGRADED, STATE_REUSED)),
+            AiAnalysisJob.target_snapshot_id == snapshot_id,
+        )
+        .order_by(AiAnalysisJob.id.desc())
+        .limit(10)
+        .all()
+    )
+    if not rows:
+        return None
+    from models.ai_analysis import AiAnalysisRun
+    from services.ai.run_cache_source import _is_run_fresh
+
+    for job in rows:
+        run_id = getattr(job, "reused_run_id", None) or getattr(job, "run_id", None)
+        run = db.session.get(AiAnalysisRun, run_id) if run_id else None
+        if run is None:
+            continue
+        try:
+            if _is_run_fresh(run):
+                return job, run.id
+        except Exception as exc:  # noqa: BLE001 —— 判不了「可复用」就当不可复用（宁可多跑一次）
+            _log(f"⚠️ 判不了旧结论还能不能复用（这次不复用）: run={run_id} {exc}")
+    return None
+
+
+def reusable_conclusion_for(config, *, focus=FOCUS_ALL) -> Optional[dict]:
+    """当前输入（同一份已冻结快照）是否已经有一份可复用的结论。
+
+    返回 `{"job_id", "run_id", "state"}` 或 `None`。**预检与建 job 共用这一份判据**：
+    预检说「同一份快照已有结论、再点一次不会新建运行」，`create_or_attach_job` 就必须
+    真的能复用上它 —— 两处各写一遍判据，迟早会在「什么算可复用」上分叉（那正是这张卡
+    要修的东西）。读不到任何东西时返回 `None`，**不猜**。
+    """
+    if config is None:
+        return None
+    from services.ai.project_config_source import build_weekly_group_key
+
+    try:
+        target_key = build_weekly_group_key(config)
+        scope = normalize_focus(focus)
+        snapshot = _current_target_snapshot(config, target_key)
+    except JobRequestError:
+        return None
+    hit = _reuse_concluded_job(
+        target_key=target_key,
+        focus=scope,
+        snapshot_id=getattr(snapshot, "id", None),
+    )
+    if hit is None:
+        return None
+    job, run_id = hit
+    return {"job_id": getattr(job, "id", None), "run_id": run_id, "state": job.state}
 
 
 def _dispatch(job, config, target_key, *, mode, source, key, now=None) -> None:

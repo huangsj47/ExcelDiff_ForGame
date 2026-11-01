@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from types import SimpleNamespace
@@ -448,6 +449,293 @@ def test_the_focus_row_appears_only_when_the_user_picked_a_scope():
     assert "分析焦点" not in _build(focus_label="")
 
 
+# ---------------------------------------------------------------------------
+#  模式裁决：这一格「分析范围」是谁定的（2026-11-01）
+# ---------------------------------------------------------------------------
+def test_the_mode_decision_row_appears_only_when_the_caller_gives_one():
+    """`mode_decision` 是**可选**参数：传了才多一行，不传时旧输出一个字都不变。
+
+    这一行要回答的问题：报告转发出去之后只剩「范围：全量」一个词，事后没人能答
+    「为什么花了全量的钱」（用户选的 / 没有可用基线 / 平台建议整窗重跑）。
+    """
+    decision = "增量（平台建议整窗重跑：变更文件数多）"
+    with_mode = _build(mode_decision=decision)
+
+    assert f"| 模式裁决 | {decision} |" in with_mode
+    assert "模式裁决" not in _build()
+    # 空串 / None 与「不传」是同一件事（调用方拿到的值可能就是空串）。
+    assert _build(mode_decision="") == _build()
+    assert _build(mode_decision=None) == _build()
+
+
+def test_the_mode_decision_row_is_the_only_difference_from_the_old_document():
+    """把新增的那一行摘掉之后，与「不传」的文档**逐字相同** —— 旧输出没被顺手改掉。"""
+    without = _build()
+    with_mode = _build(mode_decision="全量（用户请求）")
+    stripped = "\n".join(
+        line for line in with_mode.splitlines() if not line.startswith("| 模式裁决 |")
+    ) + ("\n" if with_mode.endswith("\n") else "")
+
+    assert stripped == without
+    # 位置：紧跟「分析范围 / 覆盖」那一组之后、「触发方式」之前（解释的是上一格）。
+    lines = with_mode.splitlines()
+    assert lines.index("| 模式裁决 | 全量（用户请求） |") < lines.index("| 触发方式 | 手动 |")
+    assert lines.index("| 分析范围 | 全量 |") < lines.index("| 模式裁决 | 全量（用户请求） |")
+
+
+def test_a_mode_decision_value_cannot_break_the_meta_table():
+    """那一行的文字来自上游拼装，同样要过 `_cell`（竖线会把这一行切成多列）。"""
+    text = _build(mode_decision="增量（a | b\nc）")
+    row = [line for line in text.splitlines() if line.startswith("| 模式裁决 |")]
+    assert len(row) == 1, row
+    assert "a \\| b c" in row[0]
+
+
+# ---------------------------------------------------------------------------
+#  分析范围口径 / 纳入仓库：这份报告的输入到底覆盖了谁（2026-11-01，审查报告 P2）
+# ---------------------------------------------------------------------------
+def test_the_input_scope_rows_appear_only_when_the_caller_gives_them():
+    """两行都是**可选**的：不传时旧输出一个字都不变（老记录 / 单提交分析走这条路）。
+
+    「分析范围：全量」在默认 `tables` 下只是窗口口径；不写清生效档位与纳入仓库，
+    读者会把元信息里那些覆盖数字读成整个项目的覆盖。
+    """
+    profile = "仅配置表仓库（tables）"
+    scope = "纳入 2 个仓库：qz_config、qz_config_lua；其余仓库未纳入本次输入"
+
+    text = _build(analysis_profile_label=profile, repository_scope=scope)
+    assert f"| 分析范围口径 | {profile} |" in text
+    assert f"| 纳入仓库 | {scope} |" in text
+
+    old = _build()
+    assert "分析范围口径" not in old
+    assert "纳入仓库" not in old
+    # 空串与「不传」是同一件事（调用方从 payload 取不到时就是空串）
+    assert _build(analysis_profile_label="", repository_scope="") == old
+
+
+def test_the_input_scope_rows_sit_between_the_scope_and_the_coverage_rows():
+    """顺序 = 读者理解覆盖数字的路径：范围 → 口径 → 纳入谁 → 覆盖多少 → 谁定的范围。"""
+    text = _build(
+        analysis_profile_label="仅配置表仓库（tables）",
+        repository_scope="纳入 1 个仓库：qz_config；其余仓库未纳入本次输入",
+        coverage={"rows": [("本次覆盖", "版本 10 个文件 → 输入 2 → 取证 1")]},
+        mode_decision="全量（用户请求）",
+        focus_label="仅配表仓库",
+    )
+    lines = text.splitlines()
+
+    def at(prefix: str) -> int:
+        return next(index for index, line in enumerate(lines) if line.startswith(prefix))
+
+    assert at("| 分析范围 |") < at("| 分析范围口径 |") < at("| 纳入仓库 |")
+    assert at("| 纳入仓库 |") < at("| 本次覆盖 |") < at("| 模式裁决 |")
+    assert at("| 模式裁决 |") < at("| 触发方式 |") < at("| 分析焦点 |")
+
+
+def test_the_input_scope_rows_are_the_only_difference_from_the_old_document():
+    """把新增的两行摘掉之后，与「不传」的文档**逐字相同** —— 旧输出没被顺手改掉。"""
+    without = _build()
+    text = _build(
+        analysis_profile_label="仅配置表仓库（tables）",
+        repository_scope="纳入 1 个仓库：qz_config；其余仓库未纳入本次输入",
+    )
+    stripped = "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.startswith(("| 分析范围口径 |", "| 纳入仓库 |"))
+    ) + ("\n" if text.endswith("\n") else "")
+
+    assert stripped == without
+
+
+def test_an_input_scope_value_cannot_break_the_meta_table():
+    """仓库名来自库里的数据，同样要过 `_cell`（竖线会把这一行切成多列）。"""
+    text = _build(repository_scope="纳入 1 个仓库：a | b；其余仓库未纳入本次输入")
+    row = [line for line in text.splitlines() if line.startswith("| 纳入仓库 |")]
+    assert len(row) == 1, row
+    assert "a \\| b" in row[0]
+
+
+def test_the_analysis_profile_label_covers_the_two_allowed_values():
+    assert doc.ANALYSIS_PROFILE_LABELS == {
+        "tables": "仅配置表仓库（tables）",
+        "all": "全部仓库（all）",
+    }
+    assert doc.analysis_profile_label("tables") == "仅配置表仓库（tables）"
+    assert doc.analysis_profile_label(" ALL ") == "全部仓库（all）"
+    assert doc.analysis_profile_label("") == ""
+    assert doc.analysis_profile_label(None) == ""
+    # 认不出来的档位**不许猜**：猜成 all 就是把「只看了配表仓库」说成「看了全部仓库」。
+    assert doc.analysis_profile_label("bogus") == ""
+
+
+def test_the_repository_scope_names_what_went_in_and_says_what_did_not():
+    scope = doc.repository_scope_text(
+        [
+            {"name": "qz_config"},
+            {"name": "qz_config_lua"},
+            {"name": "qz_config"},  # 去重
+            {"repository_name": "qz_code"},  # 生产 payload（build_weekly_payload）用这个键
+            {"repository_id": 22},  # 名字缺失 → 用 id 兜底，不许从「纳入」里消失
+            "坏条目",
+            {},
+        ]
+    )
+    assert scope == (
+        "纳入 4 个仓库：qz_config、qz_config_lua、qz_code、仓库 #22；"
+        "其余仓库未纳入本次输入"
+    )
+    assert doc.repository_scope_text(None) == ""
+    assert doc.repository_scope_text([]) == ""
+    assert doc.repository_scope_text([{}, "坏条目"]) == ""
+
+
+def test_the_input_scope_labels_take_nothing_from_a_missing_or_old_payload():
+    """没有 payload ⇒ 两格空；老周版本 payload 缺键 ⇒ 按当时的 `all` 说；单提交 ⇒ 不印。
+
+    **老记录 / 坏 JSON 必须回到两个空串**：那是「文档与以前逐字相同」的前提。
+    """
+    assert doc.input_scope_labels(None) == ("", "")
+    assert doc.input_scope_labels({}) == ("", "")
+    # 老周版本 payload（WP14 之前）：没有 analysis_profile，而那时输入本来就不按仓库收窄
+    assert doc.input_scope_labels({"mode": "weekly", "group": {"key": "g"}}) == (
+        "全部仓库（all）",
+        "",
+    )
+    # 生产形状：生效档位 + 仓库明细
+    payload = {
+        "mode": "weekly",
+        "analysis_profile": "tables",
+        "group": {"key": "g"},
+        "repositories": [{"repository_id": 1, "repository_name": "qz_config"}],
+    }
+    assert doc.input_scope_labels(payload) == (
+        "仅配置表仓库（tables）",
+        "纳入 1 个仓库：qz_config；其余仓库未纳入本次输入",
+    )
+    # 单提交：没有「档位」这回事（也没有 group / repositories）→ 两格都不印
+    assert doc.input_scope_labels(
+        {"mode": "commit", "repository": {"name": "qz_config"}}
+    ) == ("", "")
+
+
+def test_the_conclusion_view_carries_the_same_input_scope_fields():
+    """`/latest` 的读侧形态与导出用**同一个组装**（`input_scope_labels`），不会两种说法。
+
+    这里直接调纯函数（不建库）：字段只从 run 自己那两列 JSON 来。
+    """
+    from services.ai.conclusion_view import _conclusion_payload
+
+    run = SimpleNamespace(
+        id=7,
+        status="succeeded",
+        scope="full",
+        trigger_source="manual",
+        created_at=None,
+        response_text="# 结论\n\n正文",
+        response_payload='{"risk_level": "high"}',
+        request_payload=json.dumps(
+            {
+                "analysis_profile": "tables",
+                "repositories": [{"name": "qz_config"}],
+            },
+            ensure_ascii=False,
+        ),
+    )
+    payload = _conclusion_payload(run)
+
+    assert payload["analysis_profile_label"] == "仅配置表仓库（tables）"
+    assert payload["repository_scope"] == "纳入 1 个仓库：qz_config；其余仓库未纳入本次输入"
+    # 老记录（没有 request_payload）→ 两个空串；既有键一个不少（形状不变）
+    run.request_payload = None
+    old = _conclusion_payload(run)
+    assert old["analysis_profile_label"] == ""
+    assert old["repository_scope"] == ""
+    assert set(old) == set(payload)
+
+
+def test_the_mode_decision_text_covers_the_three_things_a_reader_will_ask():
+    """`mode_decision_text` 的三种形态：用户要的全量 / 没基线 / 平台建议整窗重跑。
+
+    它是**纯函数**，判据全取已有的账（scope + request_payload 的 policy/baseline +
+    job 的 requested_mode/upgrade_reason），这里逐档钉住措辞。
+    """
+    text = doc.mode_decision_text
+
+    # 用户显式点了全量：有 job 账时认 requested_mode，老运行退回 baseline.reason。
+    assert text(scope="full", requested_mode="full") == "全量（用户请求）"
+    assert text(scope="full", baseline={"reason": "force_full"}) == "全量（用户请求）"
+    # 平台自己重建基线（用户点的是增量）—— 与「用户请求」分得开。
+    assert text(scope="full", requested_mode="incremental",
+                baseline={"reason": "force_full_rebuild"}) == "全量（平台重建基线）"
+    # 真的没有可用基线。
+    assert text(scope="full", requested_mode="incremental",
+                baseline={"kind": "none"}) == "全量（无可用基线）"
+
+    # 契约 1.1/1.2：建议整窗重跑时 scope 仍是增量，原因码翻成人话。
+    assert text(
+        scope="incremental",
+        policy={"reason": "delta_count_high", "suggested_full": True},
+    ) == "增量（平台建议整窗重跑：变更文件数多）"
+    assert text(
+        scope="incremental",
+        policy={"reason": "delta_ratio_high", "suggested_full": True},
+    ) == "增量（平台建议整窗重跑：变更文件占比高）"
+    assert text(
+        scope="incremental",
+        policy={"reason": "critical_path_detected", "suggested_full": True},
+    ) == "增量（平台建议整窗重跑：命中关键路径）"
+    # 认不出的原因码：说「建议整窗重跑」，不把码值印进报告。
+    assert text(
+        scope="incremental", policy={"reason": "weird", "suggested_full": True}
+    ) == "增量（平台建议整窗重跑）"
+
+    # 契约 1.5：没有可继承的历史结论（输入仍是增量）。
+    assert text(scope="incremental",
+                upgrade_reason="no_conclusion_baseline") == "增量（无历史结论可继承）"
+    # 普通的增量不解释 —— 不印一句「增量（一切正常）」。
+    assert text(scope="incremental") == ""
+    assert text(scope="") == ""
+
+
+def test_the_unclassified_explanation_stays_in_the_appendix_and_only_once():
+    """「未归类」的说明**只在附录出现一次**（2026-11-01，方案 §4.10 噪音第 2 条）。
+
+    正文里那一节由引擎/子代理产出，属于存档原文（删它要改 `engine.py`，不在本轮）。
+    导出这一侧能保证的是：同一个说明不随条目数重复，并且只在附录里。
+    """
+    text = _build(
+        anomalies=[
+            {"title": "性能回归", "category": "performance", "evidence": ["e1"]},
+            {"title": "说不清的", "category": "something_else", "evidence": ["e2"]},
+        ]
+    )
+
+    assert text.count(doc.UNCLASSIFIED_NOTE) == 1, "同一条说明跟着条目数重复了"
+    appendix_at = text.index(doc.APPENDIX_TITLE)
+    assert text.index(doc.UNCLASSIFIED_NOTE) > appendix_at, "说明跑出附录了"
+    assert text.count("**平台没有丢弃它们**") == 1
+    # 两条都要保留（按原样列在表里），只是说明只说一次。
+    assert "性能回归" in text and "说不清的" in text
+
+
+def test_the_category_label_and_group_follow_the_contract_list():
+    """面板用的中文名/分组同样从 `skill_contract` 的清单派生（不另抄一份）。"""
+    assert doc.category_label("config_id") == "配置 ID"
+    assert doc.category_label("code_logic") == "代码逻辑"
+    # 认不出来的**原样回落**（与 `severity_label` 同一条兜底），空值给空串（那一格不印）。
+    assert doc.category_label("commit_msg") == "commit_msg"
+    assert doc.category_label("") == ""
+    assert doc.category_group("config_id") == "table"
+    assert doc.category_group("code_logic") == "code_process"
+    assert doc.category_group("commit_msg") == "unclassified"
+    assert doc.category_group("") == "unclassified"
+    assert doc.CATEGORY_GROUP_LABELS == {
+        "table": "配表", "code_process": "代码·流程", "unclassified": "未归类",
+    }
+
+
 def test_an_anomaly_row_keeps_a_string_evidence_as_one_line():
     """老记录的 payload 里 `evidence` 有写成字符串的（不是数组）—— 不许把它拆成字。"""
     rows = doc.anomaly_rows([{"title": "t", "evidence": "整段证据"}])
@@ -563,3 +851,77 @@ def test_demote_headings_shifts_levels_but_never_touches_code_fences():
     assert "# 代码里的井号不是标题" in out, "代码块里的 # 被降级了，示例被改坏"
     assert "###### 六级" in out, "六级再降就是七级，CommonMark 里不成立"
     assert "####### 不是标题（七级不成立）" in out, "七级本来就不是标题，不该动它"
+
+
+# ---------------------------------------------------------------------------
+#  范围外：附录里单独一节（契约 1.8 / WP16）
+# ---------------------------------------------------------------------------
+# 一条越界结论：引用的文件不在本批次 `allowed_paths` 里（`result_payload._out_of_scope`
+# 打的标）。它**照常列出**（报告要能看见模型报过什么），但不参与风险等级与计数。
+OUT_OF_SCOPE_ITEM = {
+    "severity": "critical",
+    "confidence": "very_high",
+    "category": "code_logic",
+    "title": "代码分支条件写错",
+    "file_path": "code/a.lua",
+    "impact": "走错分支",
+    "suggestion": "补上默认分支",
+    "evidence": ["code/a.lua 第 8 行"],
+    "out_of_scope": True,
+}
+
+
+def test_out_of_scope_items_are_listed_in_their_own_section():
+    """越界条目挪进单独一节，**不与「达到门槛」那张表混排**。
+
+    混在同一张表里，读者会把它读成「这一次要处理的问题」——而平台其实没有把它计入等级
+    与条数（按越界取数去升级风险，等于让「读了不该读的文件」反过来显得更严重）。
+    单独一节之后两件事同时成立：条目还在（模型报过什么仍然看得见），但它不冒充结论。
+    """
+    text = _build(
+        anomalies=[
+            {"severity": "high", "title": "范围内的那条", "file_path": "config/a.xlsx"},
+            OUT_OF_SCOPE_ITEM,
+        ]
+    )
+
+    table_head_at = text.index(doc.APPENDIX_TABLE_HEAD)
+    in_scope_at = text.index("范围内的那条")
+    section_at = text.index(doc.OUT_OF_SCOPE_TITLE)
+    out_item_at = text.index(OUT_OF_SCOPE_ITEM["title"])
+
+    assert table_head_at < in_scope_at < section_at < out_item_at, (
+        "范围外的条目还在上面那张表里（或者那一节排到了它的条目之后）"
+    )
+    # 两张表**表头逐字一致**（同一个常量）：列一个不差，读者才能对着读。
+    assert text.count(doc.APPENDIX_TABLE_HEAD) == 2
+    assert doc.OUT_OF_SCOPE_INTRO in text
+    # 表下那几块（证据 / 建议）跟着条目走，不许留在范围内那一节下面。
+    assert text.index("- 证据：code/a.lua 第 8 行") > section_at
+    assert text.index("- 建议：补上默认分支") > section_at
+
+
+def test_a_missing_out_of_scope_field_keeps_the_old_single_table():
+    """`out_of_scope` **缺失按 False**：老载荷的附录与加这一节之前逐字相同。
+
+    老记录的 payload 里没有这个键（它是 2026-11 加的），若按「没有就是越界」或「没有
+    就单独一节」，所有历史导出都会多出一节空表格。
+    """
+    text = _build(
+        anomalies=[{"severity": "high", "title": "老载荷里的一条", "file_path": "code/b.lua"}]
+    )
+
+    assert doc.OUT_OF_SCOPE_TITLE not in text
+    assert text.count(doc.APPENDIX_TABLE_HEAD) == 1
+    assert "老载荷里的一条" in text
+
+
+def test_a_run_whose_only_findings_are_out_of_scope_says_so_without_an_empty_table():
+    """整批都是越界条目时：不画空表、也不说「本次没有异常条目」（那与事实相反）。"""
+    text = _build(anomalies=[OUT_OF_SCOPE_ITEM])
+
+    assert doc.NO_IN_SCOPE_APPENDIX in text
+    assert doc.EMPTY_APPENDIX not in text
+    assert doc.OUT_OF_SCOPE_TITLE in text
+    assert text.count(doc.APPENDIX_TABLE_HEAD) == 1, "范围内那张空表也被画出来了"
+    assert OUT_OF_SCOPE_ITEM["title"] in text, "越界条目被丢掉了 —— 报告里必须仍能看到它"

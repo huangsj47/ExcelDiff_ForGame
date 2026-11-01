@@ -116,6 +116,42 @@ DIMENSION_IDS = tuple(spec.id for spec in DEFAULT_DIMENSION_SPECS)
 # id → 中文名的出厂映射。`report_document` 的导出文档用它把 category 翻成人话。
 DIMENSION_LABELS: dict[str, str] = {spec.id: spec.label for spec in DEFAULT_DIMENSION_SPECS}
 
+# --- 分析 profile：本次分析要过哪一份维度清单 ---
+#
+# 平台的「AI 风险分析」默认只回答一件事：**本批配表改动会带来什么风险**。而出厂那 9 个
+# 维度里有 4 个（`module_coupling` / `code_logic` / `version_branch` / `process`）读的是
+# 代码与流程 —— 配表项目里根本没有它们的证据，模型只能写「本维度无配表证据」，而这些
+# 段落照样占着同一份结论条数上限（`rules` 的 20 条）与同一批取证额度（方案 §3.2 L5、
+# §4.4）。所以 profile 决定**本次生效的清单**：
+#
+#   * `tables`（默认）：只过与配表有关的 5 个维度；
+#   * `all`：出厂那 9 个，与「没有 profile 这个概念」时的行为逐字相同。
+#
+# 值域在这里写死、在 `models.ai_analysis.project_config` 与 `endpoint_service.FIELD_RULES`
+# 各再写一份 —— 本模块刻意**不 import 模型层**：它要被独立的 skill 校验器直接用，
+# 而模型层会拖进 Flask-SQLAlchemy。两份漂移由 `tests/test_ai_models_and_migration.py`
+# 的一条防漂移用例钉住（与 `prompt_cache` 值域同一套处理方式）。
+ANALYSIS_PROFILES = ("tables", "all")
+DEFAULT_ANALYSIS_PROFILE = "tables"
+# `tables` profile 生效的那 5 个维度。**顺序与出厂清单一致**（同一张表由细到整：
+# 标识符 → 取值边界 → 数据自身 → 数值合理性 → 单表连锁），因为顺序决定子代理的切分
+# 「相邻即相关」（见 `subagent.group_dimensions`），改顺序会改变分工。
+#
+# 这里只写 id、中文名从 `DIMENSION_LABELS` 取：中文名抄第二份正是本模块开头警告过的
+# 那类漂移（面板印英文 id、报告印中文名，而两边都不会报错）。取不到会当场 KeyError
+# —— 那是**故意的**：有人重命名了出厂维度却漏了这份清单时必须立刻炸，而不是悄悄
+# 退化成「4 个维度」。
+TABLE_DIMENSION_IDS: tuple[str, ...] = (
+    "config_id",
+    "config_value",
+    "config_data",
+    "value_sanity",
+    "config_linkage",
+)
+TABLE_DIMENSION_SPECS: tuple[DimensionSpec, ...] = tuple(
+    DimensionSpec(identifier, DIMENSION_LABELS[identifier]) for identifier in TABLE_DIMENSION_IDS
+)
+
 # 「不在本次生效的维度清单内」这一组的名字。**它是一个显式的分组，而不是「显示不出来」**：
 # 平台对落不进清单的条目一律**保留**（见 `protocol._coerce_anomalies`），再用这个名字
 # 把它们单独列出来 —— 少了一条发现，读报告的人必须看得出来。
@@ -191,6 +227,36 @@ def dimension_ids_of(specs: Iterable[DimensionSpec]) -> tuple[str, ...]:
 
 def dimension_labels_of(specs: Iterable[DimensionSpec]) -> dict[str, str]:
     return {spec.id: spec.label for spec in specs}
+
+
+def normalize_analysis_profile(profile: object) -> str:
+    """把配置里读到的 profile 归一成值域内的一档；NULL / 脏值 → `tables`。
+
+    脏值落到 **`tables`（保守那一侧）**，与 `project_config.resolved()` 同一口径：
+    认不出来的取值若按 `all` 跑，等于悄悄把 4 个拿不到证据的维度塞回报告 ——
+    报告里看不出「这次多跑了什么」，而读报告的人会以为那些段落有配表证据。
+
+    大小写与空格照 `prompt_cache` 的取值处理方式归一：配置来自表单与手工改库，
+    ` ALL ` 不该被判成「认不出来的档」。
+    """
+    text = str(profile or "").strip().lower()
+    return text if text in ANALYSIS_PROFILES else DEFAULT_ANALYSIS_PROFILE
+
+
+def dimension_specs_for_profile(profile: object) -> tuple[DimensionSpec, ...]:
+    """本次 profile 生效的维度清单。
+
+    `all` 返回的**就是** `DEFAULT_DIMENSION_SPECS`（不是副本）：它是「平台出厂清单」的
+    唯一一份，文档校验（`_check_body_contract`）、`is_platform_default_dimensions`、
+    `report_document` 的兜底中文名都继续认它。profile 只决定「本次读哪一份」，
+    不改出厂值。
+
+    调用方（`project_facts.dimensions` / `LoadedSkills.dimensions`）拿到的是元组本身，
+    可以继续按 `id` / `label` 两个属性用，不必知道它来自哪一档。
+    """
+    if normalize_analysis_profile(profile) == "all":
+        return DEFAULT_DIMENSION_SPECS
+    return TABLE_DIMENSION_SPECS
 
 
 def is_platform_default_dimensions(specs: Sequence[DimensionSpec]) -> bool:

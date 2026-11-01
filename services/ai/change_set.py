@@ -113,6 +113,79 @@ def from_commit_payload(
     )
 
 
+def _allowed_path_set(payload: Mapping[str, object]) -> Optional[frozenset[str]]:
+    """payload 声明的可读路径白名单；`None` = 不限制，空列表 = **什么都不许**。
+
+    ## 空列表与缺键是两种语义（2026-11-01，WP9）
+
+    * **缺键 / `None`**：老 payload（以及单提交模式）根本没有这个键 —— 代表「不知道，
+      照旧全放」，与加这个键之前逐字一致；这条兼容口径不能动，否则一次回归就会让所有
+      老链路读不到任何 diff（而且不报错，只是报告里全是信息缺口）。
+    * **空列表 `[]`**：写侧**明确**声明了「这一批一条可读路径都没有」（`profile=tables`
+      而本批次没有配表）。把它当成「不限制」是一处**安全口子**：平台说只看配表，模型
+      却因此读得到全部代码 diff —— 与 `allowed_paths` 这个键存在的理由正好相反。
+
+    所以判据按 `is None` 分支，空集合原样返回（空集即拒绝）。
+
+    ## 为什么要归一化
+
+    `allowed_paths` 是写侧从 `delta_files` 抄下来的，而调用方构造的 payload 可能用
+    反斜杠或带 `./` 前缀。不归一化会制造**过严的假拒绝**：模型问的路径本来在白名单里，
+    却因为写法差异被判越权 —— 它收到的是「你没资格读」，于是写进信息缺口，比放行更难查。
+    """
+    raw = payload.get("allowed_paths")
+    if raw is None:
+        return None
+    allowed = {normalize_path(str(path)) for path in raw if str(path or "").strip()}
+    # 不写 `or None`：空集是「一条都不许」的明确声明，不是「没给」。
+    return frozenset(allowed)
+
+
+def _narrow_window_files(raw: object, allowed: Optional[frozenset[str]]) -> object:
+    """把窗口提交账里的路径也收窄到 `allowed_paths`（`None` = 原样返回）。
+
+    ## 为什么窗口账必须一起筛
+
+    它是**第二种授权来源**：`build()` 会把「窗口提交自己改过的路径」补进
+    `paths_by_commit`（见 `build` 的 `extra_paths`）。只筛 `delta_files` 等于给
+    `profile=tables` 留了一道侧门：某个代码提交只要不在收窄后的白名单键上，它的整批
+    代码路径就会从窗口账加进授权表 —— 模型照样读得到代码 diff，而 `scope.path_allowed`
+    会如实回答「允许」。源头收窄若漏了这一路，前面的筛法全部作废。
+
+    `repositories`（逐仓库那一份）同样要筛：`build()` 读它建 `entries`，那是归属
+    判据，不收窄会把越界路径重新带进 `entries`。
+    """
+    if allowed is None or not isinstance(raw, Mapping):
+        return raw or {}
+    narrowed: dict[str, dict] = {}
+    for commit_id, entry in raw.items():
+        if not isinstance(entry, Mapping):
+            continue
+        paths = [
+            str(path)
+            for path in entry.get("paths") or ()
+            if normalize_path(str(path)) in allowed
+        ]
+        repositories: dict[str, list[str]] = {}
+        raw_repositories = entry.get("repositories")
+        if isinstance(raw_repositories, Mapping):
+            for repository_id, repository_paths in raw_repositories.items():
+                kept = [
+                    str(path)
+                    for path in repository_paths or ()
+                    if normalize_path(str(path)) in allowed
+                ]
+                if kept:
+                    repositories[repository_id] = kept
+        # **提交条目本身不删**：`window_commit_ids` 撑起的 `commits` 白名单是另一码事
+        # （见父层调用点的 `extra_commits`）。这里只让它的路径集变空 —— 路径不可读，
+        # 但「这个提交改过东西」这件事仍然查得到，`commit_detail` 不会退化成
+        # 「不属于本批次」那类静默缺口。`repository_id` 也随条目保留：多仓库同号时
+        # 取数侧要靠它收窄。
+        narrowed[commit_id] = {**entry, "paths": paths, "repositories": repositories}
+    return narrowed
+
+
 def from_weekly_payload(
     payload: Mapping[str, object],
     *,
@@ -134,7 +207,23 @@ def from_weekly_payload(
     `file_diff` 都会被拒 —— 模型说「还有 567 个没看到」时，它其实**连读都不允许**。
     现在名字没列全只是「不知道路」，不是「读不到」：白名单给全部，模型可以用
     `commit_detail` 查出某个提交的完整文件清单再点名索取。
+
+    ## `allowed_paths`：在**源头**收窄白名单（契约 1.8）
+
+    `payload["allowed_paths"]` **非 `None`** 时（含空列表 = 一条都不许），只有集合里的
+    路径能进 `grouped` / `whitelist` / `triples` —— 也就是进不了 `paths_by_commit` 与
+    `entries` 这两张授权表。于是 `AnalysisScope.path_allowed` 天然拒绝代码文件，
+    **不需要改 `scope.py`**。
+
+    窗口提交账（`window_commit_files`，第二种授权来源）同样要收窄：它补进
+    `paths_by_commit` 的那些路径也是「能读的 diff」，只筛 delta 等于留了一道侧门。
+
+    为什么不只在结果层过滤：授权表是整条取数链的唯一判据（预取、引用扫描、
+    `commit_detail` 之后的所有请求都读它）。源头不收窄的话，越界文件的 diff 会先被
+    读进上下文，再在结论层「不计数」已经晚了 —— token 花了，模型也已经照着它推理过。
+    值为 `None`/空时这里一个字节都不改（老 payload 与单提交模式走旧行为）。
     """
+    allowed = _allowed_path_set(payload)
     grouped: dict[str, list[FileChange]] = {}
     # 提交号 -> 本批次里带这个号的仓库（见 `AnalysisScope.repository_ids_by_commit`）。
     # payload 的每一条**本来就带 `repository_id`**，只是原先在这两个归并循环里被扔掉了。
@@ -148,6 +237,10 @@ def from_weekly_payload(
         commit_id = str(entry.get("latest_commit_id") or "")
         path = normalize_path(str(entry.get("file_path") or ""))
         if not commit_id or not path:
+            continue
+        # 越界路径**连名字都不进**清单与授权表。三元组也在这个分支之后追加，所以
+        # `entries` 与 `paths_by_commit` 收窄的是同一批路径（三处不能各筛一份）。
+        if allowed is not None and path not in allowed:
             continue
         grouped.setdefault(commit_id, []).append(FileChange(path=path, operation="M"))
         _note_repository(repositories, commit_id, entry.get("repository_id"))
@@ -165,6 +258,8 @@ def from_weekly_payload(
         commit_id = str(entry.get("latest_commit_id") or "")
         path = normalize_path(str(entry.get("file_path") or ""))
         if commit_id and path:
+            if allowed is not None and path not in allowed:
+                continue
             whitelist.setdefault(commit_id, []).append(path)
             _note_repository(repositories, commit_id, entry.get("repository_id"))
             triples.append((entry.get("repository_id"), commit_id, path))
@@ -215,7 +310,7 @@ def from_weekly_payload(
         whitelist=whitelist or None,
         prefixes=prefixes,
         manifest=manifest,
-        extra_inputs=_extra_inputs(payload.get("delta_files") or ()),
+        extra_inputs=_extra_inputs(payload.get("delta_files") or (), allowed),
         repositories=repositories,
         entries=triples,
         # **窗口里真实可达的提交**（写侧读 `commits_log` 得到）。它撑起两件事：
@@ -227,7 +322,9 @@ def from_weekly_payload(
         # 窗口提交**各自改过的路径** —— 撑起单提交的 `file_diff`（见 `build` 的说明）。
         # 缺这个键（老 payload / 写侧还没接线）时退回旧行为：`commit_detail` 能问，
         # 但旧提交的 `file_diff` 会被路径白名单拒。那是**已知边界**，不是静默失效。
-        window_commit_files=payload.get("window_commit_files") or None,
+        # `allowed_paths` 非 `None` 时这里也要收窄（见 `_narrow_window_files`）：空列表
+        # 同样是「一条都不许」，窗口账是第二种授权来源，漏了它，越界代码仍然读得到。
+        window_commit_files=_narrow_window_files(payload.get("window_commit_files"), allowed) or None,
         commit_facts=window_commits.facts_from_payload(
             payload, window_commit_ids=payload.get("window_commit_ids") or ()
         ),
@@ -610,11 +707,18 @@ def _assignment_note(manifest: ManifestPlan) -> str:
     )
 
 
-def _extra_inputs(rows: Iterable[Mapping[str, object]]) -> tuple[tuple[str, str], ...]:
+def _extra_inputs(
+    rows: Iterable[Mapping[str, object]],
+    allowed: Optional[frozenset[str]] = None,
+) -> tuple[tuple[str, str], ...]:
     """本轮输入里 `source != delta` 的那些 → `(路径, 来源)`，按原顺序去重。
 
     来源只有两种（`scope_sampling.build_weekly_payload` 写的）：`compensation`（上一轮
     装进了输入却没取到证据）与 `dependency`（与本轮变更文件同名的源表 / 生成物）。
+
+    `allowed` 非空时要滤掉越界项：这一段是**给模型看的待核查清单**，列一个它读不到的
+    文件进来，它只会把「平台不让我读」写成报告里的信息缺口（与 `build` 里那段截断说明
+    同一个坑）。`None` = 旧 payload，逐字不变。
     """
     seen: set[str] = set()
     result: list[tuple[str, str]] = []
@@ -623,6 +727,8 @@ def _extra_inputs(rows: Iterable[Mapping[str, object]]) -> tuple[tuple[str, str]
         source = str(entry.get("source") or "delta").strip() or "delta"
         path = normalize_path(str(entry.get("file_path") or ""))
         if source == "delta" or not path or path in seen:
+            continue
+        if allowed is not None and path not in allowed:
             continue
         seen.add(path)
         result.append((path, source))
@@ -777,7 +883,43 @@ def _scope_note(payload: Mapping[str, object]) -> str:
         else:
             extras.append("依赖核查项的数量未记录")
         note += "本次输入还包含" + "、".join(extras) + "；它们不是本轮新增改动，报告须单独标明来源。"
-    return note + _focus_note(payload)
+    return note + _profile_note(payload) + _focus_note(payload)
+
+
+def _profile_note(payload: Mapping[str, object]) -> str:
+    """`analysis_profile=tables` 时补一句：**输入**收窄到配置表仓库，但**读取**没缩。
+
+    ## 为什么非写不可
+
+    `tables` 在**输入侧**就把代码 / 资源仓库整批筛掉了（`analysis_scope_filter`），而上面
+    那几句说的仍是「本版本改动过的 N 个文件」—— 模型会把它读成整个版本，于是「配表仓库里
+    没发现问题」被写成「本版本没问题」。这与 `_focus_note` 是同一个病灶（收窄没有进提示词），
+    只是收窄来自项目配置而不是用户勾选，所以并列说一句、各说各的来源。
+
+    ## 2026-11-01 WP20：读取范围放开了，所以这句不能再只说「不在输入里」
+
+    `allowed_paths=None` 之后模型**读得到**未改动的引用方表、生成物、导表工具，以及代码
+    仓库里谁消费这张表（枚举 / 协议 / 常量）。旧措辞（「其它仓库不在输入里」）会被读成
+    「代码也读不到」，模型于是不敢去核对跨表/跨仓库引用 —— 而关联取证正是放开读取的目的。
+    另一面：`None` 时 `result_payload._out_of_scope` 按「文件在本次 delta，或
+    `claims.evidence_refs` 命中 delta」判定（WP27）—— 有可核实关联的代码结论参与定级，
+    无关联的背景发现单列。所以这句要同时交代「输入只看配表」与「结论优先落在配表改动上」，
+    把模型引向可核实的关联证据，而不是泛泛的代码评审。
+
+    `all` / 缺键时一个字都不加：那是「没有收窄」，不是「收窄了但没记」—— 逐字保持旧输出，
+    老 payload 与本轮之前的提示词完全一致。
+    """
+    if str(payload.get("analysis_profile") or "").strip().lower() != "tables":
+        return ""
+    # 老 payload（升级前落库）里可能还带着显式路径集合：那些运行的**读取确实被收窄**，
+    # 这里必须照旧说「其它仓库不在输入里」—— 对新口径的描述会变成一句假话。
+    if payload.get("allowed_paths") is not None:
+        return "本次只分析配置表仓库（含仓库内代码/产物），其它仓库不在输入里。"
+    return (
+        "本次**分析输入**只含配置表仓库的改动；**读取范围**包含配置表仓库全部文件与"
+        "代码仓库（用于跨表引用与消费代码核对）；**结论优先落在配表改动上**，"
+        "代码与未改动表的发现只作关联证据。"
+    )
 
 
 def _focus_note(payload: Mapping[str, object]) -> str:

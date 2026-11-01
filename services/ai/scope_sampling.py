@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -281,10 +282,12 @@ def _summarize_weekly_files(
     为空（降级运行不推进它）而把 1009 个文件全放进了白名单。
 
     现在按 manifest 做差（见 `_select_delta_entries`），再加上补偿集
-    （`_compensation_entries`）。**summary 的键一个都没改**：`total_files` / `delta_files` /
-    `batch_files` / `window_files` / `critical_paths` / `critical_path_hits` /
-    `critical_path_source` 的语义与拼写都是既有读侧（`change_set._scope_note`、
-    `coverage_ledger._inventory`、`_decide_scope`）按名字取的。
+    （`_compensation_entries`）。**既有键一个都没改名、也没改语义**：`total_files` /
+    `delta_files` / `batch_files` / `window_files` / `critical_paths` /
+    `critical_path_hits` / `critical_path_source` 的拼写与含义都是既有读侧
+    （`change_set._scope_note`、`coverage_ledger._inventory`、`_decide_scope`）按名字取的。
+    2026-11-01 另加四个**只在判定侧用**的键（`scoped_delta_files` / `carried_files` /
+    `denominator` / `delta_ratio`），因为 `delta_files` 含补偿与依赖，不能拿它做分子。
     """
     config_ids = [cfg.id for cfg in configs]
     total_query = WeeklyVersionDiffCache.query.filter(
@@ -309,6 +312,12 @@ def _summarize_weekly_files(
     )
 
     repo_lookup = {cfg.repository_id: cfg.repository for cfg in configs}
+    # 仓库的资源类型要一路带到关键路径扫描里：同一个 `config/` 目录对配表仓库是**常规
+    # 内容**（见 `project_facts.is_routine_table_path`），对代码仓库才可能是危险路径。
+    resource_type_by_repo = {
+        cfg.repository_id: str(getattr(cfg.repository, "resource_type", "") or "")
+        for cfg in configs
+    }
     repo_summaries: Dict[int, dict] = {}
     total_files_by_repo: Dict[int, int] = {}
 
@@ -412,14 +421,15 @@ def _summarize_weekly_files(
         reverse=True,
     )
 
-    # 扫一遍关键路径。这一行日志是这次要补的「留痕」本身：在这之前，升级为全量的理由
-    # （甚至「一条都没命中」这件事）在任何地方都看不到。
+    # 扫一遍关键路径。这一行日志是这次要补的「留痕」本身：在这之前，建议整窗的
+    # 理由（甚至「一条都没命中」这件事）在任何地方都看不到。
     #
     # **只扫「变化了的那部分」**，不含补偿项：`critical_paths` 是「这一轮的变化里有没有
-    # 落在危险路径上的」，把它算成「输入里有没有危险文件」会让每一次补偿都升级为全量。
+    # 落在危险路径上的」，把它算成「输入里有没有危险文件」会让每一次补偿都建议整窗。
     scan = scan_critical_paths(
         (
-            (entry.file_path, tables_by_repo.get(entry.repository_id, ()))
+            (entry.file_path, tables_by_repo.get(entry.repository_id, ()),
+             resource_type_by_repo.get(entry.repository_id, ""))
             for entry in delta_entries
             if (entry.config_id, entry.file_path) not in compensated_keys
             and (entry.config_id, entry.file_path) not in dependency_keys
@@ -428,6 +438,17 @@ def _summarize_weekly_files(
     )
     if scan.hit:
         log_print(scan.log_line(), "AI", force=True)
+
+    # **两个口径必须分开算**：`delta_files` 含补偿与依赖（白名单与展示要用它），
+    # 而「这一轮到底变了多少」只能是真实变化 —— 补偿与依赖是平台自己挑进来的核查项，
+    # 把它们算进范围判定等于「补 20 个 + 依赖 50 个就建议整窗重跑」（实测 run 62：
+    # 33 真实 + 20 补偿 + 1 依赖 = 54 ≥ 50，于是被当成了「变化很多」）。
+    scoped_delta_files = sum(1 for item in delta_files if not item.get("source"))
+    carried_files = len(delta_files) - scoped_delta_files
+    # **分母是基线快照的条数，不是整窗缓存行数。** 整窗做分母时 1400 文件的窗口里
+    # 比例永远够不到 0.30（实测最大 0.21），4 个文件的小批次里 2 条就 0.50 —— 阈值
+    # 两头都失真。没有基线（首跑 / 没有冻结快照的老分组）时退回窗口总数。
+    denominator = int(getattr(baseline, "item_count", 0) or 0) or total_files
 
     summary = {
         # `total_files` = **窗口总数**（这个周版本一共有过多少改动文件），`delta_files` =
@@ -440,6 +461,13 @@ def _summarize_weekly_files(
         # 没有的文件「读得到」，模型点名索取时请求被 `protocol` 静默丢掉（只进 trace，
         # 没有任何回执），于是它把一个不存在的取数缺口写成免责声明。
         "batch_files": len(delta_files),
+        # 真实变化条数（**不含**补偿/依赖）。范围判定读它，见 `decide_scope`。
+        "scoped_delta_files": scoped_delta_files,
+        # 平台自己挑进来的核查项条数（补偿 + 依赖）：它们不是「这周改了什么」。
+        "carried_files": carried_files,
+        # 比率的分母（基线快照条数；无基线时是窗口总数）。
+        "denominator": denominator,
+        "delta_ratio": scoped_delta_files / max(denominator, 1),
         # 窗口总数**另存一份**：`focus` 会把 `total_files` 改写成筛后的条数，之后就没有
         # 任何一处还记着「这个版本一共改了多少」—— 而「这次输入覆盖了多少分之多少」
         # 正是靠它（见 `change_set._scope_note`）。
@@ -487,6 +515,44 @@ def _summarize_weekly_files(
             item for item in delta_files if item.get("source") == "dependency"
         ],
     }, None
+
+
+def refine_summary_for_focus(
+    summary: dict, delta_files: List[dict], compensation_files: List[dict]
+) -> dict:
+    """用户选了「分析范围」之后，把 summary 的计数重算成**筛后**的口径。
+
+    ## 为什么必须重算、而且必须发生在范围判定之前
+
+    `focus` 表达的是「这一轮只看配表」：认了这件事，范围判定要回答的也就是「这一轮
+    装进输入的那批文件有多少」。先判 scope 再筛清单，等于用没筛的 120 个文件去建议
+    整窗重跑，而用户明确只关心其中 20 张表 —— 那正是「增量总是退回全量」的另一条入口。
+
+    `window_files` **不重算**：它记的是「这个版本一共改了多少」，与用户这次筛选无关；
+    重算它会让 `change_set._scope_note` 那句「覆盖了 N 个里的 M 个」失去分母。
+
+    `delta_files` / `batch_files` / `total_files` 仍然表示「本批次装进输入的文件数」
+    （含补偿与依赖，白名单与展示依赖它）；`scoped_delta_files` 才是真实变化。
+    """
+    scoped = sum(1 for item in delta_files if not item.get("source"))
+    carried = len(delta_files) - scoped
+    # 分母不跟着筛：它衡量的是「这批变化占上一次分析过的比例」。筛子的作用是让分子
+    # 只算用户关心的那一半，把分母一起缩小反而会把「只看 20 张表」算成 100%。
+    denominator = int(summary.get("denominator") or summary.get("window_files") or 0)
+    return {
+        **summary,
+        "total_files": len(delta_files),
+        "delta_files": len(delta_files),
+        "batch_files": len(delta_files),
+        "scoped_delta_files": scoped,
+        "carried_files": carried,
+        "compensation_files": len(compensation_files),
+        "dependency_files": sum(
+            1 for item in delta_files if item.get("source") == "dependency"
+        ),
+        "delta_ratio": scoped / max(denominator, 1),
+    }
+
 
 def has_weekly_changes(config_ids: List[int], last_analyzed_at: Optional[datetime]) -> bool:
     if not config_ids:
@@ -576,30 +642,126 @@ def snapshot_already_analyzed(state, config_ids: List[int]) -> bool:
     return stored == weekly_snapshot_digest(config_ids)
 
 
-def _decide_scope(summary: dict, baseline) -> Tuple[str, str]:
-    """这一轮跑全量还是增量，以及**为什么**（第二返回值进 run 的 `policy.reason`）。
+@dataclass(frozen=True)
+class ScopeDecision:
+    """这一轮的范围裁决：**输入口径**（`scope`）+ 平台建不建议整窗重跑。
 
-    `baseline` 是**做差基准**（`snapshot_store.BaselineSnapshot`），不是 `last_analyzed_at`。
+    ## 为什么 `scope` 与 `suggested_full` 要分开
 
-    改动前这里判的是 `if not last_analyzed_at`，于是三件事被绑在同一个值上：降级运行
-    不推进水位线（有意），代价是**首次/增量分流**跟着一起废掉 —— 手工路径看到 `None`
-    就按 `first_run` 把约 1000 个文件全放进白名单。现在判的是「有没有可用的基线」：
-    快照在就按 manifest 做差，没有才叫首跑。
+    改动前 `_decide_scope` 在「变化多 / 比例高 / 命中关键路径」时直接回 `full`，而
+    `full` 会被读侧当成「输入装了整个版本」（`change_set._scope_note` 的「分析范围：
+    全量」），预检接口又把它翻译成「用户必须改跑全量」——结果是一条**只改标签、不改
+    输入**的裁决，把基线一起弄丢（实测 run 63：真实变化 11 条，判 full 之后整窗重跑）。
 
-    第二参数仍然是「能判真假」的（既有调用点与测试按那个形状传），只是**它的含义变了**。
+    所以：`scope == "full"` **只表示真的没有基线可选**（首跑，或用户显式请求全量，
+    后者走 `force_full` 时同样没有基线）。平台自己觉得「这批变化大，建议整窗重看」
+    只是**建议**：`scope` 仍是 `incremental`、基线照旧保留，另用 `suggested_full`
+    交给界面去问人。`reason` 只说明「为什么这样建议」，不再反向污染输入口径。
     """
+
+    scope: str              # "incremental" | "full"（后者只允许「没有基线」）
+    reason: str             # 见 `decide_scope` 的顺序说明
+    suggested_full: bool    # 平台建议整窗重跑（scope 仍 incremental）
+    real_delta: int         # 真实变化条数（不含 compensation/dependency）
+    compensation: int
+    dependency: int
+    denominator: int        # 比率分母：baseline.item_count，无基线时 total_files
+    ratio: float
+    critical_source: str
+    critical_hits: tuple[str, ...]
+
+
+def _summary_real_delta(summary: dict) -> int:
+    """真实变化条数。**只认 `scoped_delta_files`**，不认含补偿/依赖的 `delta_files`。
+
+    老 payload（或测试里手写的 summary）没有这个键 —— 那时退回 `delta_files`：
+    「不知道新口径」与「真实变化就是 0」必须分得开，把未知当成 0 会让这些输入静默
+    走成 `delta_small`，而它们其实可能变化很大。
+    """
+    raw = summary.get("scoped_delta_files")
+    if raw is None:
+        raw = summary.get("delta_files")
+    return int(raw or 0)
+
+
+def decide_scope(summary: dict, baseline) -> ScopeDecision:
+    """这一轮跑全量还是增量、为什么，以及要不要**建议**整窗重跑。按顺序判：
+
+    1. 没有基线 → `full / first_run`：这是 `scope == "full"` 唯一允许的自动情形；
+    2. 真实变化为 0 → `incremental / delta_small`（沿用既有 no_change 分支）；
+    3. 真实变化 >= 50 → `incremental / delta_count_high` + 建议整窗；
+    4. 真实变化 / 基线条数 >= 0.30 → `incremental / delta_ratio_high` + 建议整窗；
+    5. 命中关键路径 → `incremental / critical_path_detected` + 建议整窗；
+    6. 其余 → `incremental / delta_small`。
+
+    ## 几个刻意的取舍
+
+    * **分子只数真实变化**：补偿（≤20）与依赖（≤50）是平台自己挑进来的核查项，
+      而依赖上限恰好等于文件数阈值 —— 算进去的话单靠依赖集就能触发「变化很多」
+      （实测 run 62：33 真实 + 20 补偿 + 1 依赖 = 54）。
+    * **分母是基线快照条数**（`summary.denominator`，无基线时退回窗口总数）：整窗
+      做分母时大窗口的比例永远够不到阈值（实测 1400 文件最大 0.21），小批次反而必中。
+    * **critical 只建议、不升 full**：默认清单里曾经含 `config/`，配表项目每次动表都
+      命中（实测 4/6 次运行的 full 都来自它）。升 full 会让「分析范围：全量」与实际
+      输入不符，而且下一次做差再也拿不到这条基线。
+    """
+    real_delta = _summary_real_delta(summary)
+    compensation = int(summary.get("compensation_files") or 0)
+    dependency = int(summary.get("dependency_files") or 0)
+    denominator = int(summary.get("denominator") or summary.get("total_files") or 0)
+    ratio = real_delta / max(denominator, 1)
+    critical_hits = tuple(str(item) for item in (summary.get("critical_path_hits") or ()))
+    critical_source = str(summary.get("critical_path_source") or "")
+    metrics = {
+        "real_delta": real_delta,
+        "compensation": compensation,
+        "dependency": dependency,
+        "denominator": denominator,
+        "ratio": ratio,
+        "critical_source": critical_source,
+        "critical_hits": critical_hits,
+    }
+
     if not baseline:
-        return "full", "first_run"
-    delta_count = int(summary.get("delta_files") or 0)
-    total_count = int(summary.get("total_files") or 0)
-    if total_count <= 0:
-        return "full", "empty_total"
-    ratio = delta_count / max(total_count, 1)
-    critical_hit = bool(summary.get("critical_paths"))
-    if delta_count >= FULL_ANALYSIS_FILE_THRESHOLD:
-        return "full", "delta_count_high"
+        return ScopeDecision(
+            scope="full", reason="first_run", suggested_full=False, **metrics
+        )
+    if real_delta == 0:
+        return ScopeDecision(
+            scope="incremental", reason="delta_small", suggested_full=False, **metrics
+        )
+    if denominator <= 0:
+        # 窗口与基线都是空的：没有分母可比，不能因为「比例无限大」就建议整窗。
+        return ScopeDecision(
+            scope="incremental", reason="empty_total", suggested_full=False, **metrics
+        )
+    if real_delta >= FULL_ANALYSIS_FILE_THRESHOLD:
+        return ScopeDecision(
+            scope="incremental", reason="delta_count_high", suggested_full=True, **metrics
+        )
     if ratio >= FULL_ANALYSIS_RATIO_THRESHOLD:
-        return "full", "delta_ratio_high"
-    if critical_hit:
-        return "full", "critical_path_detected"
-    return "incremental", "delta_small"
+        return ScopeDecision(
+            scope="incremental", reason="delta_ratio_high", suggested_full=True, **metrics
+        )
+    if critical_hits:
+        return ScopeDecision(
+            scope="incremental",
+            reason="critical_path_detected",
+            suggested_full=True,
+            **metrics,
+        )
+    return ScopeDecision(
+        scope="incremental", reason="delta_small", suggested_full=False, **metrics
+    )
+
+
+def _decide_scope(summary: dict, baseline) -> Tuple[str, str]:
+    """兼容 wrapper：`(scope, reason)` 二元组。
+
+    **既有调用点与测试按这个形状取**（`job_service` 的 `upgrade_reason`、结算与
+    `run.scope` 都读它），所以形状不动；要拿 `suggested_full` / `decision` 账的
+    调用方走 `decide_scope`（`build_weekly_payload` 就是）。第二参数含义仍是
+    「做差基准」：`BaselineSnapshot` 或过渡态的时间水位线，`None` 才是首跑。
+    """
+    decision = decide_scope(summary, baseline)
+    return decision.scope, decision.reason

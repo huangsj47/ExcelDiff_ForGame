@@ -225,7 +225,12 @@ def settle_job_from_result(result, task_id=None):
                     request_payload = {}
                 policy = request_payload.get("policy") or {}
                 if job.requested_mode == "incremental" and active_run.scope == "full":
-                    job.upgrade_reason = str(policy.get("reason") or "runtime_scope_upgrade")
+                    reason = str(policy.get("reason") or "runtime_scope_upgrade")
+                    # `first_run` 是历史字面值：写侧统一成 `no_conclusion_baseline`（读侧
+                    # 仍认旧值），否则 job 上会一直挂着一个「平台把我升成全量了」的原因。
+                    if reason == job_service.UPGRADE_REASON_FIRST_RUN:
+                        reason = job_service.UPGRADE_REASON_NO_CONCLUSION_BASELINE
+                    job.upgrade_reason = reason
             worker._db.session.commit()
             return job
         if not run_id:

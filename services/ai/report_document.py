@@ -31,6 +31,9 @@
   > 留着旧说法比没有更糟 —— 它会让后来的人以为这一列不可做。
 * **没有达门槛的异常时，说一句「本次没有达到门槛的异常条目」，不画空表。** 一张只有表头的
   表会被读成「这一项还没填」。
+* **范围外（`out_of_scope`）的条目单列一节，不与上面那张表混排。** 它们照常列出（报告要能
+  看见模型报过什么），但没有参与风险等级与条数统计 —— 混在同一张表里，读者会把它们当成
+  「这一次要处理的问题」（见 `OUT_OF_SCOPE_TITLE` 与 `result_payload._out_of_scope`）。
 * **这份文档是「导出那一刻」渲染的，所以页脚要写明渲染版本。** 与报告正文不同（那是存档
   文本，见下面 `RENDER_VERSION`）：元信息、附录、标签全是导出时现拼的，于是**同一个 run
   在平台升级前后导出的两份可能不一样**。审计场景里「两份导出不一致」最容易被读成「数据被
@@ -48,11 +51,10 @@ import re
 from datetime import datetime
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from utils.timezone_utils import format_beijing_time
-
 from services.ai import skill_contract
 from services.ai.claims import CLAIM_VERIFIED
 from services.ai.skill_contract import DEFAULT_DIMENSION_SPECS, dimension_labels_of
+from utils.timezone_utils import format_beijing_time
 
 # ---------------------------------------------------------------------------
 #  给人看的字
@@ -82,6 +84,17 @@ SCOPE_LABELS = {
 TRIGGER_LABELS = {
     "manual": "手动",
     "scheduled": "定时",
+}
+
+# 「分析范围口径」那一格的两档说法（项目 AI 配置里的「分析范围」）。
+#
+# **为什么必须由程序写进导出报告**：默认档是 `tables`，此时「分析范围：全量」说的只是
+# 「整个窗口比一遍」——本次输入里却只有配置表仓库的改动。少了这一格，读者会把「全量」
+# 与元信息里那些覆盖数字读成整个项目的覆盖，而代码/资源仓库这次压根没进输入。
+# 措辞里的码值保留：使用者要在项目配置页（同为 tables / all）对上同一个档位。
+ANALYSIS_PROFILE_LABELS = {
+    "tables": "仅配置表仓库（tables）",
+    "all": "全部仓库（all）",
 }
 
 STATUS_LABELS = {
@@ -429,6 +442,70 @@ def coverage_for_run(run: Any) -> dict:
     return coverage_ledger.ledger_from_run(run)
 
 
+def analysis_profile_label(profile: Any) -> str:
+    """生效的分析范围档位（`tables` / `all`）→ 一句人话。认不出来时是空串。
+
+    **认不出来不猜任何一档**：`tables` 与 `all` 对读者意味着完全不同的覆盖面，猜错一次
+    就是把「只看了配表仓库」写成「看了全部仓库」（或反过来）。宁可这一行不出现。
+    """
+    key = str(profile or "").strip().lower()
+    return ANALYSIS_PROFILE_LABELS.get(key, "")
+
+
+def repository_scope_text(repositories: Any) -> str:
+    """本次输入纳入的仓库 → 一句人话。一个仓库名都取不到时是空串。
+
+    ## 只写「纳入了谁」，并明说其余仓库没进来
+
+    这份报告的覆盖面边界就靠这一句。**不在这里去查项目下还有哪些仓库**：导出不该多打
+    一次库，而且「其余仓库」是相对**这次冻结的输入**说的 —— 现查项目当前仓库清单，
+    反而可能与这份报告当时的输入对不上。
+
+    ## 名字缺失时用 id 兜底
+
+    `build_weekly_payload` 的 `repositories` 条目带的是 `repository_name`（生产形状），
+    这里同时认 `name`；两者都没有时印「仓库 #<id>」——宁可印一个不漂亮的名字，也不让
+    这个仓库从「纳入范围」里悄悄消失。
+    """
+    names: list[str] = []
+    for item in repositories or ():
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or item.get("repository_name") or "").strip()
+        if not name:
+            repository_id = item.get("repository_id")
+            name = f"仓库 #{repository_id}" if repository_id not in (None, "") else ""
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return ""
+    return f"纳入 {len(names)} 个仓库：{'、'.join(names)}；其余仓库未纳入本次输入"
+
+
+def input_scope_labels(request_payload: Mapping[str, Any] | None) -> tuple[str, str]:
+    """`request_payload` → 元信息表里的（分析范围口径, 纳入仓库）。**导出路由的一行入口。**
+
+    两格都是**可选**的：没有 payload（老记录 / 坏 JSON）时返回两个空串，文档与以前逐字
+    相同；有 payload 但没有可说的内容时，对应的那一格也是空串（不出现那一行）。
+
+    ## 为什么缺键时可能写「全部仓库（all）」
+
+    生产侧 `build_weekly_payload` 每个周版本 payload 都带 `analysis_profile`；WP14 之前
+    的老 payload 没有这个键，而那时的输入本来就不按仓库收窄 —— 按 `all` 说才是当时的
+    事实（与 `attach_weekly_plan` 里 `payload.get("analysis_profile") or "all"` 同口径）。
+    单提交分析的 payload（`build_commit_payload`）没有「档位」这回事，也没有 `group` 键，
+    所以两格都不印 —— 不替它断言一个并不存在的「全部仓库」。
+    """
+    if not isinstance(request_payload, Mapping) or not request_payload:
+        return "", ""
+    profile: Any = ""
+    if "analysis_profile" in request_payload or "group" in request_payload:
+        profile = request_payload.get("analysis_profile") or "all"
+    return analysis_profile_label(profile), repository_scope_text(
+        request_payload.get("repositories")
+    )
+
+
 def _meta_rows(
     *,
     project_label: str,
@@ -444,6 +521,9 @@ def _meta_rows(
     focus_label: str,
     scope_note: str = "",
     coverage_rows: Sequence[tuple[str, str]] = (),
+    mode_decision: Optional[str] = None,
+    analysis_profile_label: str = "",
+    repository_scope: str = "",
 ) -> Sequence[tuple[str, str]]:
     # 「分析范围」那一格在**有覆盖账本时**要带上限定语：`全量` 是**分析口径**，不等于
     # 「整个版本都看过了」——不加限定语，读者会把它读成「全读完了」，而实测一次周版本分析
@@ -461,10 +541,28 @@ def _meta_rows(
         ("定级依据", _reasons_text(risk_reasons)),
         ("分析范围", scope_value),
     ]
+    # 「分析范围口径」与「纳入仓库」**紧跟分析范围、排在覆盖之前**：这两格回答的是
+    # 「全量/增量说的是哪个范围、本次输入装进来的是谁」，是后面那几行覆盖数字的**前提**。
+    # 默认 `tables` 时「全量」只是窗口口径，输入里却只有配置表仓库 —— 不写这两格，
+    # 读者会把覆盖数字读成整个项目的覆盖（审查报告 P2）。
+    # 参数默认空串：不传的调用方（老记录 / 单提交 / 测试）文档与以前**逐字相同**。
+    profile_text = str(analysis_profile_label or "").strip()
+    if profile_text:
+        rows.append(("分析范围口径", profile_text))
+    scope_text = str(repository_scope or "").strip()
+    if scope_text:
+        rows.append(("纳入仓库", scope_text))
     # 覆盖那几行**紧跟分析范围**：范围与「实际覆盖了多少」是同一件事的两半，隔开摆就没人
     # 会把它们连起来读。行的字由账本给（数字与口径是同一件事，见 `coverage_rows`）。
     for name, value in coverage_rows:
         rows.append((str(name), str(value)))
+    # 「模式裁决」解释上面那格「分析范围」是怎么定下来的（用户选的 / 没有可用基线 /
+    # 平台建议整窗重跑而这次仍是增量）。放在覆盖那几行**之后**：覆盖行与「分析范围」是
+    # 同一件事的两半（见上），插在它们中间会把那两半拆开。参数默认空 —— 旧调用方
+    # （不传）的文档与以前**逐字相同**。
+    decision_text = str(mode_decision or "").strip()
+    if decision_text:
+        rows.append(("模式裁决", decision_text))
     rows.append(("触发方式", trigger_label(trigger_source)))
     if focus_label:
         rows.append(("分析焦点", focus_label))
@@ -548,6 +646,125 @@ def keep_line_breaks(text: str) -> str:
             continue
         out.append(line.rstrip() + "  ")
     return "\n".join(out)
+
+
+# 「模式裁决」那一行里，平台建议整窗重跑的原因怎么读。原因码来自
+# `scope_sampling.ScopeDecision.reason`（契约 1.2），**在这里翻成人话**：
+# 原因码是机器读的，报告是给人看的；不翻的话那一行会写成
+# 「增量（平台建议整窗重跑：delta_count_high）」，读的人得先去查代码。
+MODE_DECISION_REASON_LABELS = {
+    "delta_count_high": "变更文件数多",
+    "delta_ratio_high": "变更文件占比高",
+    "critical_path_detected": "命中关键路径",
+}
+
+
+def mode_decision_text(
+    *,
+    scope: Any,
+    policy: Mapping[str, Any] | None = None,
+    baseline: Mapping[str, Any] | None = None,
+    requested_mode: Any = "",
+    upgrade_reason: Any = "",
+) -> str:
+    """这次运行的「模式裁决」→ 报告元信息那一行的话。**推不出来就返回空串**。
+
+    ## 为什么在这里算（而不是让导出路由拼）
+
+    这句话是**给人看的字**，与「风险等级 / 分析范围 / 触发方式」同一批（见模块抬头）。
+    让路由自己拼一份，等将来加一档原因就要改两处，而漏掉的那一处显示的是英文码值或
+    一句更含糊的话 —— 都不会报错。
+
+    ## 判据全取已有的账，不重算判定
+
+    * `scope`：`AiAnalysisRun.scope`（输入口径）；
+    * `policy` / `baseline`：`request_payload` 里冻结的那一份（契约 1.4 / 1.2）；
+    * `requested_mode` / `upgrade_reason`：job 行上的账（用户点了什么、平台改成了什么）。
+
+    **没有一种情形需要再跑一次 `_decide_scope`**：那会把判定逻辑抄成第二份，
+    而两份在阈值或字段改名之后必然说不到一起（报告说「建议整窗重跑」、界面说没有）。
+
+    取不到的那几档返回空串：**宁可少一行，也不印一句猜的**（与 `is_exportable` 同一条口径）。
+    """
+    mode = str(scope or "").strip()
+    policy_map = policy if isinstance(policy, Mapping) else {}
+    baseline_map = baseline if isinstance(baseline, Mapping) else {}
+    requested = str(requested_mode or "").strip()
+    reason_code = str(upgrade_reason or "").strip()
+    baseline_reason = str(baseline_map.get("reason") or "").strip()
+
+    if mode == "full":
+        # 「用户请求」只认一件事：用户点的就是全量。有 job 账时读 `requested_mode`；
+        # 老运行没有 job（或 job 已被清）时退回 `baseline.reason == force_full` ——
+        # 那是 `resolve_baseline` 文档里写明的「用户显式点全量」标记。
+        if requested == "full" or (not requested and baseline_reason == "force_full"):
+            return "全量（用户请求）"
+        if baseline_reason == "force_full_rebuild" or reason_code == "force_full_rebuild":
+            # 平台自己判的「整窗重看」：用户点的是增量，只是上一轮结论不可复用
+            # （`baseline.py` 里两个 force_full 常量的分工）。
+            return "全量（平台重建基线）"
+        return "全量（无可用基线）"
+    if mode != "incremental":
+        return ""
+    if reason_code == "no_conclusion_baseline":
+        # 契约 1.5 的新原因码（常量在 `job_service.UPGRADE_REASON_NO_CONCLUSION_BASELINE`；
+        # 本模块是纯函数层、刻意不 import 那个会拖进 DB 的模块，所以这里写字面值）：
+        # 没有可继承的历史结论，但**输入仍然是增量**。这一句必须写清楚「增量」，
+        # 否则读者会把它读成「又整窗跑了一遍」。
+        return "增量（无历史结论可继承）"
+    if policy_map.get("suggested_full"):
+        # 契约 1.1/1.2：平台建议整窗重跑时 `scope` 仍是增量、`baseline` 不清空，
+        # 所以这句话要同时说清「这次仍是增量」与「平台建议怎么跑」。
+        suggestion = str(policy_map.get("reason") or "").strip()
+        reason_label = MODE_DECISION_REASON_LABELS.get(suggestion, "")
+        if reason_label:
+            return f"增量（平台建议整窗重跑：{reason_label}）"
+        return "增量（平台建议整窗重跑）"
+    return ""
+
+
+def category_label(category: Any) -> str:
+    """category → 给人看的中文名。**认不出来的原样返回**（与 `severity_label` 同一条
+    兜底：不猜、也不显示成空）。
+
+    与导出附录那一列（`dimension_label`）的区别只在「认不出来时」怎么写：附录是给
+    报告读者的，要**响亮**地写「未归类（<原始 id>）」；这里是给面板那一格的，分组标题
+    已经说了「未归类」，再写一遍是同一句话说两次，所以只回原始 id。
+    """
+    return _label(DIMENSION_LABELS, category, default="")
+
+
+# 面板的分组：配表 / 代码·流程 / 未归类。**由 `skill_contract` 的出厂清单派生**：
+# `TABLE_DIMENSION_IDS` 就是「配表 profile」生效的那 5 个，其余出厂维度是代码/流程。
+# 不在前端再抄一份 id 表 —— 抄一份的结果是加/改维度时面板把配表结论归进「代码·流程」，
+# 而两种分组看起来都正常，不会有人发现（同 `DIMENSION_LABELS` 上面那段）。
+CATEGORY_GROUP_LABELS: dict[str, str] = {
+    "table": "配表",
+    "code_process": "代码·流程",
+    "unclassified": UNCLASSIFIED_LABEL,
+}
+
+
+def category_group(category: Any) -> str:
+    """category → 面板分组的键（`table` / `code_process` / `unclassified`）。
+
+    **空 category 也是「未归类」**：模型漏写 category 与写了一个平台不认识的 id 是
+    两种毛病，但对读者是同一件事 —— 这一条没有落在本次维度清单上。
+
+    ## 用出厂清单，不用「本次生效的清单」
+
+    `category_group` / `category_label` 的调用方是 `anomaly.to_dict()`：它手里只有那一行
+    异常，**没有**那次运行的 `dimension_specs`（那在 run 的 `response_payload` 里）。
+    所以这里用 `skill_contract` 的出厂清单判「配表 / 代码·流程」。项目**自有**的维度
+    （知识包里声明的那些）在这一层认不出来，会按原始 id 显示、归到「未归类」——
+    这是这一层的已知局限，不是判定：报告附录那一列走的是 `dimension_specs`，以那里为准。
+    """
+    text = str(category or "").strip()
+    if text in skill_contract.TABLE_DIMENSION_IDS:
+        return "table"
+    if text in DIMENSION_LABELS:
+        return "code_process"
+    return "unclassified"
 
 
 def is_unclassified(category: Any, labels: Mapping[str, str] | None = None) -> bool:
@@ -649,6 +866,25 @@ def _claim_text(claim: Any) -> str:
 
 APPENDIX_TITLE = "异常清单（平台按门槛过滤后）"
 
+# 「范围外」那一节的标题与说明（契约 1.8）。**单独一节，不与上面的表混排**：这些条目
+# 引用的文件不在本批次 `allowed_paths` 里，平台照样把它们列出来（报告要能看见模型报过
+# 什么），但它们没有参与风险等级、也没有计入「模型报出 N 条」的计数 —— 混在同一张表里，
+# 读者会把它们读成「这一次要处理的问题」。
+OUT_OF_SCOPE_TITLE = "范围外（未计入等级）"
+OUT_OF_SCOPE_INTRO = (
+    "下列条目引用的文件不在本次分析允许读取的范围内（`allowed_paths` 之外）。"
+    "**平台没有丢弃它们**，但它们不参与风险等级与条数统计 —— "
+    "按越界取数去升级风险，等于让「读了不该读的文件」反过来显得更严重。"
+)
+
+# 整批条目**全部**是范围外时，上面那张表没有内容可说。空着不写会让读者以为附录丢了东西。
+NO_IN_SCOPE_APPENDIX = "本次范围内没有达到门槛的异常条目；下面另列的是范围外的条目。"
+
+# 附录表格的表头。**范围内的表与「范围外」那张表用同一份**：两张表的列必须一个不差，
+# 读者才能对着读（见 `OUT_OF_SCOPE_TITLE`）。各写一份的话，改一处列序就会让另一处对不上。
+APPENDIX_TABLE_HEAD = "| 严重度 | 置信度 | 维度 | 处置 | 标题 | 文件 | 影响 |"
+APPENDIX_TABLE_RULE = "| --- | --- | --- | --- | --- | --- | --- |"
+
 # 「覆盖与缺口」那一段的标题。**它不是一级标题**（用粗体行）：这份文档对外承诺「报告正文
 # 固定 7 个一级标题」（`skill_contract.REPORT_SECTIONS`），平台自己再插一个一级标题会把
 # 那个承诺打破，而读者是拿它当目录用的。
@@ -675,6 +911,11 @@ EMPTY_APPENDIX = "本次没有达到门槛的异常条目。"
 # 附录里有「未归类」条目时补的那一句。**这一句不能省**：一份发出去的报告里出现
 # 「未归类」，读的人必须知道那是什么意思、以及该拿什么去对照 —— 否则它会被读成
 # 「平台算不出来」，而真实含义是「这条发现不属于本次生效的任何维度，但没有被丢掉」。
+#
+# **导出文档只在这一处解释「未归类」**（`build_report_markdown` 里只在附录开头挂一次，
+# 与条目数无关）。正文里那一节由引擎/子代理产出（`subagent_tasks.build_unclassified_section`），
+# 它属于**存档原文**：删它要改 `services/ai/engine.py`，是下一轮的事（执行契约 §4），
+# 本轮只在附录这一侧保证「说明只写一次」。
 UNCLASSIFIED_NOTE = (
     "维度列写着「未归类」的条目，是模型给的 `category` 不在本次生效的维度清单里。"
     "**平台没有丢弃它们**（按原样列在上面），但它们不属于清单上的任何一个维度 —— "
@@ -693,7 +934,14 @@ UNCLASSIFIED_NOTE = (
 #
 # 与 `auto_sizing.PLAN_VERSION` 同一套日期写法；因为要改时必改，写死在模块里而不是让调用方
 # 传参 —— 它是渲染器的属性，不是某一次导出的属性。
-RENDER_VERSION = "2026-09-25.1"
+#
+# 2026-11-01：元信息表新增**可选**的「模式裁决」行（`mode_decision`），附录的
+# 「未归类」说明仍只在附录里出现一次。不传 `mode_decision` 的调用方输出不变，
+# 但渲染器的形状变了（新增一种行），所以版本号跟着走。
+# 2026-11-01（第二轮）：附录把 `out_of_scope=True` 的条目挪进单独一节（`OUT_OF_SCOPE_TITLE`）。
+# 有范围外条目时文档多一节、且上面那张表少几行 —— 同一份数据在升级前后导出的两份形状不同，
+# 所以版本号再走一格（没有范围外条目时逐字与上一版相同）。
+RENDER_VERSION = "2026-11-01.2"
 
 # 文档末尾那行出处说明。**只讲读者拿它当证据时会问的两件事**：这份文件什么时候渲染的、
 # 与另一次导出差在哪。报告正文那一段是存档原文（不受渲染版本影响），附录的「处置」列反过来
@@ -704,6 +952,60 @@ RENDER_FOOTER = (
     "附录的「处置」列相反，是导出这一刻现查的人工分诊进度。"
     "两份导出的版本相同而内容不同，差异只可能来自导出之后变化的数据（如上）。*"
 )
+
+
+def _append_appendix_table(lines: list[str], rows: Sequence[dict[str, Any]]) -> None:
+    """把一批行排成附录那张表，并把证据 / 建议 / 断言列在表下。
+
+    **范围内的表与「范围外」那张表共用它**：两张表的列、表头与表下那几块的写法必须一模
+    一样（见 `APPENDIX_TABLE_HEAD`）—— 各写一份的话，改一处列序就会让另一处对不上，而两份
+    表格都「看起来正常」，没人会发现。
+
+    编号（`**1. 标题**`）在**每一段内部**从 1 数起：两段是两批条目，接着上一段数下去会让
+    「第 3 条」指到另一段的第 1 条上。
+    """
+    lines.append(APPENDIX_TABLE_HEAD)
+    lines.append(APPENDIX_TABLE_RULE)
+    for row in rows:
+        lines.append(
+            "| {severity} | {confidence} | {dimension} | {disposition} | {title} | "
+            "{file} | {impact} |".format(
+                severity=row["severity"],
+                confidence=row["confidence"],
+                dimension=row["dimension"],
+                disposition=row["disposition"],
+                title=row["title"] or "-",
+                file=row["file_path"] or "-",
+                impact=row["impact"] or "-",
+            )
+        )
+    # 证据与建议单独列在表下：它们是多行的长文本，塞进表格单元格里会把表撑得没法读。
+    blocks = [row for row in rows if row["evidence"] or row["suggestion"] or row["claims"]]
+    if not blocks:
+        return
+    lines.append("")
+    for index, row in enumerate(blocks, 1):
+        lines.append(f"**{index}. {row['title'] or '（无标题）'}**")
+        lines.append("")
+        if row["claims"]:
+            # 断言清单排在证据之前：它回答的是「这条结论凭什么算核过了」，
+            # 而证据是「它引用了什么」。读者要按这个次序读才对得上。
+            #
+            # **一条断言一行**（2026-09-25）：从前这里是
+            # `"- 断言：" + "；".join(row["claims"])`，真机上量到单行 180~333 字、
+            # 2~3 条挤在一起（run 64 实测 5 项：180/204/331/333/189 字）。这几行恰恰
+            # 是读者最需要逐条看清的地方，挤成一段就只能跳过。第一条带标签，其余接着排。
+            #
+            # **2026-09-25 起这里是断言的产地之一**：报告正文那一节已经不抄断言了
+            # （`verdict_render._row_line` 的 docstring 写了为什么），另一处是异常
+            # 面板（`static/js/ai_anomaly_disposition.js` 的「断言」区）。
+            for position, one in enumerate(row["claims"]):
+                lines.append(("- 断言：" if position == 0 else "- ") + one)
+        for one in row["evidence"]:
+            lines.append(f"- 证据：{one}")
+        if row["suggestion"]:
+            lines.append(f"- 建议：{_WHITESPACE.sub(' ', row['suggestion']).strip()}")
+        lines.append("")
 
 
 def build_report_markdown(
@@ -735,6 +1037,15 @@ def build_report_markdown(
     # 「分析范围」那一格带上限定语，表下再列出缺口。不传（`None`）时这份文档与以前
     # **逐字相同** —— 覆盖数据是「额外的诚实」，不是让老调用方跟着改的理由。
     coverage: Mapping[str, Any] | None = None,
+    # 「模式裁决」那一行的话（见 `mode_decision_text`）。**可选**：不传时这份文档与
+    # 以前逐字相同 —— 导出路由按 `run.request_payload` / job 的账算好传进来，
+    # 老的调用方（测试、脚本）不用跟着改。
+    mode_decision: Optional[str] = None,
+    # 本次输入的范围口径（`input_scope_labels` 产出的两格）：生效的分析范围档位与纳入的
+    # 仓库。**可选**，不传时文档与以前逐字相同 —— 由程序从 `run.request_payload` 组装，
+    # 不依赖模型在正文里说一句「这次只看配表仓库」。
+    analysis_profile_label: str = "",
+    repository_scope: str = "",
     title: str = "AI 变更风险分析报告",
 ) -> str:
     """拼出整份文档。**报告原文逐字出现在中间**，前后各一条 `---` 把它隔开。
@@ -753,6 +1064,19 @@ def build_report_markdown(
     「分析范围：全量」本来是这一份文档里唯一关于「看了多少」的字，而它是分析口径、不是
     覆盖率 —— 传了账本，读者才看得到「这个版本 996 个文件里 60 个取到过证据」。没传时
     这份文档与以前**逐字相同**（覆盖是额外的诚实，不是让老调用方跟着改的理由）。
+
+    **「模式裁决」那一行同理**（`mode_decision`）：传了才出现，解释「分析范围」那格是
+    谁定的。不传时一个字都不变 —— 契约 1.9 要求这个参数可选，正是为了不动老调用方。
+
+    **「分析范围口径」与「纳入仓库」也是可选的**（`analysis_profile_label` /
+    `repository_scope`）：传了才出现，位置在「分析范围」之后、覆盖那几行之前。它们回答的
+    是覆盖数字的**前提** —— 本次生效的是哪一档、输入里到底装了哪些仓库、其余仓库没进来。
+    由程序从 `run.request_payload` 组装（`input_scope_labels`），**不靠模型在正文里提**：
+    默认 `tables` 时「全量」只是窗口口径，不写清楚就会被读成整个项目的覆盖。
+
+    **附录按 `out_of_scope` 分成两张表**（契约 1.8）：范围内的那张照旧，范围外的条目挪进
+    单独一节（`OUT_OF_SCOPE_TITLE`），列一个不少。`out_of_scope` 缺失 / 为假时只有一张表，
+    这份文档与加这一节之前**逐字相同**。
     """
     lines: list[str] = [f"# {title}", ""]
     lines.append("| 项 | 内容 |")
@@ -771,6 +1095,9 @@ def build_report_markdown(
         focus_label=focus_label,
         scope_note=coverage_scope_note(coverage),
         coverage_rows=coverage_table_rows(coverage),
+        mode_decision=mode_decision,
+        analysis_profile_label=analysis_profile_label,
+        repository_scope=repository_scope,
     ):
         lines.append(f"| {name} | {_cell(value)} |")
 
@@ -807,56 +1134,39 @@ def build_report_markdown(
     lines.append(APPENDIX_INTRO)
     lines.append("")
 
-    rows = anomaly_rows(anomalies, dimension_labels, dispositions)
-    if not rows:
+    # **范围内的条目与范围外的条目分开算、分开排**（契约 1.8）。`out_of_scope` 缺失按
+    # `False`：老载荷没有这个键，那些文档与加这一节之前**逐字相同**（见 `anomaly_rows`）。
+    items = [item for item in anomalies or () if isinstance(item, Mapping)]
+    rows = anomaly_rows(
+        [item for item in items if not item.get("out_of_scope")], dimension_labels, dispositions
+    )
+    out_of_scope_rows = anomaly_rows(
+        [item for item in items if item.get("out_of_scope")], dimension_labels, dispositions
+    )
+    if not rows and not out_of_scope_rows:
         lines.append(EMPTY_APPENDIX)
     else:
         # 「未归类」那一句紧跟在附录开头那句说明之后、表格之前：读的人在看到表里那些
-        # 「未归类（xxx）」之前先知道它是什么意思。
-        if any(row["unclassified"] for row in rows):
+        # 「未归类（xxx）」之前先知道它是什么意思。两张表共用这一句（说明只写一次）。
+        if any(row["unclassified"] for row in rows + out_of_scope_rows):
             lines.append(UNCLASSIFIED_NOTE)
             lines.append("")
-        lines.append("| 严重度 | 置信度 | 维度 | 处置 | 标题 | 文件 | 影响 |")
-        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
-        for row in rows:
-            lines.append(
-                "| {severity} | {confidence} | {dimension} | {disposition} | {title} | "
-                "{file} | {impact} |".format(
-                    severity=row["severity"],
-                    confidence=row["confidence"],
-                    dimension=row["dimension"],
-                    disposition=row["disposition"],
-                    title=row["title"] or "-",
-                    file=row["file_path"] or "-",
-                    impact=row["impact"] or "-",
-                )
-            )
-        # 证据与建议单独列在表下：它们是多行的长文本，塞进表格单元格里会把表撑得没法读。
-        blocks = [row for row in rows if row["evidence"] or row["suggestion"] or row["claims"]]
-        if blocks:
+        if rows:
+            _append_appendix_table(lines, rows)
+        else:
+            # 一条范围内的都没有，而下面还有一节要列：画一张只有表头的空表会被读成
+            # 「这一项还没填」，所以用一句话交代（与 `EMPTY_APPENDIX` 同一条口径）。
+            lines.append(NO_IN_SCOPE_APPENDIX)
+        if out_of_scope_rows:
+            # 上面那张表**有证据块时已经以空行收尾**：这里再补一个就会出现两个空行 ——
+            # markdown 里只是多一份空白，但读起来像「又隔了一节」。只在没有空行时补一个。
+            if lines[-1] != "":
+                lines.append("")
+            lines.append(f"**{OUT_OF_SCOPE_TITLE}**")
             lines.append("")
-            for index, row in enumerate(blocks, 1):
-                lines.append(f"**{index}. {row['title'] or '（无标题）'}**")
-                lines.append("")
-                if row["claims"]:
-                    # 断言清单排在证据之前：它回答的是「这条结论凭什么算核过了」，
-                    # 而证据是「它引用了什么」。读者要按这个次序读才对得上。
-                    #
-                    # **一条断言一行**（2026-09-25）：从前这里是
-                    # `"- 断言：" + "；".join(row["claims"])`，真机上量到单行 180~333 字、
-                    # 2~3 条挤在一起（run 64 实测 5 项：180/204/331/333/189 字）。这几行恰恰
-                    # 是读者最需要逐条看清的地方，挤成一段就只能跳过。第一条带标签，其余接着排。
-                    #
-                    # **2026-09-25 起这里是断言的产地之一**：报告正文那一节已经不抄断言了
-                    # （`verdict_render._row_line` 的 docstring 写了为什么），另一处是异常
-                    # 面板（`static/js/ai_anomaly_disposition.js` 的「断言」区）。
-                    for position, one in enumerate(row["claims"]):
-                        lines.append(("- 断言：" if position == 0 else "- ") + one)
-                for one in row["evidence"]:
-                    lines.append(f"- 证据：{one}")
-                if row["suggestion"]:
-                    lines.append(f"- 建议：{_WHITESPACE.sub(' ', row['suggestion']).strip()}")
-                lines.append("")
+            lines.append(OUT_OF_SCOPE_INTRO)
+            lines.append("")
+            _append_appendix_table(lines, out_of_scope_rows)
 
     # 页脚（出处说明）。**排在最后、且与附录之间也隔一条 `---`**：它是关于这份**文件**的
     # 话，不是附录的一部分 —— 混在附录里会被读成又一条异常。内容的取舍见 `RENDER_FOOTER`。

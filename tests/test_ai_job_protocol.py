@@ -397,7 +397,7 @@ def test_a_key_used_for_another_target_is_refused():
 
 
 # ===========================================================================
-#  二、状态裁决：等同步 / 排队 / 首次升级为全量
+#  二、状态裁决：等同步 / 排队 / 无结论基线（模式仍是增量）
 # ===========================================================================
 
 
@@ -488,8 +488,15 @@ def test_a_clean_queue_puts_the_job_in_queued_and_creates_the_task():
         assert task.trigger_source == SOURCE_MANUAL
 
 
-def test_an_incremental_first_run_is_upgraded_to_full_and_that_is_recorded():
-    """没有可复用的结论基线时，平台把增量升成全量 —— **必须落库可查**。"""
+def test_an_incremental_first_run_stays_incremental_and_records_the_missing_baseline():
+    """没有可复用的结论基线时，**模式仍是增量**，原因记成 `no_conclusion_baseline`。
+
+    契约 1.5 之前这一档会被平台升成全量（`upgrade_reason=first_run`）。那条路的后果是
+    前端只给「继续（按全量）」、执行侧 `force_full=True`、基线被清空 —— 用户点的是
+    增量，拿到的却是「他本人要的从零重判」。现在 `scope == "full"` 只表示「输入口径
+    就是整窗」，模式不再被平台偷偷改掉，但**原因必须落库可查**：否则「这次为什么没有
+    增量文件数」只能靠日志回答。
+    """
     with app.app_context():
         group = _make_group()
         result = job_service.create_or_attach_job(
@@ -500,8 +507,45 @@ def test_an_incremental_first_run_is_upgraded_to_full_and_that_is_recorded():
         db.session.commit()
 
         assert result.job.requested_mode == MODE_INCREMENTAL, "用户要的是增量，别改他的账"
-        assert result.job.effective_mode == MODE_FULL
-        assert result.job.upgrade_reason == job_service.UPGRADE_REASON_FIRST_RUN
+        assert result.job.effective_mode == MODE_INCREMENTAL, (
+            "没有结论基线就把模式改成全量了 —— 平台升格会被前端读成「用户要的从零重判」"
+        )
+        assert (
+            result.job.upgrade_reason
+            == job_service.UPGRADE_REASON_NO_CONCLUSION_BASELINE
+        )
+        assert result.job.upgrade_reason != job_service.UPGRADE_REASON_FIRST_RUN, (
+            "新写入还在用历史字面值 first_run —— 读侧兼容保留它，但新账要用新码"
+        )
+
+
+def test_the_active_key_carries_the_target_snapshot():
+    """输入指纹里必须有**目标快照**：同一份输入 = 哪一份快照 + 看哪个范围。
+
+    不带快照时，两次点击之间缓存已经换了一份也仍算「同一份输入」—— 后一次会静默
+    附着到前一次的快照上（看的是旧清单，而用户以为它看的是刚同步完的新清单）。
+    空快照时保持历史指纹逐字不变（滚动升级期间库里那些按旧口径算的活动 job 还要
+    附着得上，否则同一份输入会再建一条 = 第二次付费）。
+    """
+    base = job_service.active_key_for(
+        target_type="weekly", target_key="group-a", focus="all"
+    )
+    with_snapshot = job_service.active_key_for(
+        target_type="weekly", target_key="group-a", focus="all", snapshot=42
+    )
+    another_snapshot = job_service.active_key_for(
+        target_type="weekly", target_key="group-a", focus="all", snapshot=43
+    )
+
+    assert base != with_snapshot, "指纹里没有目标快照 —— 换版之后仍会被当成同一份输入"
+    assert with_snapshot != another_snapshot, "两份不同的快照算出了同一个指纹"
+    # 不传快照与传空值必须逐字相同（老调用点按 3 个关键字参数调）。
+    assert base == job_service.active_key_for(
+        target_type="weekly", target_key="group-a", focus="all", snapshot=""
+    )
+    assert base == job_service.active_key_for(
+        target_type="weekly", target_key="group-a", focus="all", snapshot=None
+    )
 
 
 def test_a_concluded_baseline_keeps_the_incremental_mode():
@@ -666,7 +710,12 @@ def test_a_finished_job_does_not_block_the_next_create():
 
 
 def test_mark_running_publishes_the_runtime_scope_before_the_run_finishes():
-    """运行一创建，轮询端点就应看到真实 scope，不能等结算时才从 incremental 改 full。"""
+    """运行一创建，轮询端点就应看到真实 scope，不能等结算时才从 incremental 改 full。
+
+    `reason` 用**真实升级原因**（`force_full_rebuild`）：契约 1.1 之后
+    `critical_path_detected` 这类**建议原因**不再把 `run.scope` 变成 full，
+    所以它不会再出现在这条「增量 job 被运行侧升成 full」的路上。
+    """
     with app.app_context():
         group = _make_group()
         result = job_service.create_or_attach_job(
@@ -680,13 +729,13 @@ def test_mark_running_publishes_the_runtime_scope_before_the_run_finishes():
             result.job_id,
             run_id=987654,
             effective_mode=MODE_FULL,
-            upgrade_reason="critical_path_detected",
+            upgrade_reason="force_full_rebuild",
         )
         db.session.commit()
 
         assert running.state == STATE_RUNNING
         assert running.effective_mode == MODE_FULL
-        assert running.upgrade_reason == "critical_path_detected"
+        assert running.upgrade_reason == "force_full_rebuild"
 
 
 def test_a_late_mark_running_does_not_resurrect_a_finished_job():

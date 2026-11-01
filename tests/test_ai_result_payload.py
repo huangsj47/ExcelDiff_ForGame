@@ -21,9 +21,15 @@ from dataclasses import replace
 import pytest
 
 from services.ai.baseline_closures import DECLARED_FIXED, BaselineClosure
+from services.ai.degradation import DEGRADE_MARKDOWN
 from services.ai.engine import EngineOutcome
 from services.ai.protocol import AnalysisPayload, Anomaly, DimensionReview
-from services.ai.result_payload import failed_result, note_review_skipped, result_payload
+from services.ai.result_payload import (
+    determine_risk_level,
+    failed_result,
+    note_review_skipped,
+    result_payload,
+)
 from services.ai.verdict import RULING_SUMMARY_TITLE
 
 
@@ -118,6 +124,26 @@ def test_the_keys_the_ui_reads_are_all_present():
         "usage", "dropped", "subagents", "subagent_skipped", "context",
     ):
         assert key in payload, f"`{key}` 不在结果里了"
+
+
+def test_a_finding_is_in_scope_only_with_a_verifiable_relation():
+    """`out_of_scope` 的判据是「与本次改动有没有可核实关联」，不是「有没有白名单」。
+
+    WP27 起，`allowed_paths=None` 的运行里：结论指认的文件在 `delta_files` 里才算
+    in-scope；缺 `delta_files`（老 payload / 单提交形状）时关联锚点不存在，按保守方向
+    单列（`out_of_scope=True`，不进等级）。两种形态都**照常保留条目**。
+    """
+    outcome = _outcome()
+    changed = {"summary": {}, "delta_files": [{"file_path": "config/道具表.xlsx"}]}
+
+    in_change = result_payload(outcome, changed, suppressed=frozenset())
+    unknown = result_payload(outcome, {"summary": {}}, suppressed=frozenset())
+
+    assert in_change["anomalies"][0]["out_of_scope"] is False
+    assert unknown["anomalies"][0]["out_of_scope"] is True, (
+        "缺 `delta_files` 时仍按「默认 in-scope」放行 —— 背景发现会进等级"
+    )
+    assert len(unknown["anomalies"]) == 1, "单列不等于丢掉，条目必须还在"
 
 
 # ==========================================================================
@@ -395,3 +421,195 @@ def test_nothing_is_added_when_the_review_was_not_asked_for(config, run_payload,
     payload = result_payload(_outcome(), {"summary": {}}, suppressed=frozenset())
 
     assert note_review_skipped(payload, project_config=config, payload=run_payload) == payload, why
+
+
+# ==========================================================================
+# 风险等级按结论定级，规模只在没有结论时兜底（WP13）
+# ==========================================================================
+
+# 周版本实测的整窗口径：1012 个文件。旧口径（`total_files >= 120`）在这个数字上
+# 恒判 high —— 而那个 high 只是「这周文件多」，不是模型报了什么。
+WEEKLY_SCALE = {"total_files": 1012, "delta_files": 33}
+
+# 本节几条用例的前提是「结论引用的正是本次改动的文件」：WP27 起 `delta_files` 是
+# 「参与定级」的关联锚点（判据见 `test_ai_related_evidence_scope.py`），缺了它结论会被
+# 单列、等级掉到规模兜底 —— 那本节测的就变成「按规模兜底」而不是「按结论定级」了。
+CHANGE_SET = {"delta_files": [{"file_path": "config/道具表.xlsx"}]}
+
+
+def _finding(*, severity: str, file_path: str = "config/道具表.xlsx") -> Anomaly:
+    return Anomaly(
+        title="【道具】ID 被删除但生成文件仍在",
+        category="config_id",
+        severity=severity,
+        confidence="high",
+        evidence=(f"{file_path} 第 12 行",),
+        commit="a" * 40,
+        file_path=file_path,
+    )
+
+
+def _concluded(*anomalies: Anomaly) -> EngineOutcome:
+    """一次**有结论**的运行（模型按协议交回了结构化条目）。"""
+    return EngineOutcome(
+        status="succeeded",
+        anomalies=tuple(anomalies),
+        report_markdown="# 风险评估\n\n有一处问题。\n",
+    )
+
+
+def test_a_big_week_with_only_a_medium_finding_is_not_high():
+    """1012 个文件 + 1 条 medium：**等级按结论定，不按文件数顶格**。
+
+    旧口径下这个窗口恒 high，于是「模型只报了 1 条 medium」和「模型报了 critical」
+    在报告里长得一模一样，等级没有数值含义（方案 §4.4 第 6 条）。
+    """
+    payload = result_payload(
+        _concluded(_finding(severity="medium")),
+        {"summary": dict(WEEKLY_SCALE), **CHANGE_SET},
+        suppressed=frozenset(),
+    )
+
+    assert payload["risk_level"] != "high", "文件数又把等级顶到 high 了"
+    assert payload["risk_level"] == "mid_high"
+    assert payload["risk_reasons"][0] == "模型报出 1 条达门槛的问题"
+
+
+def test_a_big_week_with_only_a_low_finding_is_not_high():
+    """medium / low 同一支：原规则只有 critical 才 high，文件数不许把它抬上去。"""
+    payload = result_payload(
+        _concluded(_finding(severity="low")),
+        {"summary": dict(WEEKLY_SCALE), **CHANGE_SET},
+        suppressed=frozenset(),
+    )
+
+    assert payload["risk_level"] == "mid_high"
+    assert payload["risk_level"] != "high"
+
+
+def test_a_big_week_with_a_critical_finding_is_high():
+    """有 critical 时仍然是 high —— 结论里的严重度才是唯一能顶格的东西。"""
+    payload = result_payload(
+        _concluded(_finding(severity="critical")),
+        {"summary": dict(WEEKLY_SCALE), **CHANGE_SET},
+        suppressed=frozenset(),
+    )
+
+    assert payload["risk_level"] == "high"
+    assert any("critical" in reason for reason in payload["risk_reasons"])
+
+
+@pytest.mark.parametrize(
+    "outcome, why",
+    [
+        (
+            EngineOutcome(status="failed", error_message="模型调用超时"),
+            "失败（完全没有结论）",
+        ),
+        (
+            EngineOutcome(
+                status="degraded",
+                degradation=DEGRADE_MARKDOWN,
+                report_markdown="# 风险评估\n\n只有 markdown。\n",
+            ),
+            "降级且没有结构化结论",
+        ),
+    ],
+)
+def test_no_conclusion_falls_back_to_the_scale_but_never_high(outcome, why):
+    """没有结论 ⇒ 规模兜底，且**最高只到 mid_high**。
+
+    反过来（没跑成也报 high）会把「没查」显示成「最严重」；而只报「低」又会把
+    「模型没答上来」说成「模型看完说没问题」—— 两件事的处理方式完全相反。
+    """
+    payload = result_payload(outcome, {"summary": dict(WEEKLY_SCALE)}, suppressed=frozenset())
+
+    assert payload["risk_level"] != "high", why
+    assert payload["risk_level"] == "mid_high", why
+    assert any("规模兜底" in reason for reason in payload["risk_reasons"]), why
+    assert any("本次没有可用结论" in reason for reason in payload["risk_reasons"]), why
+
+
+def test_the_scale_fallback_is_capped_even_when_key_paths_changed():
+    """关键路径也救不回 high：这一支只服务「没有结论」，严重度只能由结论给。"""
+    payload = result_payload(
+        EngineOutcome(status="failed", error_message="模型调用超时"),
+        {"summary": {**WEEKLY_SCALE, "critical_paths": True}},
+        suppressed=frozenset(),
+    )
+
+    assert payload["risk_level"] == "mid_high"
+    assert any("含关键路径" in reason for reason in payload["risk_reasons"])
+    assert any("规模兜底" in reason for reason in payload["risk_reasons"])
+
+
+def test_the_scale_function_itself_never_returns_high():
+    """兜底函数的天花板钉在这里：任何规模组合都不许再产出 high。
+
+    这一条守的是**直接调用** `determine_risk_level` 的读侧（`failed_result` 等）——
+    只改 `risk_level_from_outcome` 的话，另一条路仍会报 high。
+    """
+    for summary in (
+        {"total_files": 120},
+        {"total_files": 1012, "delta_files": 33},
+        {"total_files": 5000, "delta_files": 5000},
+        {"total_files": 60, "delta_files": 60},
+        {"critical_paths": True},
+        {},
+    ):
+        assert determine_risk_level(summary) != "high", summary
+
+
+def test_the_failed_result_labels_its_level_as_a_scale_fallback():
+    """没发起分析的那一份同样是规模兜底，措辞与 `risk_level_from_outcome` 同一句。"""
+    payload = failed_result(dict(WEEKLY_SCALE), "本次分析未发起")
+
+    assert payload["risk_level"] != "high"
+    assert any("规模兜底" in reason for reason in payload["risk_reasons"])
+
+
+def test_an_out_of_scope_critical_does_not_raise_the_level():
+    """越界的 critical 不抬等级（与 WP7 同一条口径）：它不是本批次该评的文件。
+
+    这条用例把两个变量一起钉住：窗口是 1012 个文件（旧口径必 high），活动清单里
+    还有一条 critical —— 但它引用的代码文件不在 `allowed_paths` 里。
+    """
+    payload = result_payload(
+        _concluded(
+            _finding(severity="medium"),
+            _finding(severity="critical", file_path="code/a.lua"),
+        ),
+        {
+            "summary": dict(WEEKLY_SCALE),
+            "allowed_paths": ["config/道具表.xlsx"],
+        },
+        suppressed=frozenset(),
+    )
+
+    assert payload["risk_level"] == "mid_high", "越界的 critical 把等级抬上去了"
+    assert payload["risk_level"] != "high"
+    assert any(entry["out_of_scope"] for entry in payload["anomalies"])
+    assert any("范围外" in reason for reason in payload["risk_reasons"])
+
+
+def test_a_run_whose_only_finding_is_out_of_scope_uses_the_capped_fallback():
+    """只报了越界条目的那次会落到规模兜底 —— 它更不能因为文件多就顶格 high。
+
+    这是 WP7（越界不计入）与 WP13（兜底有天花板）的交界：两个都做了，才有
+    「越界的 critical 既不抬等级、也不靠 1012 个文件把等级顶到 high」这个结果。
+    """
+    payload = result_payload(
+        _concluded(_finding(severity="critical", file_path="code/a.lua")),
+        {
+            "summary": dict(WEEKLY_SCALE),
+            "allowed_paths": ["config/道具表.xlsx"],
+        },
+        suppressed=frozenset(),
+    )
+
+    assert payload["risk_level"] != "high"
+    assert payload["risk_level"] == "mid_high"
+    assert any("规模兜底" in reason for reason in payload["risk_reasons"])
+    assert any("范围外" in reason for reason in payload["risk_reasons"]), (
+        "越界条数没交代 —— 读侧会把「模型只报了范围外的」读成「什么都没报」"
+    )

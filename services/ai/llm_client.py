@@ -28,12 +28,28 @@ URL、异常字符串都可能带上密钥（内网网关把 token 放在 query 
 而失败**。所以带标记的请求失败时，会自动去掉标记重试一次；重试成功说明这个端点不认
 这个字段，于是把它记进进程内的黑名单（后续请求不再带）并记一条日志 —— 用户看到的
 是一次正常的分析，而不是「HTTP 400 未知字段」。
+
+## 输出上限字段同样：带了要能跑，带不了要能退
+
+`max_tokens` 现在默认由 `EngineLimits` 给出（封顶输出，把「一次调用最多写多少」从
+网关那个看不见的默认值手里拿回项目）。而内网网关的兼容层对它的 400 有两种，处置**相反**：
+
+* **不认字段**（`Unsupported parameter: max_tokens`）→ 去掉字段重试**一次**，并把端点
+  记进进程内黑名单（后续请求不再带它）：端点永远不认，再带只是每轮多吃一个 400；
+* **认字段、嫌值大**（`max_tokens must be <= 4096`）→ 把数值**改小**到它给的上限重试
+  **一次**，**不**拉黑。若这里也去掉字段，后续调用就永久失去了单次输出上限 —— 那正是
+  审查报告 P2：网关那个看不见的默认值重新接管输出长度，成本又变得不可控。
+
+与缓存标记那层兜底同一条纪律：省钱的优化绝不能把一次分析换没。其它 400（模型名写错、
+`messages` 形状不对）换参数也不会变好，重试只是多花钱。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Mapping
@@ -41,11 +57,13 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
+from services.ai.auto_sizing import DEFAULT_OUTPUT_TOKENS
 from services.ai.prompt_cache import (
     DEFAULT_PROMPT_CACHE_FORMAT,
     DEFAULT_PROMPT_CACHE_MODE,
     apply_cache_breakpoints,
     cache_marker_rejection_reason,
+    endpoint_key,
     mark_cache_marker_rejected,
     normalize_cache_format,
     normalize_cache_mode,
@@ -119,6 +137,200 @@ class LLMTransportError(LLMError):
 
 class LLMResponseError(LLMError):
     """拿到了响应但无法解析。"""
+
+
+class LLMUnsupportedParameterError(LLMConfigError):
+    """端点明确拒绝一个**可选参数**（目前只有 `max_tokens`）。
+
+    与普通配置错误分开：它的处置是**去掉那个参数重试一次**，而不是让整次分析失败。
+    只在端点**点名**该字段、**明确说字段级「不认识/不支持」**、且**没给数值上限**时才
+    归到这一类（HTTP 400 且响应体同时出现 `max_tokens` 与 `unknown parameter` 之类的措辞，
+    见 `_max_tokens_unsupported`）—— 给了上限（`max_tokens must be <= 4096`）的是「值太大」，
+    归 `LLMValueLimitError`，处置是把数值改小而不是去掉字段；`max_tokens: invalid` 这种
+    既没上限、又没说字段不存在的 400，以及模型名写错、`messages` 形状不对的 400，换参数
+    也不会变好，一律保持普通 `LLMConfigError` —— 撤字段是永久动作，不能拿来试错。
+    """
+
+    def __init__(self, message: str, *, parameter: str = "") -> None:
+        super().__init__(message)
+        self.parameter = str(parameter or "")
+
+
+class LLMValueLimitError(LLMConfigError):
+    """端点**认**这个参数，但拒绝这次的**数值**（目前只有 `max_tokens`）。
+
+    与 `LLMUnsupportedParameterError` 分开是关键的：`Unsupported parameter: max_tokens`
+    说明端点永远不认这个字段，正确处置是去掉它；而 `max_tokens must be <= 4096` 说明字段
+    本身没问题，只是这次的 8192 太大，正确处置是把值**改小**到 `limit` 重试一次。
+    两者混为一类的后果是：一次「值太大」会让 `_complete_with_max_tokens` 去掉字段并把
+    端点拉进黑名单，后续所有调用都不再发送单次输出上限（审查报告 P2）。
+
+    继承 `LLMConfigError` 而不是 `LLMError`：这是确定性的参数问题，传输层的
+    `_request` 不该把它当网络故障重试三遍（`_request` 只对传输类异常重试）。
+    """
+
+    def __init__(self, message: str, *, parameter: str = "", limit: int = 0) -> None:
+        super().__init__(message)
+        self.parameter = str(parameter or "")
+        # 端点给出的数值上限（0 = 没解析出来）；调用方据此决定改小后重试的值。
+        self.limit = int(limit or 0)
+
+
+#: 「这个端点不接受 max_tokens」的进程内黑名单：键与 `prompt_cache` 的端点黑名单同一口径
+#: （`endpoint_key`）。记了它，后续调用不再先发一个注定 400 的请求 —— 那是每轮多一次
+#: 延迟与日志噪音，而端点能力在同一进程里不会变。
+_MAX_TOKENS_REJECTED: dict[tuple[str, str], str] = {}
+_MAX_TOKENS_LOCK = threading.Lock()
+
+# 端点拒绝时那句话长什么样：各家写法不同（`max_tokens` / `max tokens` / `max-tokens`），
+# 都认。只用于**识别**，不解析数值。
+_MAX_TOKENS_FIELD_RE = re.compile(r"max[\s_-]?tokens", re.IGNORECASE)
+
+# 「**数值**上限」那句话长什么样：`must be <= 4096` / `must be less than or equal to 4096` /
+# `maximum is 4096` / `at most 4096` / `max 4096` / `must not exceed 4096` /
+# `no more than 4096` / `up to 4096` / `limited to 4096`。刻意要求「封顶词 + 数字」紧挨着：
+# 只抓字段名之后的第一个数字，会把 `max_tokens: 8192 > 4096`（先回显请求值、再给上限）
+# 里的请求值当成上限 —— 改小后数值不变，等于再吃一个一模一样的 400。`cannot exceed` 由
+# `not\s+exceed` 覆盖（"cannot" 里就含 "not"），不必单列。
+_MAX_TOKENS_LIMIT_RE = re.compile(
+    r"(?:"
+    r"less\s+than\s+or\s+equal\s+to"
+    r"|not\s+exceed(?:ing)?"
+    r"|not\s+be\s+(?:greater|more)\s+than"
+    r"|(?:no|not)\s+(?:more|greater|larger|bigger)\s+than"
+    r"|at\s+most"
+    r"|up\s+to"
+    r"|limited\s+to"
+    r"|maximum"
+    r"|max"
+    r"|<=|≤"
+    r")"
+    r"(?:\s+(?:is|allowed|value|of))?"
+    r"\s*(?::|=|is|of)?\s*(\d[\d,]*)",
+    re.IGNORECASE,
+)
+# 「**区间**」形态：`valid range of max_tokens is [1, 4096]` / `range is 1..4096` /
+# `between 1 and 4096`。必须**成对**出现且取**后一个数**：区间里的第一个数是下界
+# （通常就是 1），把它当成上限会重试一个 1 token 的请求 —— 结论必然被截断，还不如
+# 不改。只给一个数字的（`valid range is 4096`）认不出来，返回 None 走保守路径。
+_MAX_TOKENS_RANGE_RE = re.compile(
+    r"\[\s*\d[\d,]*\s*(?:,|\.{2,}|…|—|–|to|-)\s*(\d[\d,]*)\s*\]"
+    r"|(?:range|between)\b[^0-9]{0,40}?\d[\d,]*\s*(?:\.{2,}|…|—|–|to|and|-)\s*(\d[\d,]*)",
+    re.IGNORECASE,
+)
+# 「**字段级**：不认识 / 不支持」这句话长什么样。只有这类措辞才允许撤掉字段重试，
+# 而撤字段是**永久**动作（端点进黑名单，后续调用全部不再发送输出上限），所以宁可
+# 少认：`max_tokens: invalid` 这种既没上限、又没说字段不存在的 400 不能算进来 ——
+# 去掉字段只会把真正的原因（网关的另一种抱怨）藏起来，还顺带永久撤掉封顶。
+_MAX_TOKENS_UNSUPPORTED_RE = re.compile(
+    r"(?:unknown|unsupported)\s+(?:request\s+)?"
+    r"(?:parameter|argument|field|option|property|key)"
+    r"|unrecognized|unrecognised"
+    r"|not\s+supported|isn'?t\s+supported|aren'?t\s+supported"
+    r"|invalid\s+(?:request\s+)?(?:parameter|argument|field|option|property|key)"
+    r"|(?:extra|additional)\s+(?:fields?|inputs?|keys?)\s+"
+    r"(?:are\s+)?not\s+(?:permitted|allowed|supported)",
+    re.IGNORECASE,
+)
+# 只在字段名之后的这段窗口里找上限：再往后的「max」多半说的是上下文窗口，不是输出上限。
+_MAX_TOKENS_LIMIT_WINDOW = 120
+# 上限的合理区间。落在外面的一律当成「没解析出来」：版本号、请求 id 之类的数字
+# 被当成上限会让重试发送一个荒唐的值（0 甚至负数）。
+_MAX_TOKEN_LIMIT_UPPER_BOUND = 1_000_000
+
+
+class _UnsetType:
+    """「调用方**没传**这个参数」的哨兵（`None` 是**显式关掉**，两者必须分开）。
+
+    `max_tokens` 的默认封顶放在**客户端**这一层：引擎默认轮不必多传一个与默认值相同的
+    字段（那会让每一个测试假 client 都要跟着改签名），而真实请求体照样带 `max_tokens`。
+    代价是这个参数有三种形态 —— 没传 / `None` / 整数 —— 用 `None` 兼作前两义就再也
+    表达不出「显式关掉封顶」了。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover —— 只用于调试输出
+        return "<unset>"
+
+
+_UNSET = _UnsetType()
+
+
+def _mentions_max_tokens(detail: Any) -> bool:
+    """这段上游错误文本里有没有点名 `max_tokens` 这个字段。"""
+    return bool(_MAX_TOKENS_FIELD_RE.search(str(detail or "")))
+
+
+def _max_tokens_limit(detail: Any) -> int | None:
+    """从 400 响应体里解析 `max_tokens` 的**数值上限**；解析不出 = `None`。
+
+    **为什么必须与 `_mentions_max_tokens` 分开**：点名这个字段的 400 有两种，含义相反 ——
+
+    * `Unsupported parameter: max_tokens`：端点**永远不认**这个字段 → 去掉它；
+    * `max_tokens must be <= 4096`：端点认字段，只嫌**这次的值**大 → 把值改小。
+
+    把后者当前者，就是审查报告 P2：`_complete_with_max_tokens` 会去掉字段并把端点拉黑，
+    后续所有调用都不再发送单次输出上限。返回 `None` 专门表示「没给出可用的数值上限」，
+    让调用方退回旧行为（去掉字段）而不是乱猜一个数。
+
+    只认「封顶词 + 数字」与「成对区间取上界」两种形态，并按 1..1,000,000 过滤：
+    `max_tokens: 8192 > 4096` 这种先把请求值回显一遍的写法里，8192 是请求值而不是
+    上限，不能拿来重试；`valid range is [1, 4096]` 里拿 1（下界）去重试等于把结论截断。
+
+    `must not exceed 4096` / `no more than 4096` / `range [1, 4096]` 这些 WP26 漏掉的
+    措辞已补上 —— 漏掉时解析不出上限，400 只能按「不认字段」处置（WP26 的行为），
+    于是去掉字段并把端点拉黑，而端点说的其实只是「值太大」（审查报告 P2）。
+    """
+    text = str(detail or "")
+    for field in _MAX_TOKENS_FIELD_RE.finditer(text):
+        window = text[field.end() : field.end() + _MAX_TOKENS_LIMIT_WINDOW]
+        # 先认「封顶词 + 数字」，再认区间：两者同时出现时封顶句里的数更直接。
+        candidates = [match.group(1) for match in _MAX_TOKENS_LIMIT_RE.finditer(window)]
+        # 区间取**上界**（后一个数）：bracket 分支捕后一个数，range/between 分支也捕后一个。
+        candidates.extend(
+            match.group(1) or match.group(2)
+            for match in _MAX_TOKENS_RANGE_RE.finditer(window)
+        )
+        for raw in candidates:
+            limit = _positive_int(raw.replace(",", ""))
+            if limit is not None and limit <= _MAX_TOKEN_LIMIT_UPPER_BOUND:
+                return limit
+    return None
+
+
+def _max_tokens_unsupported(detail: Any) -> bool:
+    """这段 400 响应体是不是在说「端点**不认识 / 不支持** `max_tokens` 这个字段」。
+
+    **为什么必须单独判一次**：撤掉字段不是一次性的 —— `_complete_with_max_tokens`
+    会把端点记进进程内黑名单，后续所有调用都不再发送单次输出上限，输出长度重新由
+    网关那个看不见的默认值决定。所以只有端点**明确给出字段级措辞**的「不认识」才配
+    这个处置；`max_tokens: invalid` 这种既没有数值上限、又没说字段不存在（可能只是
+    值/格式不对）的 400 必须原样抛成 `LLMConfigError`，让用户看到端点的原话，而
+    **不是**去掉字段再试一次 —— 那会掩盖真正的原因，还永久撤掉封顶。
+    """
+    text = str(detail or "")
+    if not _mentions_max_tokens(text):
+        return False
+    return bool(_MAX_TOKENS_UNSUPPORTED_RE.search(text))
+
+
+def max_tokens_rejection_reason(base_url: str, model: str) -> str | None:
+    """本进程里这个端点拒绝过 `max_tokens` 吗（返回当时的理由；没拒过 = `None`）。"""
+    with _MAX_TOKENS_LOCK:
+        return _MAX_TOKENS_REJECTED.get(endpoint_key(base_url, model))
+
+
+def mark_max_tokens_rejected(base_url: str, model: str, reason: str = "") -> None:
+    """记下「这个端点不接受 max_tokens」（后续请求不再带它）。"""
+    with _MAX_TOKENS_LOCK:
+        _MAX_TOKENS_REJECTED[endpoint_key(base_url, model)] = str(reason or "")
+
+
+def reset_max_tokens_rejections() -> None:
+    """清空 `max_tokens` 黑名单。**给测试与「换了网关之后重试」用**。"""
+    with _MAX_TOKENS_LOCK:
+        _MAX_TOKENS_REJECTED.clear()
 
 
 def redact_secret(text: str, secret: str | None = None) -> str:
@@ -499,6 +711,23 @@ class LLMClient:
             f"{purpose}失败（HTTP {response.status_code}）："
             f"{redact_secret(detail, self._api_key)}"
         )
+        # 端点**点名** max_tokens 的 400 有三种含义，处置**各不相同**（见 `_max_tokens_limit`
+        # 与 `_max_tokens_unsupported`）：
+        # * 给了数值上限（`must be <= 4096` / `must not exceed 4096` / `[1, 4096]`）→
+        #   `LLMValueLimitError`：认字段、只嫌值大，把数值改小；
+        # * 明确说字段级「不认识/不支持」→ `LLMUnsupportedParameterError`：去掉字段重试；
+        # * 其它（只说 `max_tokens: invalid`、格式未知）→ 原样 `LLMConfigError`。
+        # 只有中间那条可以撤字段 —— 撤字段会把端点拉黑，后续所有调用永久失去输出上限；
+        # 把「值不对 / 认不出的抱怨」也塞进这一条，就是审查报告 P2 的成因。
+        if response.status_code == 400 and _mentions_max_tokens(detail):
+            limit = _max_tokens_limit(detail)
+            if limit is not None:
+                raise LLMValueLimitError(
+                    message, parameter="max_tokens", limit=limit
+                )
+            if _max_tokens_unsupported(detail):
+                raise LLMUnsupportedParameterError(message, parameter="max_tokens")
+            # 落到下面统一的 LLMConfigError：不重试、不去字段、不拉黑。
         if _should_retry_status(response.status_code, detail):
             raise LLMTransportError(message)
         # 401/403 是配置问题，重试无意义，必须让用户看到「密钥不对」而不是「网络错误」。
@@ -681,18 +910,31 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         temperature: float | None = None,
-        max_tokens: int | None = None,
+        max_tokens: int | None | _UnsetType = _UNSET,
     ) -> ChatResult:
-        """一次非流式补全。**不因缓存标记失败**，见模块 docstring。"""
+        """一次非流式补全。**不因可选项失败**：缓存标记与 `max_tokens` 各有一层兜底。
+
+        两层兜底的顺序是「先收钱的那个、再省钱的那个」：`max_tokens` 失败只影响上限
+        （去掉它就能跑），缓存标记失败只影响缓存命中。两次都失败才如实抛出去。
+
+        ## `max_tokens` 的三种形态
+
+        * **没传**（引擎默认轮就是这一档）→ 按 `DEFAULT_OUTPUT_TOKENS` 封顶。默认封顶
+          放在**客户端**这一层：请求体照样带 `max_tokens`，但引擎不必每轮多传一个与
+          默认值相同的字段（那会让每一个测试假 client 都要跟着改签名）；
+        * **`None`** → 显式关掉封顶，请求体里不出现这个字段（端点默认值）；
+        * **整数** → 用它。
+        """
+        wire_max_tokens = DEFAULT_OUTPUT_TOKENS if max_tokens is _UNSET else max_tokens
         marker = self._cache_marker()
         if marker is None:
-            return self._complete_once(
-                messages, temperature=temperature, marker=None, max_tokens=max_tokens
+            return self._complete_with_max_tokens(
+                messages, temperature=temperature, marker=None, max_tokens=wire_max_tokens
             )
 
         try:
-            return self._complete_once(
-                messages, temperature=temperature, marker=marker, max_tokens=max_tokens
+            return self._complete_with_max_tokens(
+                messages, temperature=temperature, marker=marker, max_tokens=wire_max_tokens
             )
         except LLMError as exc:
             # 安全阀。未知字段被 4xx 拒绝是最常见的失败形态，而它的后果是**整个分析
@@ -702,8 +944,8 @@ class LLMClient:
             # 不碰 KeyboardInterrupt 这类必须继续向上传播的东西。
             reason = redact_secret(f"{type(exc).__name__}: {exc}", self._api_key)
             try:
-                result = self._complete_once(
-                    messages, temperature=temperature, marker=None, max_tokens=max_tokens
+                result = self._complete_with_max_tokens(
+                    messages, temperature=temperature, marker=None, max_tokens=wire_max_tokens
                 )
             except LLMError:
                 # 去掉标记**仍然**失败 → 与标记无关（密钥、网络、网关故障）。
@@ -719,6 +961,86 @@ class LLMClient:
                 force=True,
             )
             return result
+
+    def _complete_with_max_tokens(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None,
+        marker: Mapping[str, str] | None,
+        max_tokens: int | None,
+    ) -> ChatResult:
+        """带 `max_tokens` 发一次；端点**明确拒绝**该字段时按原因各回退**一次**。
+
+        ## 为什么要回退，且为什么只回退一次
+
+        `max_tokens` 是 OpenAI 兼容协议里最常见的可选字段，但内网网关的兼容层经常只
+        实现子集。为了封顶输出把整次分析弄挂，是拿「省钱」换「没有结论」—— 这笔账
+        怎么算都是亏的。反过来，**不能**无条件重试：端点既然明确拒绝，按它给的原因
+        处置一次就够；再把请求重排几次只会拖长延迟、把日志刷满。
+
+        400 的两种原因走**两条**回退路径，混用会出错：
+
+        * `LLMUnsupportedParameterError`（不认字段）→ 去掉字段重发一次，并把端点记进
+          进程内黑名单：同一进程后续调用不再带这个字段，也不再吃一次 400（与
+          `prompt_cache` 的标记黑名单同一条纪律）；
+        * `LLMValueLimitError`（认字段、嫌值大）→ 用 `min(max_tokens, limit)` 重发一次，
+          **不**拉黑。拉黑等于把这个端点的输出上限永久撤掉，网关的隐性默认值重新接管
+          输出长度 —— 那正是审查报告 P2，也是本分支绝不能复用「去字段」的原因。
+
+        非 400、或 400 但没点名 `max_tokens` 的错误**不在这里兜底**：那些换参数也不会
+        变好（模型名写错、`messages` 形状不对），交给上层如实抛出。点名了字段、却既
+        没给数值上限、也没说「不认识这个字段」的 400（`max_tokens: invalid`）同样**不**
+        兜底 —— 它抛的是 `LLMConfigError`，这里两个 `except` 都不接，原样向上，既不
+        去掉字段重试（那会掩盖真正的错误），也不拉黑（那会永久撤掉封顶）。
+        """
+        if max_tokens is None:
+            return self._complete_once(
+                messages, temperature=temperature, marker=marker
+            )
+        if max_tokens_rejection_reason(self.base_url, self.model) is not None:
+            # 本进程已知这个端点不接受它：不再发一个注定 400 的请求。
+            return self._complete_once(
+                messages, temperature=temperature, marker=marker
+            )
+        try:
+            return self._complete_once(
+                messages, temperature=temperature, marker=marker, max_tokens=max_tokens
+            )
+        except LLMValueLimitError as exc:
+            limit = int(getattr(exc, "limit", 0) or 0)
+            if limit <= 0 or max_tokens <= limit:
+                # 上限不可用，或者我们发的值本来就在它之内 —— 改小只会发一个**一模一样**
+                # 的请求再吃一次 400。原样抛出，让用户/上层看到端点给的真实上限。
+                raise
+            adjusted = min(max_tokens, limit)
+            # 只记一条日志、不写黑名单：数值问题是可调的，拉黑会让后续调用永久失去上限。
+            log_print(
+                f"⚠️ AI 分析：{self.base_url} 的 max_tokens 上限为 {limit}，"
+                f"本次请求的 {max_tokens} 超过它，已自动降到 {adjusted} 重试一次；"
+                "后续调用仍会带上限（不拉黑该端点）。",
+                "AI",
+                force=True,
+            )
+            return self._complete_once(
+                messages,
+                temperature=temperature,
+                marker=marker,
+                max_tokens=adjusted,
+            )
+        except LLMUnsupportedParameterError as exc:
+            reason = redact_secret(f"{type(exc).__name__}: {exc}", self._api_key)
+            mark_max_tokens_rejected(self.base_url, self.model, reason)
+            log_print(
+                f"⚠️ AI 分析：{self.base_url} 不接受 max_tokens（{reason}），"
+                "已自动去掉该字段重试一次；本进程后续请求不再带它 ——"
+                "单次输出上限回到端点的默认值。若该端点确实支持，请核对网关版本。",
+                "AI",
+                force=True,
+            )
+            return self._complete_once(
+                messages, temperature=temperature, marker=marker
+            )
 
     def _complete_once(
         self,

@@ -35,6 +35,17 @@
 （解不出文本）、`unindexed`（这一页之外的）、`truncated_hits`（命中数到上限）。
 **只要有一个不为零，就不许下「全仓没有调用」的结论** —— 那句话在回执里被显式禁掉。
 
+## 配表（xlsx）现在也在范围里
+
+索引那一层对工作簿开了定向豁免（`reference_index.XLSX_MAX_INDEX_BYTES` 那段）：打开前
+3 张表的前 200 行，按 `[第k张表 表名 第r行] 单元格 ｜ …` 建行索引。所以本模块的
+`find_references` 能直接命中「这个 id 还被哪张表引用」，命中里带 `路径:行号`。
+
+于是覆盖账那一行不再把配表一律写成「没搜」：留在 `binary` 里的是**打不开**的工作簿与
+真正的二进制（图片/音频/压缩包），超过 5 MB 的配表进 `oversized`，两者都照样如实计数。
+命中里出现配表时，回执末尾会补一句「行号是表内物理行、`file_content` 的 `lines` 对配表
+表示第几张表」—— 否则模型会把 `文件:417` 当成代码行号去开一个不存在的行窗。
+
 ## 与 Agent 路径的关系
 
 多节点（platform/agent）模式下平台没有本地工作副本，这一层拿不到冻结版本，于是照旧走
@@ -47,6 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence
 
+from services.ai.excel_source import _is_openpyxl_workbook
 from services.ai.frozen_repo import repository_label
 from services.ai.reference_index import (
     IndexedSearchResult,
@@ -60,7 +72,7 @@ from services.ai.reference_search import MAX_HITS
 MAX_REPO_INDEX_FILES = 240
 
 #: 进程内索引缓存的条数。索引里装着每个文件每一行的 token（几百个文件 = 几 MB），
-#: 所以只留最近的两页；键里含 tip，强推之后自然不复用。
+#: 所以只留最近的两页；键里含 tip 与读取范围，强推 / 换范围之后都不会复用。
 INDEX_CACHE_MAX_ENTRIES = 2
 
 #: 渲染用的「这是哪一版」一行。
@@ -104,12 +116,47 @@ def _index_entries(paths: Sequence[str], prefix: str, tip: str) -> tuple:
     return tuple((path, tip) for path in head + tail)
 
 
-def _index_key(frozen: Any, prefix: str, max_files: int, version: str) -> tuple:
-    """索引缓存键：**仓库 ID + tip + 前缀 + 页大小 + 索引版本**。
+def _allowed_paths_key(allowed_paths: Any) -> Optional[tuple]:
+    """把读取范围折成索引缓存键的一格（`None` = 没有声明范围）。
+
+    ## 为什么范围必须进键
+
+    `FrozenTreeReader.tracked_paths()` 已经按 `allowed_paths` 过滤过，所以索引条目的
+    集合**就是范围的函数**：同一个仓库 / tip / 前缀 / 页大小下，全量 reader 与受限
+    reader 要建的是**两份不同的索引**。而 `_INDEX_CACHE` 是**进程级**缓存（跨请求、
+    跨调用点复用）；键里不含范围时，它会把一份范围的索引交给另一份范围：
+
+    * 先全量、后受限 → 受限那次命中全量索引，搜索列出**范围外**的代码路径（越界）；
+    * 先受限、后全量 → 全量那次复用受限索引，代码路径**根本没搜**（漏证据），
+      而回执还会说「覆盖了该范围内的全部跟踪文件」。
+
+    两种顺序都静默出错，所以范围是键的一部分，而不是靠「调用方记得别共用缓存」
+    （`test_ai_repo_index_cache_scope.py` 的两种顺序钉着它）。
+
+    ## 形态
+
+    `None` 折成一个固定哨兵（`None`）；非 `None` 折成**排序后的路径元组**
+    （`frozenset` / tuple / list 都归一成同一种形态，与容器类型、迭代顺序无关）。
+    空集合折成空元组，与 `None` **不同键** —— 空集合是「一条都不许」。
+    """
+    if allowed_paths is None:
+        return None
+    return tuple(sorted(str(path) for path in allowed_paths))
+
+
+def _index_key(
+    frozen: Any,
+    prefix: str,
+    max_files: int,
+    version: str,
+    allowed_paths: Any = None,
+) -> tuple:
+    """索引缓存键：**仓库 ID + tip + 前缀 + 页大小 + 索引版本 + 读取范围**。
 
     每一项都是「换了它结果就会不同」的输入：tip 换了（强推/导入）内容整体换一份、
     前缀换了分页不同、页大小换了覆盖不同、索引实现换代（`version`）会让分词/解码口径
-    变化。少一项就多一个静默的错命中（`test_the_index_cache_is_keyed_by_tip` 钉着它）。
+    变化、范围换了索引条目整体不同（见 `_allowed_paths_key`）。
+    少一项就多一个静默的错命中。
     """
     return (
         getattr(frozen, "repository_id", None),
@@ -117,6 +164,7 @@ def _index_key(frozen: Any, prefix: str, max_files: int, version: str) -> tuple:
         str(prefix or ""),
         int(max_files or 0),
         str(version or ""),
+        _allowed_paths_key(allowed_paths),
     )
 
 
@@ -145,7 +193,8 @@ def search_frozen_repository(
     """在冻结跟踪树里搜一次。**拿不到跟踪树时返回 `None`**（调用方按「无法检索」回报）。
 
     `reader` 是 `frozen_repo.FrozenTreeReader`（本模块只要求它有 `tracked_paths()` 与
-    `read_bytes(path)`）。
+    `read_bytes(path)`）。`reader.allowed_paths` 是可选的范围（没有该属性按 `None`，
+    与旧行为一致）；它**进缓存键**，否则进程级缓存会把一份范围的索引交给另一份。
     """
     paths = reader.tracked_paths()
     if paths is None:
@@ -154,7 +203,15 @@ def search_frozen_repository(
     tip = str(getattr(frozen, "tip", "") or "")
     entries = _index_entries(tuple(paths), prefix, tip)
     index_version = "repo-reference-index/v1"
-    key = _index_key(frozen, prefix, max_files, index_version)
+    # 范围必须进键：`tracked_paths()` 已按它过滤，索引条目就是范围的函数。漏掉它，
+    # 先全量后受限会搜出范围外的位置，先受限后全量会漏搜（见 `_allowed_paths_key`）。
+    key = _index_key(
+        frozen,
+        prefix,
+        max_files,
+        index_version,
+        getattr(reader, "allowed_paths", None),
+    )
     store = _INDEX_CACHE if cache is None else cache
     index = store.get(key)
     if index is None:
@@ -218,7 +275,7 @@ def _coverage_lines(result: IndexedSearchResult, *, frozen: Any, index: Any) -> 
     ]
     if result.binary:
         lines.append(
-            f"- {result.binary} 个不是文本（配表/生成物等，**没搜**）——"
+            f"- {result.binary} 个不是文本（图片/音频/压缩包，或**打不开**的配表，**没搜**）——"
             "这类文件要看内容请用 `file_diff` / `file_content`"
         )
     if result.missing:
@@ -288,6 +345,14 @@ def render_repo_result(
             "点名索取（它读的是**同一个冻结版本**，支持 `lines` 行窗，例如 `lines=\"120-260\"`）；"
             "要看它这次改了什么，用 `file_diff`。"
         )
+        if any(_is_openpyxl_workbook(hit.path) for hit in result.hits):
+            # 配表的行号与 `file_content` 的 `lines` 不是同一个坐标（那边对配表表示「第几张
+            # 表」）。混着用会让模型拿 `文件:417` 去开第 417 张表，得到的是一句「没有这张表」。
+            lines.append(
+                "配表的命中行号是**表内物理行**（看抬头里的 `[第k张表 表名 第r行]`）："
+                "要读正文请用 `file_content`，并把 `lines` 写成**第几张表**（例如 `\"2\"`）——"
+                "它对配表不是行号。"
+            )
     else:
         lines.append("搜索范围内没有出现这个关键词。")
     return "\n".join(lines)

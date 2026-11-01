@@ -13,16 +13,39 @@
 正是这套机制最该避免的事：用户分不出「模型看完说没问题」与「模型压根没答上来」，
 而这两件事的处理方式完全相反。`failed_result` 同样只估算等级并写明原因 ——
 不伪装成模型结论。
+
+## 另一条口径（WP27）：只有**有可核实关联**的结论参与定级
+
+`tables` 的读取范围放开（`allowed_paths=None`）之后，模型能读到代码仓库与未改动的
+引用方表 —— 那是跨表 / 配表-代码关联取证的前提，但它也会带回大量与这次配表无关的
+背景发现。把它们一起算进等级，等于「读得越全、报告越严重」，而用户分不出哪些是这次
+真要处理的。所以：**配表 delta 本身、以及断言依据指向配表 delta 的结论**参与定级；
+其余照常列出（标 `out_of_scope`，报告里仍看得见），但不进等级、不计计数。
+`allowed_paths` 非 None 时仍按旧的「越界」口径，逐字不变。判据的唯一实现在
+`services.ai.anomaly_scope.out_of_scope`（本模块以旧名 `_out_of_scope` 导入，兼容既有
+调用方）；WP28 起增量基线也用同一份判据重算继承条目，两处口径不会分叉。
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import List, Mapping, Tuple
 
+from services.ai import report_document
+from services.ai.anomaly_scope import change_paths_of as _change_paths_of
+from services.ai.anomaly_scope import claims_touch as _claims_touch  # noqa: F401
+from services.ai.anomaly_scope import out_of_scope as _out_of_scope
+from services.ai.anomaly_scope import ref_path as _ref_path  # noqa: F401
 from services.ai.engine import EngineOutcome
 from services.ai.rules import anomaly_fingerprint
+from services.ai.scope import normalize_path
 from services.ai.subagent import WEEKLY_MODE
 from services.ai.usage import usage_from_outcome
-from services.ai.verdict import retracted_fingerprints, render_review_skipped, ruling_rows
+from services.ai.verdict import render_review_skipped, retracted_fingerprints, ruling_rows
+
+# WP28：判据搬进 `anomaly_scope`，本模块保留四个旧私有名。别名保证**零行为变化** ——
+# 两个调用方（本模块定级、增量继承重算）用的是同一份实现，不会因为「各有一份」在边界上
+# 分叉。`_claims_touch` / `_ref_path` 本模块已不再直接调用，但测试与外部仍 import 它们，
+# 所以留着（删掉会让「判据只有一个出处」这条兼容承诺断在名字上）。
 
 # 「额度用尽没轮到的」最多往结果里放几条。界面只展示前几条、其余归到「等 N 条」，
 # 所以多放没有用；而额度用尽那一轮模型可能一口气要几十个请求，整份列表会白白撑大
@@ -73,7 +96,6 @@ def coverage_notice_text(coverage) -> str:
     """
     if not isinstance(coverage, dict) or not coverage:
         return ""
-    from services.ai import report_document
 
     rows = report_document.coverage_table_rows(coverage)
     gaps = report_document.coverage_gap_lines(coverage)
@@ -86,7 +108,31 @@ def coverage_notice_text(coverage) -> str:
     return "\n".join(lines)
 
 
-def _anomaly_entry(item, row: dict | None) -> dict:
+def _allowed_paths_of(payload: Mapping) -> frozenset[str] | None:
+    """payload 声明的可读路径白名单；`None` = 不限制，空列表 = **什么都不许**。
+
+    与 `change_set._allowed_path_set` 同一口径（空列表不是「没给」）：
+
+    * **缺键 / `None`**：老 payload 根本没有这个键 —— 旧行为逐字不变；
+    * **空列表**：写侧明确声明「这一批一条可读路径都没有」。把它当成不限制，越界结论
+      就会照旧参与定级，而模型其实连读都不许读它 —— 那等于把平台自己声明的范围作废。
+
+    归一化同理 —— 不归一化会把白名单里的路径漏判成越界（过严的假拒绝）。
+    """
+    raw = payload.get("allowed_paths")
+    if raw is None:
+        return None
+    allowed = {normalize_path(str(path)) for path in raw if str(path or "").strip()}
+    # 不写 `or None`：空集是「一条都不许」，不是「没给」。
+    return frozenset(allowed)
+
+
+def _anomaly_entry(
+    item,
+    row: dict | None,
+    allowed_paths: frozenset[str] | None = None,
+    change_paths: frozenset[str] = frozenset(),
+) -> dict:
     """一条异常的落库/下发形态（与原先逐字一致），外加它收到的那条复核裁决。
 
     裁决字段**按指纹从裁决块里对回来**（不按下标：撤销之后清单已经短了，按下标会整体
@@ -112,6 +158,16 @@ def _anomaly_entry(item, row: dict | None) -> dict:
         "evidence": list(item.evidence),
         "commit_ref": item.commit or "",
         "file_path": item.file_path or "",
+        # **范围外 / 关联不足**（契约 1.8 + WP27）：这条结论要么引用了本批次
+        # `allowed_paths` 之外的文件，要么（读取放开时）与本次配表差异没有可核实关联。
+        # 条目**照常保留**（报告要能看见模型报过什么），但它不计入风险等级与「模型报出
+        # N 条」的计数 —— 拿背景发现升等级，等于让「读得越全、看起来越严重」。
+        "out_of_scope": _out_of_scope(
+            item.file_path or "",
+            allowed_paths,
+            change_paths=change_paths,
+            claims=getattr(item, "claims", ()),
+        ),
         "impact": item.impact or "",
         "suggestion": item.suggestion or "",
         "finding_id": str((row or {}).get("finding_id") or ""),
@@ -207,14 +263,35 @@ def _final_findings_of(ruling: dict | None, kept: list, suppressed: frozenset) -
     ]
 
 
+# 「规模兜底」这四个字是报告侧的锚点（契约 WP13）：读的人必须能一眼看出这个等级是
+# **平台按变更规模估的**，不是模型结论。措辞收在常量里 —— 两个调用点（无结论的
+# `risk_level_from_outcome` 与 `failed_result`）说的是同一件事，各写一份迟早会说成两样。
+SCALE_FALLBACK_REASON = "规模兜底（本次没有可用结论）：该等级仅按变更规模估算，**不是**模型评估结果"
+
+# 规模兜底的天花板。为什么不是 high：周版本实测 1012 个文件是常态，按文件数判 high
+# 会让每份周报都顶格，等级于是退化成文件数函数；而一次没跑成 / 只剩 markdown 的运行
+# 也报 high，则会把「没查」读成「最严重」—— 两者都必须与「模型报了 critical」区分开。
+SCALE_FALLBACK_MAX_LEVEL = "mid_high"
+
+
 def determine_risk_level(summary: dict) -> str:
+    """**没有结论时**的规模兜底等级；最高只到 `mid_high`。
+
+    这一支只服务「没有可用结论」的运行：失败、只留下 markdown 的降级，或模型一条
+    达门槛的问题都没报出来。**有结论时按结论定级**，见 `risk_level_from_outcome`。
+
+    为什么不再用 `total_files >= 120` 直接判 high：那个阈值是「周版本文件多」的代理
+    指标，不是风险证据 —— 实测 1012 个文件的窗口里只有 1 条 medium 时，旧口径仍给
+    high，等级于是没有数值含义。critical / 变化量 / 文件量这几个规模信号仍参与定级，
+    但都**只到 `mid_high`**（见 `SCALE_FALLBACK_MAX_LEVEL`）。
+    """
     total_files = int(summary.get("total_files") or 0)
     delta_files = int(summary.get("delta_files") or 0)
     critical = bool(summary.get("critical_paths"))
-    if critical or total_files >= 120 or delta_files >= 60:
-        return "high"
-    if total_files >= 80 or delta_files >= 40:
-        return "mid_high"
+    # 旧的 high 支（critical / 120 文件 / 60 变化）并到 mid_high：兜底等级的天花板
+    # 只有 mid_high，120 与 80 两档于是合并 —— 留成两档只会给读的人一个假的区分。
+    if critical or total_files >= 80 or delta_files >= 40:
+        return SCALE_FALLBACK_MAX_LEVEL
     if total_files >= 40 or delta_files >= 20:
         return "medium"
     if total_files >= 15 or delta_files >= 8:
@@ -228,9 +305,17 @@ def risk_level_from_outcome(outcome: EngineOutcome, summary: dict) -> Tuple[str,
     **有结论时按结论定级；没有结论时按变更规模定级，并明说那不是模型结论。**
     反过来做（没结论就报「低」）正是这套机制最该避免的事：用户分不出「模型看完说没问题」
     和「模型压根没答上来」，而这两件事的处理方式完全相反。
+
+    「有结论」= 至少有一条达门槛的异常（`outcome.anomalies` 非空）。**等级只看这些
+    异常的 severity，与文件数无关**：1012 个文件的窗口里只报出 1 条 medium 时是
+    mid_high，不会因为文件多就顶格 high。越界（`out_of_scope=True`）的条目由调用方
+    先滤掉 —— `result_payload` 传进来的这一份已经是 in-scope 的。
     """
     if outcome.anomalies:
         severities = {item.severity for item in outcome.anomalies}
+        # 沿用原规则：critical → high，其余一律 mid_high。不按 high 的条数再抬一档 ——
+        # 「有 high 就 high」会让报了几条的周报又顶格，与「等级要有数值含义」相反；
+        # 也不看文件数（规模只在无结论那一支兜底）。
         level = "high" if "critical" in severities else "mid_high"
         reasons = [f"模型报出 {len(outcome.anomalies)} 条达门槛的问题"]
         if "critical" in severities:
@@ -242,16 +327,20 @@ def risk_level_from_outcome(outcome: EngineOutcome, summary: dict) -> Tuple[str,
     level = determine_risk_level(summary)
     reasons = [
         f"变更规模：{summary.get('total_files', 0)} 个文件"
-        f"（本次变化 {summary.get('delta_files', 0)} 个）"
+        f"（本次变化 {summary.get('delta_files', 0)} 个）",
+        # 紧跟在规模那一行之后：读者看到「1012 个文件」就该知道这个数字是兜底依据，
+        # 不是模型结论。
+        SCALE_FALLBACK_REASON,
     ]
     if summary.get("critical_paths"):
         reasons.append("含关键路径")
     if outcome.succeeded:
         reasons.append("模型未报出达门槛的问题")
     else:
+        # 原因码单独一句：`SCALE_FALLBACK_REASON` 已经说过「不是模型结论」，
+        # 这里只补「为什么没有结论」（轮次/额度/只拿到 markdown……）。
         reasons.append(
-            f"⚠️ 本次未取得完整结论（{outcome.degradation_label or outcome.degradation or '原因未知'}），"
-            "该等级仅按变更规模估算，**不是**模型评估结果"
+            f"⚠️ 本次未取得完整结论（{outcome.degradation_label or outcome.degradation or '原因未知'}）"
         )
     return level, reasons
 
@@ -311,7 +400,48 @@ def result_payload(
     被看见的一类降级。
     """
     summary = payload.get("summary") or {}
-    risk_level, risk_reasons = risk_level_from_outcome(outcome, summary)
+    # **范围外 / 关联不足的结论照常进 `anomalies`（带 `out_of_scope=True`），但不参与
+    # 定级与计数**（契约 1.8 + WP27）。两条判据都在 `_out_of_scope` 里：
+    #
+    # * `allowed_paths` 非 None（老 payload / 人工收窄）：按越界筛（旧行为逐字不变）；
+    # * `allowed_paths` 为 None（WP20 起 `tables` 的默认）：按「与本次配表差异有没有
+    #   可核实关联」筛 —— 配表 delta 本身与引用它的代码消费方参与定级，纯背景发现单列。
+    #
+    # `change_paths` 是「本次差异」的锚点（`delta_files`）；缺键时是空集，于是有路径的
+    # 结论全部单列（保守），无路径的流程结论仍放行。
+    allowed_paths = _allowed_paths_of(payload)
+    change_paths = _change_paths_of(payload)
+    scoring = replace(
+        outcome,
+        anomalies=tuple(
+            item
+            for item in outcome.anomalies
+            if not _out_of_scope(
+                item.file_path or "",
+                allowed_paths,
+                change_paths=change_paths,
+                claims=getattr(item, "claims", ()),
+            )
+        ),
+    )
+    risk_level, risk_reasons = risk_level_from_outcome(scoring, summary)
+    # 只按 in-scope 计数的代价：如果模型只报了单列的结论，上面会落到「模型未报出达门槛的
+    # 问题」那一支 —— 而它其实报了，只是平台不采纳。不说明这一点，「平台不采纳」会被
+    # 读成「模型觉得没问题」，这两件事的处理方式完全相反（正是本模块开头那条口径）。
+    excluded = len(outcome.anomalies) - len(scoring.anomalies)
+    if excluded:
+        if allowed_paths is not None:
+            risk_reasons = [
+                *risk_reasons,
+                f"另有 {excluded} 条结论引用的文件在分析范围外（已标 out_of_scope，未计入等级）",
+            ]
+        else:
+            # 与上面那句分开写：读取放开之后，它们不是「越界」，而是与这次配表差异无关的
+            # 背景发现。两种原因对读的人含义不同，不能挤进同一句话里。
+            risk_reasons = [
+                *risk_reasons,
+                f"另有 {excluded} 条结论与本次配表差异关联不足（已标 out_of_scope，未计入等级）",
+            ]
     # 复核裁决：`EngineOutcome.verdict` 那一份**结构化**的结果（`verdict.Reduction.as_dict()`）。
     #
     # 2026-09-21 之前这一行是 `read_ruling(outcome.report_markdown)` —— 平台把机器状态
@@ -335,6 +465,30 @@ def result_payload(
     return {
         "risk_level": risk_level,
         "risk_reasons": risk_reasons,
+        # **「模式裁决」的写入方就在这里**（契约 1.9 / WP5）：`/latest` 与抽屉读的是落库的
+        # 这一份 `response_payload`，而导出文档是**现算**的 —— 不写进这里，抽屉里那条
+        # 「最近一次结论」永远少一行「为什么这次是增量 / 全量」。
+        #
+        # 措辞只认 `report_document.mode_decision_text`（给人看的字只有一份），判据也只取
+        # **这次运行自己冻结的账**：`payload["scope"]`（= `run.scope`）+
+        # `policy` / `baseline`（`request_payload` 里那一份）+ 建 run 时写进来的
+        # `requested_mode`。**不查 job 行**：那是写库侧的另一条读法，而这句话必须在
+        # 「结论落库」那一层就定下来（见 `ai_analysis_service.run_weekly_analysis_background`
+        # 写 `payload["requested_mode"]` 的那一行）。
+        #
+        # 只有周版本有「模式裁决」：单提交的 `scope` 天然是 full、没有增量/基线这回事，
+        # 给它印一句「全量（无可用基线）」是在解释一个不存在的问题（导出那边同样按
+        # `run.target_type == "weekly"` 拦）。推不出来时是空串 —— 宁可少一行，也不印一句猜的。
+        "mode_decision": (
+            report_document.mode_decision_text(
+                scope=payload.get("scope"),
+                policy=payload.get("policy"),
+                baseline=payload.get("baseline"),
+                requested_mode=payload.get("requested_mode"),
+            )
+            if payload.get("mode") == WEEKLY_MODE
+            else ""
+        ),
         # **给人看的那一份报告正文**（= `ai_analysis_run.response_text`）。
         # 正文主体是模型写的整体汇总报告；开篇是复核摘要，正文之后是复核标注明细与平台
         # 那几节（未归类 / 条数上限 / 信息缺口）；对账轮原文不在这里（见下面
@@ -384,7 +538,15 @@ def result_payload(
                 "refused_items": list(outcome.refused_requests[:_REFUSED_ITEMS_MAX]),
             },
         },
-        "anomalies": [_anomaly_entry(item, rows.get(anomaly_fingerprint(item))) for item in kept],
+        "anomalies": [
+            _anomaly_entry(
+                item,
+                rows.get(anomaly_fingerprint(item)),
+                allowed_paths,
+                change_paths,
+            )
+            for item in kept
+        ],
         # **复核裁决的最终形态**（`services/ai/verdict.py`）。三件事在这一份里同时成立：
         #
         # * `anomalies` 是它的**活动投影**（落库、面板、导出读的都是那一列）—— 被撤销的
@@ -464,10 +626,15 @@ def result_payload(
 
 
 def failed_result(summary: dict, message: str) -> dict:
-    """没发起分析时的结果。**等级按规模估算并写明原因** —— 不伪装成模型结论。"""
+    """没发起分析时的结果。**等级按规模兜底并写明原因** —— 不伪装成模型结论。"""
     return {
         "risk_level": determine_risk_level(summary),
-        "risk_reasons": [message, "该等级仅按变更规模估算，**不是**模型评估结果"],
+        # 与 `risk_level_from_outcome` 共用同一句「规模兜底」：同样没结论，
+        # 两处若各写一份，读的人会以为它们的口径不一样。
+        "risk_reasons": [message, SCALE_FALLBACK_REASON],
+        # 形状与 `result_payload` 一致（读侧只写一处 `payload.get("mode_decision")`）。
+        # 没发起分析 / 跑到一半失败的那次没有「模式裁决」可言，空串 = 界面不显示这一行。
+        "mode_decision": "",
         "report_markdown": "",
         # 形状与 `result_payload` 一致（读侧只写一处 `payload.get("report_markdown")`）。
         # 没发起分析当然没有草稿与对账轮原文，但**键必须在** —— 少一个键与空串在界面上

@@ -36,8 +36,8 @@ from datetime import datetime, timedelta, timezone
 
 import services.ai_analysis_service as ai_service
 from app import app, create_tables, db
-from models import Project, Repository, WeeklyVersionConfig
-from models.ai_analysis import AiAnalysisRun
+from models import Project, Repository, WeeklyVersionConfig, WeeklyVersionDiffCache
+from models.ai_analysis import AiAnalysisRun, AiWeeklyAnalysisState
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATES = (
@@ -132,6 +132,77 @@ def _add_run(project_id: int, cfg, *, status: str, age_seconds: int = 0) -> AiAn
     db.session.add(run)
     db.session.commit()
     return run
+
+
+def _setup_mixed_group() -> dict:
+    """一个**混合仓库**分组：配表 + 代码各一个配置、各一行缓存，自动分析开关打开。
+
+    P1-4 的前提就是「两个仓库都在同一批次里」：`tables` 只把配表那一份装进输入，
+    指纹也必须只按它算。同名（`W1 - <repo>`）与同窗口才属于同一组。
+    """
+    now = datetime.now(timezone.utc)
+    project = Project(code=_uid("P"), name=_uid("mixed-project"))
+    db.session.add(project)
+    db.session.flush()
+    configs = {}
+    for kind in ("code", "table"):
+        repo = Repository(
+            project_id=project.id,
+            name=_uid(kind),
+            type="git",
+            url=f"https://example.com/{_uid('r')}.git",
+            branch="main",
+            resource_type=kind,
+            clone_status="completed",
+        )
+        db.session.add(repo)
+        db.session.flush()
+        cfg = WeeklyVersionConfig(
+            project_id=project.id,
+            repository_id=repo.id,
+            name=f"W1 - {repo.name}",
+            description="",
+            branch="main",
+            start_time=now - timedelta(days=3),
+            end_time=now,
+            cycle_type="custom",
+            is_active=True,
+            auto_sync=True,
+            status="active",
+        )
+        db.session.add(cfg)
+        db.session.flush()
+        db.session.add(
+            WeeklyVersionDiffCache(
+                config_id=cfg.id,
+                repository_id=repo.id,
+                file_path=f"{kind}/{kind}.json",
+                file_type="table" if kind == "table" else "code",
+                latest_commit_id=("b" if kind == "table" else "a") * 40,
+                commit_count=1,
+                updated_at=now,
+            )
+        )
+        configs[kind] = cfg
+    db.session.commit()
+    ok, message, errors = ai_service.update_project_analysis_config(
+        project.id, {"auto_weekly_enabled": True}, updated_by="tester"
+    )
+    assert ok, f"自动分析开关没打开，用例前提不成立：{message} {errors}"
+    # 两个配置共用 `W1`（`_resolve_base_name` 在第一个 ` - ` 处切开）→ 同一个分组。
+    state = AiWeeklyAnalysisState(
+        project_id=project.id,
+        group_key=ai_service.build_weekly_group_key(configs["code"]),
+        base_name=configs["code"].name,
+    )
+    db.session.add(state)
+    db.session.commit()
+    return {
+        "project": project,
+        "code_cfg": configs["code"],
+        "table_cfg": configs["table"],
+        "state": state,
+    }
 
 
 # ==========================================================================
@@ -552,4 +623,66 @@ def test_the_loader_returns_early_for_the_in_progress_state():
         )
         assert "setWeeklyAiReport" not in between and "setAiReport" not in between, (
             f"{name} 的「进行中」分支把空的 response_text 送去渲染了"
+        )
+
+
+# ==========================================================================
+#  三、自动调度去重：指纹必须按**收窄后**的输入算（P1-4）
+# ==========================================================================
+
+
+def test_the_scheduler_dedups_on_the_effective_input_snapshot(monkeypatch):
+    """同一份**收窄后**的输入已经分析过 → 自动调度跳过，不再排队（P1-4）。
+
+    混合仓库 + `tables`：`seal_snapshot` 冻的是 `payload["group"]["config_ids"]`
+    （只有配表仓库那一份），所以 `snapshot_already_analyzed` 也必须用同源的 id 算指纹。
+    原先拿整组 id 去算，两边的指纹永远不等 —— 每个分析间隔都把同一份输入重跑一遍。
+
+    **两臂对照**：命中组记的是收窄后的指纹（跳过）；对照组记的是整组指纹（修复前的
+    口径），必须判不相等并照常建任务。只钉一臂的话，「指纹恒相等」或「闸门整个不生效」
+    这类实现也会绿。
+    """
+    from services import task_worker_service as worker
+    from services.ai.scope_sampling import weekly_snapshot_digest
+
+    with app.app_context():
+        create_tables()
+        matching = _setup_mixed_group()
+        control = _setup_mixed_group()
+        # 与 `build_weekly_payload` 的收窄口径同源：只有配表仓库的配置进输入。
+        matching["state"].last_snapshot_digest = weekly_snapshot_digest(
+            [matching["table_cfg"].id]
+        )
+        # 修复前的口径：整组 id。它与收窄后的指纹不同，所以这一组必须照常排队。
+        control["state"].last_snapshot_digest = weekly_snapshot_digest(
+            [control["code_cfg"].id, control["table_cfg"].id]
+        )
+        db.session.commit()
+
+        created: list = []
+        monkeypatch.setattr(
+            worker,
+            "create_weekly_ai_analysis_task",
+            lambda config_id, **kwargs: created.append(config_id) or 4242,
+        )
+        monkeypatch.setattr(worker, "_pending_weekly_analysis_task_exists", lambda _key: False)
+        # 预算在别的用例里自有断言；这里只量「输出去重」，别让它插进来。
+        monkeypatch.setattr(worker, "budget_gate_reason", lambda *_a, **_k: "")
+        # 本文件前面造的分组不参与这条用例（调度器扫的是**全库**活跃配置）。
+        ours = {matching["project"].id, control["project"].id}
+        real_config = worker.get_project_analysis_config
+
+        def config_for(project_id):
+            config = real_config(project_id)
+            if project_id not in ours:
+                return {**config, "auto_weekly_enabled": False}
+            return config
+
+        monkeypatch.setattr(worker, "get_project_analysis_config", config_for)
+
+        worker.schedule_weekly_ai_analysis_tasks()
+
+        assert created == [control["code_cfg"].id], (
+            "调度器没有按收窄后的输入去重（同一份输入被重复排队），"
+            f"或者是闸门整个失效：created={created}"
         )

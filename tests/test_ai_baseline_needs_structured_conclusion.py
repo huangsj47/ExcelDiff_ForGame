@@ -42,6 +42,8 @@ from app import app as flask_app
 from app import create_tables, db
 from models import Project
 from models.ai_analysis import AiAnalysisAnomaly, AiAnalysisRun, AiAnalysisTrace
+from services.ai.baseline_source import previous_anomaly_rows
+from services.ai.incremental_baseline import reconcile_result
 from services.ai_analysis_service import (
     _baseline_digest,
     _baseline_findings,
@@ -189,6 +191,113 @@ def test_a_null_conclusion_structured_is_not_used_as_the_baseline(ctx):
         )
     finally:
         _cleanup([older.id, nulled.id])
+
+
+def test_previous_anomaly_rows_falls_back_past_a_run_without_a_conclusion(ctx):
+    """往回退：喂进来的是「只有 markdown」那一次时，对账的行要来自更早有结论的那次。
+
+    ## 为什么值得守（2026-11 产品审查第 5 条：这一半是**推测**，这里把它钉成事实）
+
+    `reconcile_result` 拿到**空列表**会直接早退（原样返回结果）—— 等于告诉它「本轮没有
+    上一轮结论」。而「人工已忽略」只记在那批行的 `disposition` 上：读成空表就意味着
+    下一轮没有任何东西挡着被忽略的条目原样重报。
+
+    今天真正的调用方（`ai_analysis_service._run_engine_and_persist`）用的是
+    `previous_run` 挑出来的运行，它本来就卡了「有结构化结论」，所以产品说的那个漏口
+    **在调用链上并不成立**；这条用例守的是函数自己：被直接喂一条降级行时不能变成瞎的。
+
+    同时钉住第二件事：回退取回的行里，**人工忽略 + 文件没再变**的指纹仍被排除
+    （`reconcile_result` 的 `suppressed` 分支）—— 退回一层不等于把整批忽略作废。
+    """
+    project = _project()
+    key = f"g-{uuid.uuid4().hex[:8]}"
+    older = _run(project.id, key, structured=True, marker="OLDER")
+    degraded = _run(project.id, key, structured=False, marker="MARKDOWN")
+    # 产品说的那一档是**跑完了、但只有 markdown**：status 记成 degraded，结构化结论为空。
+    degraded.status = "degraded"
+    degraded.created_at = older.created_at.replace(year=older.created_at.year + 1)
+    db.session.commit()
+    try:
+        AiAnalysisAnomaly.query.filter_by(run_id=older.id).update({"disposition": "ignored"})
+        db.session.commit()
+
+        # 先确认「回退找基线」与「挑基线」指向同一条：两处各写一份判据，漂了这边不会报错。
+        assert _previous_run("weekly", key).id == older.id
+
+        rows = previous_anomaly_rows(degraded.id)
+        assert [row["fingerprint"] for row in rows] == ["fp-OLDER"], (
+            "喂一条没有结构化结论的运行，`previous_anomaly_rows` 回了空表 —— "
+            "对账器会早退，人工忽略的条目再也不被读入"
+        )
+        assert rows[0]["run_id"] == older.id
+
+        merged = reconcile_result(
+            {"report_markdown": "本轮", "anomalies": [], "final_findings": []},
+            rows,
+            changed_paths=set(),
+            previous_run_id=older.id,
+        )
+        assert merged["anomalies"] == [], (
+            "回退取回的行把「已忽略且文件没再变」的那条又放进了在挂清单"
+        )
+        assert merged["baseline_reconciliation"]["suppressed"] == 1
+    finally:
+        _cleanup([older.id, degraded.id])
+
+
+def test_the_fallback_is_capped(ctx):
+    """回退最多三步：连跑 3 次没结论还够得到更早那次，第 4 次就够不到了。
+
+    为什么必须有这条：没有上限时「一直往回找到有结论的那条」是一条能扫完整段分组历史
+    的路径，而且会把几周前的结论当成「上一轮的结论全集」—— 那已经不是同一个版本周期
+    的账了。上限的意义只在于越过「连续几次降级/失败」这种真实形状。
+    """
+    project = _project()
+    key = f"g-{uuid.uuid4().hex[:8]}"
+    base = _run(project.id, key, structured=True, marker="OLDER")
+    gaps = []
+    for index in range(1, 5):
+        gap = _run(project.id, key, structured=False, marker=f"GAP{index}")
+        gap.created_at = base.created_at.replace(year=base.created_at.year + index)
+        gaps.append(gap)
+    db.session.commit()
+    try:
+        assert [row["fingerprint"] for row in previous_anomaly_rows(gaps[2].id)] == [
+            "fp-OLDER"
+        ], "中间隔了 3 条没结论的运行就退不回去了 —— 上限比产品的 N=3 更紧"
+        assert previous_anomaly_rows(gaps[3].id) == [], (
+            "第 4 条之后还退到了更早那次 —— 回退没有上限"
+        )
+    finally:
+        _cleanup([base.id] + [gap.id for gap in gaps])
+
+
+def test_a_concluded_run_with_no_rows_keeps_its_empty_ledger(ctx):
+    """反向：**有结论但 0 行**的运行不往回退（空表是一个结论，不是缺失）。
+
+    这一轮没报新问题、或者旧的都被逐条声明修复之后，异常表就是空的 —— 往回退一层会把
+    那批已经关掉的条目重新翻出来当「仍成立」，与 `baseline.py` 那条「上一次那批就是
+    当前问题全集」正好相反（`test_a_declared_fix_does_not_come_back_as_an_in_flight_item`
+    只走一轮，抓不到这个形状）。
+    """
+    project = _project()
+    key = f"g-{uuid.uuid4().hex[:8]}"
+    older = _run(project.id, key, structured=True, marker="OLDER")
+    concluded_empty = _run(project.id, key, structured=True, marker="EMPTY")
+    concluded_empty.created_at = older.created_at.replace(year=older.created_at.year + 1)
+    db.session.commit()
+    try:
+        # 造出「结构化结论 + 0 条异常」：这一轮真的没有在挂结论。
+        AiAnalysisAnomaly.query.filter_by(run_id=concluded_empty.id).delete()
+        db.session.commit()
+        assert _previous_run("weekly", key).id == concluded_empty.id, (
+            "这一臂的前提不成立：它必须是「最近一条有结论的运行」"
+        )
+        assert previous_anomaly_rows(concluded_empty.id) == [], (
+            "0 行的有效结论被往回退了一层 —— 已经关掉的条目会重新变成「仍成立」"
+        )
+    finally:
+        _cleanup([older.id, concluded_empty.id])
 
 
 def test_the_read_side_still_shows_a_markdown_only_run(ctx):

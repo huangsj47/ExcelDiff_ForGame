@@ -119,11 +119,28 @@ def two_repos():
         }
 
 
+@pytest.fixture()
+def all_profile(monkeypatch):
+    """把项目的分析范围临时设成 `all`：下面这些用例量的是 focus/取样，不是 profile 收窄。
+
+    `tables`（默认）现在按**仓库**收窄输入（WP14）：混合批次里代码仓库那 30 个 `.lua`
+    根本不会进 `delta_files`，于是「34 个文件」这类断言与 focus 的收窄语义都测不到了。
+    这里不改全局默认值，只在用例内显式声明「本用例要的是全量输入」。
+    """
+    real_config = ai_service.get_project_analysis_config
+    monkeypatch.setattr(
+        ai_service,
+        "get_project_analysis_config",
+        lambda project_id: {**real_config(project_id), "analysis_profile": "all"},
+    )
+
+
 # ==========================================================================
 # 一、清单默认全列；白名单永远给全部
 # ==========================================================================
 
 
+@pytest.mark.usefixtures("all_profile")
 def test_the_list_is_not_capped_at_max_files(monkeypatch, two_repos):
     """清单取样上限（收敛后由 `sampling_cap_for` 推导）在 34 个文件时夹到 200 > 34，
     所以全列 —— 它仍然**只在清单长到列不下时**才起作用，不是「能分析多少」的上限。"""
@@ -139,6 +156,7 @@ def test_the_list_is_not_capped_at_max_files(monkeypatch, two_repos):
         assert ai_service.sampling_cap_for(34) == 200
 
 
+@pytest.mark.usefixtures("all_profile")
 def test_the_whitelist_always_carries_every_changed_file(monkeypatch, two_repos):
     """清单可以少列，**白名单不能少给** —— 少给就是「读不到」。"""
     with app.app_context():
@@ -159,6 +177,7 @@ def test_the_whitelist_always_carries_every_changed_file(monkeypatch, two_repos)
 # ==========================================================================
 
 
+@pytest.mark.usefixtures("all_profile")
 def test_focusing_on_table_repositories_keeps_only_them(two_repos):
     with app.app_context():
         payload, _state, skip = ai_service.build_weekly_payload(
@@ -175,6 +194,7 @@ def test_focusing_on_table_repositories_keeps_only_them(two_repos):
         assert payload["summary"]["delta_files"] == 4
 
 
+@pytest.mark.usefixtures("all_profile")
 def test_focusing_on_code_repositories_keeps_only_them(two_repos):
     with app.app_context():
         payload, _state, _skip = ai_service.build_weekly_payload(
@@ -186,6 +206,23 @@ def test_focusing_on_code_repositories_keeps_only_them(two_repos):
         assert payload["focus"]["label"] == "仅代码仓库"
 
 
+def test_focus_code_under_tables_profile_is_explicitly_empty(two_repos):
+    """**默认 profile 下没有代码仓库的输入**：选「只看代码」必须是 `focus_empty`。
+
+    这是 WP14 的语义在焦点参数上的必然结果：`tables` 先把批次收窄到配置表仓库，代码
+    仓库的文件根本不存在，focus=code 只能筛空。静默返回一份空清单跑下去，报告会写着
+    「代码范围没有问题」，而事实是这次根本没看代码。
+    """
+    with app.app_context():
+        payload, _state, skip = ai_service.build_weekly_payload(
+            two_repos["cfg_code"].id, focus="code"
+        )
+
+        assert payload is None
+        assert skip == "focus_empty"
+
+
+@pytest.mark.usefixtures("all_profile")
 def test_focusing_on_one_repository_uses_its_name(two_repos):
     with app.app_context():
         table_repo_id = two_repos["table_repo"].id
@@ -198,6 +235,7 @@ def test_focusing_on_one_repository_uses_its_name(two_repos):
 
 
 @pytest.mark.parametrize("focus", ["all", "", None, "不存在的范围", "999999", "table;drop"])
+@pytest.mark.usefixtures("all_profile")
 def test_an_unusable_focus_falls_back_to_no_filter(focus, two_repos):
     """`focus` 来自 URL，认不出来时必须退回「不筛」，不能把分析变成空跑或报错。"""
     with app.app_context():
@@ -210,6 +248,7 @@ def test_an_unusable_focus_falls_back_to_no_filter(focus, two_repos):
         assert payload["focus"]["label"] == ""
 
 
+@pytest.mark.usefixtures("all_profile")
 def test_an_empty_focus_is_reported_instead_of_running_on_nothing(two_repos):
     """选中的范围里没有改动 → 明确返回 `focus_empty`，而不是跑一次空分析。
 
@@ -268,6 +307,7 @@ def _seed_commits(repo: Repository, rows):
 # ==========================================================================
 
 
+@pytest.mark.usefixtures("all_profile")
 def test_the_window_commits_are_frozen_into_the_payload(two_repos):
     """写侧：`build_weekly_payload` 必须把清单与每个提交的文件账一起放进 payload。"""
     with app.app_context():
@@ -293,7 +333,7 @@ def test_the_window_commits_are_frozen_into_the_payload(two_repos):
         assert files[early]["repository_id"] == repo.id
 
 
-def test_the_window_commits_extend_both_whitelists_end_to_end(two_repos):
+def test_the_window_commits_extend_both_whitelists_end_to_end(two_repos, monkeypatch):
     """读侧 + 执行闸门：**能问、也能逐提交读 diff**，越权的仍然被拒。
 
     这是审查报告点名要的那条集成测试（`build_weekly_payload → from_weekly_payload →
@@ -302,6 +342,17 @@ def test_the_window_commits_extend_both_whitelists_end_to_end(two_repos):
     「取不到」写成了高风险结论。
     """
     from services.ai.protocol import ContextRequest, sanitize_requests
+
+    # 本用例测的是**窗口提交的单提交 diff 能不能读**，不是 `analysis_profile`。
+    # 批次是混合的（30 个 .lua + 4 张表），默认 profile=tables 会按契约 1.8 把代码路径
+    # 从授权表里收窄掉，这里断言的 early/mid 路径必然为空。所以显式按 all 跑：要验证的
+    # 是「窗口账不因读侧改造而失效」，与是否限制配表无关。
+    real_config = ai_service.get_project_analysis_config
+    monkeypatch.setattr(
+        ai_service,
+        "get_project_analysis_config",
+        lambda project_id: {**real_config(project_id), "analysis_profile": "all"},
+    )
 
     with app.app_context():
         repo, cfg = two_repos["code_repo"], two_repos["cfg_code"]
@@ -357,6 +408,7 @@ def test_the_window_commits_extend_both_whitelists_end_to_end(two_repos):
         )
 
 
+@pytest.mark.usefixtures("all_profile")
 def test_the_window_commits_follow_the_selected_focus(two_repos):
     """窗口提交账要**跟着用户选的范围收窄**，否则白名单会放行不该看的仓库。
 

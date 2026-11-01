@@ -526,7 +526,73 @@ def test_the_commit_stream_says_already_running_instead_of_replaying_itself(monk
 
 
 # ==========================================================================
-#  四、前端在分析进行中不得被重新启用
+#  四、seal 重试：撞唯一索引后重新冻一次，快照必须真的落库（WP9）
+# ==========================================================================
+
+
+def _seed_dead_claim(seeded: dict) -> AiAnalysisRun:
+    """造一条**已死**但还占着认领的运行：让下一次 INSERT 真的撞上唯一索引。
+
+    不用 monkeypatch 伪造 `IntegrityError`：那条路径真正要验的是「rollback 之后重新
+    seal」这个事务语义（第一份快照随 rollback 一起消失），只有真实冲突才对得上。
+    """
+    key = ai_service._analysis_claim_key(
+        project_id=seeded["project_id"],
+        target_type="weekly",
+        target_id=seeded["config_id"],
+        target_key=seeded["group_key"],
+        scope="full",
+        payload=_payload(seeded),
+    )
+    dead = AiAnalysisRun(
+        project_id=seeded["project_id"],
+        target_type="weekly",
+        target_id=seeded["config_id"],
+        target_key=seeded["group_key"],
+        status="failed",
+        scope="full",
+        trigger_source="manual",
+        active_key=key,
+    )
+    db.session.add(dead)
+    db.session.commit()
+    return dead
+
+
+def test_a_unique_index_retry_still_seals_the_target_snapshot():
+    """第一次 INSERT 撞唯一索引、第二次成功：最终那条 run 必须**真的**有一份快照。
+
+    `seal_snapshot` 只 flush 不 commit（快照与 run 同生共死），而撞约束后的 rollback 会把
+    它一起回滚。seal 若只在重试循环外做一次，第二次建出来的 run 的 payload 就记着一个
+    已经不再存在的 `snapshot_id`：这次分析没有快照，下一轮做差找不到基准，于是**真首跑**
+    （整窗全量）—— 审查报告 2.3 点名的放大项，这条用例钉的就是它。
+    """
+    from models.ai_analysis import AiDiffSnapshot
+    from services.ai import snapshot_store
+
+    seeded = _seed()
+    with flask_app.app_context():
+        dead = _seed_dead_claim(seeded)
+        run = _create(seeded)
+
+        payload = json.loads(run.request_payload or "{}")
+        snapshot_id = (payload.get("snapshot") or {}).get("snapshot_id")
+        assert snapshot_id, (
+            "重试成功的那条 run 的 payload 里没有目标快照 —— 下一轮会退化成真首跑"
+        )
+        baseline = snapshot_store.load_baseline(seeded["group_key"])
+        assert baseline is not None, "库里找不到这份目标快照（它随第一次 rollback 一起没了）"
+        assert baseline.snapshot_id == snapshot_id, (
+            "payload 记的快照 id 与库里实际那份不是同一个 —— 账上有、库里没有"
+        )
+        assert (
+            AiDiffSnapshot.query.filter_by(group_key=seeded["group_key"]).count() == 1
+        ), "重试路径重复冻出了多份快照（第一份必须随 rollback 消失）"
+        _cleanup([dead.id, run.id])
+
+
+# ==========================================================================
+#  五、前端在分析进行中不得被重新启用
 # ==========================================================================
 
 

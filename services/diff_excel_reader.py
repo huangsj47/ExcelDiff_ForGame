@@ -16,9 +16,78 @@
 类的常量与 `__init__` 仍在 `diff_service.py`，本模块的方法通过 `self.` 取用。
 """
 
+import datetime
 import os
 import re
 from typing import Any, Dict
+
+# ---------------------------------------------------------------------------
+#  原始单元格类型：读取层的**第二份事实**
+# ---------------------------------------------------------------------------
+#
+# 为什么要有它：`dtype=str` + `keep_default_na=False`（见 `_read_excel_data`）
+# 保住的是**字面量**，代价是丢掉「这一格在文件里是什么类型」：
+#
+#     文件里是数值 100  __\  pandas 都读成 '100'  __\  比较层判「相等」
+#     文件里是文本 "100" __/                        __/
+#
+# 于是「策划把 100 改成了 '100'」这种提交：数值表列变成文本列，客户端
+# `tonumber` / `int.Parse` 从「正常」变成「抛异常 / 取到 0」，**平台与 AI 都看不见**。
+# 这一类故障不是配错值，而是配错了类型，改前改后读出来一模一样，只能靠文件里
+# 的原始类型发现。
+#
+# 编码用**单字符**：一份几千行 × 几十列的配表有几十万个格子，`{(行, 列): '数值'}`
+# 的字典在这条每次读表都要走一遍的路径上会把内存与构建开销放大好几倍；
+# 一行一个类型串（每格一个字符）既够用，也与行天然对齐。
+CELL_TYPE_TEXT = 't'
+CELL_TYPE_NUMBER = 'n'
+CELL_TYPE_BOOL = 'b'
+CELL_TYPE_DATE = 'd'
+CELL_TYPE_EMPTY = 'e'
+CELL_TYPE_UNKNOWN = ''       # 读不出原始类型（例如单元格超出 pandas 列数）
+
+
+def raw_cell_type_code(value) -> str:
+    """openpyxl 的原始单元格值 → 类型编码（见上面的常量）。
+
+    只回答「文件里这一格是什么类型」，不参与取值比较 —— 值仍然一律以 `dtype=str`
+    读出来的文本为准，这里多出来的只是类型这一维。
+    """
+    if value is None:
+        return CELL_TYPE_EMPTY
+    # bool 必须排在 int 前面：Python 里 `True` 是 `int` 的实例。
+    if isinstance(value, bool):
+        return CELL_TYPE_BOOL
+    if isinstance(value, (int, float)):
+        return CELL_TYPE_NUMBER
+    # `datetime.datetime` 也是 `datetime.date` 的实例，统一按「日期」处理。
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time, datetime.timedelta)):
+        return CELL_TYPE_DATE
+    if isinstance(value, str):
+        return CELL_TYPE_TEXT
+    return CELL_TYPE_UNKNOWN
+
+
+class WorkbookData(dict):
+    """一次读取的结果：`{工作表名: DataFrame}`，外加每格的**原始类型**（`cell_types`）。
+
+    ## 为什么是 dict 子类，而不是改返回形状
+
+    `_read_excel_data` 的返回值有一堆调用方与测试按「字典 of DataFrame」用
+    （`data['Sheet1']`、`set(data.keys())`、与字典比较），改形状会牵动整条链路。
+    dict 子类在这些用法上与普通字典**逐字等价**（`==`、`in`、`.items()` 全一样），
+    只多挂一个属性，类型信息就能跟着值一起从读取层走到比较层 —— 中间不需要给
+    `process_diff` / `_compare_excel_data` 增加任何参数。
+
+    `cell_types` 的形状：`{工作表名: [类型串, ...]}`，第 i 个类型串对应 DataFrame
+    第 i 行（0 起），串里第 j 个字符是第 j 列的类型编码。没有这个键 = 这份文件没有
+    类型信息（CSV、openpyxl 读不了的老格式、或读取失败），比较层据此保持原行为。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cell_types: Dict[str, list] = {}
+
 
 # ---------------------------------------------------------------------------
 #  行号口径：**整个平台只有这一处实现**
@@ -92,7 +161,9 @@ class DiffExcelReaderMixin:
                 separator = '\t' if ext == '.tsv' else ','
                 text_content = self._decode_text(content)
                 df = pd.read_csv(io.StringIO(text_content), sep=separator, **READ_KWARGS)
-                return {'Sheet1': df}
+                # CSV/TSV 没有单元格类型：每个格子都是文本，`cell_types` 留空。
+                # 比较层因此走「没有类型信息」的既有路径，输出与本功能上线前逐字相同。
+                return WorkbookData({'Sheet1': df})
             else:
                 # Excel文件处理
                 with warnings.catch_warnings():
@@ -102,7 +173,11 @@ class DiffExcelReaderMixin:
                     sheets = {}
                     for sheet_name in excel_file.sheet_names:
                         sheets[sheet_name] = pd.read_excel(excel_file, sheet_name=sheet_name, **READ_KWARGS)
-                return self._repair_inferred_cells(content, sheets)
+                # `WorkbookData` 让「原始单元格类型」跟着值一起返回（形状仍是字典 of
+                # DataFrame，原因见 `WorkbookData`）。类型由 `_repair_inferred_cells`
+                # 顺带采集 —— 它本来就为「还原被列级推断改写的格子」扫了一遍 openpyxl，
+                # 复用同一遍而不是再读一次文件。
+                return self._repair_inferred_cells(content, WorkbookData(sheets))
 
         except Exception as e:
             raise Exception(f"读取Excel文件失败: {str(e)}")

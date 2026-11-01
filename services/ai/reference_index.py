@@ -38,11 +38,35 @@
 `utils.text_decoding.TEXT_ENCODINGS` 的前两档同序），解不出的**跳过并计入
 `undecodable_paths`** —— 宽松留给 `file_content`，缺口留给模型看。
 
+## 配表（xlsx/xlsm）：给「二进制」开一条**定向**豁免
+
+`find_references` 原先对配表只有一个答案：**没搜**。xlsx 的字节是 zip 容器，`is_binary`
+必判真 → 进 `binary_paths`，`repo_reference` 的覆盖账把它写在「配表/生成物等，没搜」
+那一行里。于是「`Item_1001` 还被哪张表引用」这个问题只能靠 `file_content` 一张张表去猜
+（而配表的单条上限只有 11,000 字符）。
+
+可它的**内容**是单元格文本。所以这里按扩展名（`excel_source._is_openpyxl_workbook`，
+与 `file_content` 的表格分支同一份判定，不另写第三份清单）在**二进制判定之前**解析
+前 3 张表的前 200 行，把每行建成 `[第k张表 表名 第r行] 单元格 ｜ …` 这样一行 ——
+行号取表里的**物理行号**，命中之后模型要能回到那张表核对（`file_content` 的 `lines`
+对配表表示「第几张表」，所以表序号也写进同一行）。
+
+三道限制都是为了让首次查询别被拖死（理由同 `MAX_INDEX_FILES`）：单文件 ≤ 5 MB
+（`XLSX_MAX_INDEX_BYTES`）、前 3 张表、每张表前 200 行；超限的进 `oversized_paths`、
+打不开的退回 `binary_paths` —— **两类仍然记账**，抬头照样说「这些没索引」。
+
+真正的二进制（图片/音频/压缩包）与 `.xls`/`.xlsb`（OLE，openpyxl 打不开）一个字都没变。
+
+（与穷举基准 `reference_search.search_files` 的差异是**有意**的：基准仍把配表当二进制跳过，
+索引这一侧更宽，宽出来的这一档正是本工作包要补的召回。既有那条「索引 == 穷举」的用例
+语料全是代码文本，不受影响。）
+
 ## 三处「读了但没索引」都要记账
 
-`missing_paths`（blob 取不到）/ `binary_paths`（不是文本）/ `oversized_paths`（超过
-`MAX_INDEX_FILE_BYTES`）/ `undecodable_paths`（解不出文本）与 `indexed_files` 之后的
-那些（超过 `MAX_INDEX_FILES` 的**预热门槛**，见下）必须能加起来等于本批次的总数 ——
+`missing_paths`（blob 取不到）/ `binary_paths`（不是文本，含**打不开**的工作簿）/
+`oversized_paths`（超过 `MAX_INDEX_FILE_BYTES`，配表则超过 `XLSX_MAX_INDEX_BYTES`）/
+`undecodable_paths`（解不出文本）与 `indexed_files` 之后的那些（超过
+`MAX_INDEX_FILES` 的**预热门槛**，见下）必须能加起来等于本批次的总数 ——
 `search()` 把这几个数原样交给 `render_result`，模型靠它们分清「没搜到」与「没搜完」。
 
 ## `MAX_INDEX_FILES`：首次查询的成本上限
@@ -58,11 +82,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional, Sequence
 
+# 配表能不能按工作簿解析，只认这一份判定（与 `file_content` 的表格分支同一个函数）——
+# 扩展名清单写第二份，迟早会出现「正文读得出来、检索说它是二进制」这种自相矛盾。
+from services.ai.excel_source import _is_openpyxl_workbook
 from services.ai.reference_search import MAX_HITS, MAX_LINE_CHARS, Hit, is_binary
+from utils.logger import log_print
 
 # 分词：标识符（含下划线）与**三位以上**的数字。与 `search_text` 的「逐行子串匹配」配合，
 # 见模块 docstring 里那段等价性论证。
@@ -74,10 +103,32 @@ _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d{3,}")
 # （`test_the_index_decodes_like_the_shared_implementation` 钉着这件事）。
 INDEX_ENCODINGS = ("utf-8", "gbk")
 
-# 单个文件的索引上限。**这是上限不是目标**：代码文件极少超过，超过它的基本是配表导出的
-# 数据、生成的资源清单、日志 —— 索引它们只会把首次查询拖死，而它们本来也不是「谁在用这个
-# 标识符」这个问题的答案所在。超了就不索引，并计入 `oversized_paths`（不静默跳过）。
+# 单个文件的索引上限。**这是上限不是目标**：代码文件极少超过，超过它的基本是生成的资源
+# 清单、日志、导出的纯文本数据 —— 索引它们只会把首次查询拖死，而它们本来也不是「谁在用
+# 这个标识符」这个问题的答案所在。超了就不索引，并计入 `oversized_paths`（不静默跳过）。
+# **配表不走这一档**：xlsx 是压缩容器，字节数比同等内容的文本大得多，它由下面
+# `XLSX_MAX_INDEX_BYTES` 单独限。
 MAX_INDEX_FILE_BYTES = 1_500_000
+
+# -- 配表（xlsx/xlsm）的索引上限 -------------------------------------------
+#
+# 为什么值得为配表单独开一条路：`Item_1001` 还被哪张表引用，答案就在配表里，而在此之前
+# 它整类被判成二进制跳过（见模块 docstring）。但配表也不能整份读进来 —— 一张万行表就是
+# 几十 MB 的字符串，而「首次查询要快」这条约束（见 `MAX_INDEX_FILES`）对表比对代码更紧。
+#
+# * `XLSX_MAX_INDEX_BYTES`：5 MB。配表比代码大是常态，但 5 MB 之上基本是嵌入的图片、
+#   导出的全量数据备份 —— 那份东西本来也不该进检索。
+# * `XLSX_MAX_INDEX_SHEETS` / `XLSX_MAX_INDEX_ROWS`：前 3 张表、每张前 200 行。
+#   索引要回答的是「这个 id 在哪儿出现过」，不是「这张表长什么样」；前三张表 + 前 200 行
+#   覆盖了配表里绝大多数 id 所在的位置（主表在前，附表在后）。
+# * `XLSX_MAX_CELL_CHARS` / `XLSX_MAX_ROW_CHARS`：单格与单行的字符上限（与
+#   `excel_view._MAX_CELL_CHARS` 同一量级）。超出的基本是备注/描述这类长文本列 ——
+#   id 不会有 160 个字符，而宽表几行长文本就能吃掉几十 MB 内存。
+XLSX_MAX_INDEX_BYTES = 5 * 1024 * 1024
+XLSX_MAX_INDEX_SHEETS = 3
+XLSX_MAX_INDEX_ROWS = 200
+XLSX_MAX_CELL_CHARS = 160
+XLSX_MAX_ROW_CHARS = 2_000
 
 # 一次 `build()` 最多索引多少个文件 —— **这是调用方的策略，不是 `build()` 的默认值**。
 #
@@ -138,6 +189,95 @@ def _too_large(content, limit: int) -> bool:
     if isinstance(content, (bytes, bytearray, memoryview)):
         return len(content) > limit
     return len(str(content)) > limit
+
+
+def _cell_text(value) -> str:
+    """一个单元格 → 一行里的一段文本。空值/空白值返回空串（不占位）。
+
+    换行与连续空白压成单个空格：`Hit.render()` 的契约是「一行=一条命中」，一个带换行的
+    单元格会把那一行拆成两条、还会让 `evidence_prefetch` 的 `路径:行号: 正文` 解析错位。
+    """
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+def _xlsx_lines(content, *, path: str = "") -> Optional[tuple[str, ...]]:
+    """工作簿字节 → 按行索引的文本行；打不开返回 `None`（由调用方落进 `binary` 那本账）。
+
+    每行写成 `[第k张表 表名 第r行] 单元格 ｜ 单元格 …`，行号取表里的**物理行号**：
+    命中之后模型要回到那张表核对，而 `file_content` 的 `lines` 对配表表示「第几张表」，
+    所以表序号也必须写在同一行里 —— 只给一个索引里的序号，两条路都对不上。
+
+    这里**不复用** `excel_source._read_excel_sheets`：那个函数是给 `file_content` 排版用的，
+    输出是「抬头 + 整表统计 + 正文」，它的「第 N 行」是**渲染文本的行号**，回不到表里；
+    且它按字符额度收敛、不做「前几张表」的上限。共同的读取口径（openpyxl 的
+    `read_only=True, data_only=True`、能读哪些扩展名）两边是一致的。
+
+    `data_only=True` 与 `excel_source` 同口径：公式取缓存值。配表里用公式算 id 的情形极少，
+    而把这个口径分叉会让「正文里的值」与「检索到的值」对不上。
+    """
+    if not isinstance(content, (bytes, bytearray, memoryview)):
+        return None
+    try:
+        from openpyxl import load_workbook
+    except ImportError:  # pragma: no cover —— openpyxl 是平台的既有依赖
+        return None
+    try:
+        book = load_workbook(io.BytesIO(bytes(content)), data_only=True, read_only=True)
+    except Exception as exc:  # noqa: BLE001 —— 打不开就退回「不是文本」，不能炸掉整批索引
+        # 这一行是「为什么没搜」的现场记录：账本里它只会变成一个 `binary` 计数。
+        log_print(
+            f"⚠️ AI 检索：配表解析失败，按二进制跳过 {path or '<未知路径>'} "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+
+    lines: list[str] = []
+    try:
+        for sheet_index, name in enumerate(book.sheetnames[:XLSX_MAX_INDEX_SHEETS], start=1):
+            sheet = book[name]
+            for physical, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                if physical > XLSX_MAX_INDEX_ROWS:
+                    # 只停**正文累积**这一侧：`read_only` 的流式读取不会为此多读后面那些行。
+                    break
+                cells = [
+                    text[:XLSX_MAX_CELL_CHARS]
+                    for value in (row or ())
+                    if (text := _cell_text(value))
+                ]
+                if not cells:
+                    # 整行空：不占一行索引（它本来也搜不到任何词），但物理行号照旧往上走。
+                    continue
+                body = " ｜ ".join(cells)
+                if len(body) > XLSX_MAX_ROW_CHARS:
+                    # 宽表 × 长文本列：单行不封顶就有几十 MB 的量级。截断只影响这一行的
+                    # **右端**（通常是备注/描述列），id 不会长到 2,000 字之后。
+                    body = body[:XLSX_MAX_ROW_CHARS] + "…"
+                lines.append(f"[第{sheet_index}张表 {name} 第{physical}行] {body}")
+    except Exception as exc:  # noqa: BLE001 —— 读到一半坏掉，整份按「没索引」算，不给半份
+        log_print(
+            f"⚠️ AI 检索：配表读取中断，整份不索引 {path or '<未知路径>'} "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return None
+    finally:
+        try:
+            book.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return tuple(lines)
+
+
+def _index_lines(lines: Sequence[str], position: int, token_lines: dict) -> None:
+    """把一组行灌进倒排表 `token → [(entries 下标, 行号)]`。
+
+    代码文本与配表行**共用这一份分词**：`search()` 的「桶并集 == 子串匹配」那段论证
+    依赖「一行里的每个 token 都进了桶」，两条路各写一份分词迟早会分叉。
+    """
+    for number, line in enumerate(lines, start=1):
+        for token in {match.group(0).lower() for match in _TOKEN_RE.finditer(line)}:
+            token_lines.setdefault(token, []).append((position, number))
 
 
 @dataclass(frozen=True)
@@ -206,8 +346,13 @@ class SnapshotReferenceIndex:
 
         `reader(path, commit)` 由两端各自注入（Agent 端与平台本地用的是同一个
         `get_file_content_from_git`，只是跑在不同进程里）。四态处理：`None` → 读不到；
-        不是文本（`is_binary`）→ 跳过；超过 `max_file_bytes` → 跳过；
+        不是文本（`is_binary`）→ 跳过；超过 `max_file_bytes` → 跳过（**配表按
+        `XLSX_MAX_INDEX_BYTES` 单独限**：它是压缩容器，字节数天然比文本大）；
         `INDEX_ENCODINGS` 都解不出 → 跳过。**四者都记账**（见模块 docstring）。
+
+        配表（`_is_openpyxl_workbook`）多一条前置分支：按前 3 张表的前 200 行抽成文本行
+        再进同一条分词（见 `_xlsx_lines`）；抽不出来（打不开 / 超 `XLSX_MAX_INDEX_BYTES`）
+        就退回上面那四态，**不会**变成「静默消失」。
 
         `max_files` 是**调用方**的预热门槛（超过的不索引、算 `unindexed`，见 `MAX_INDEX_FILES`）。
         默认 `None` = 不限：成本策略由调用方决定，这里只如实记账。
@@ -230,8 +375,20 @@ class SnapshotReferenceIndex:
             if content is None:
                 missing.add(path)
                 continue
-            # 二进制**先判**：一份 50 MB 的 xlsx 既超上限也不是文本，而「配表等二进制（没搜）」
-            # 比「太大（没索引）」对模型更有用 —— 它知道该换 `file_ref` 那条路。
+            # 配表**在二进制判定之前**：xlsx 的字节是 zip 容器，`is_binary` 必判真，但它的
+            # 内容是可读的单元格文本（见模块 docstring 那一节）。抽不出行时落回下面那条路，
+            # 于是「打不开的工作簿」仍然进 `binary`、超 5 MB 的进 `oversized` —— 都记账。
+            if isinstance(content, (bytes, bytearray, memoryview)) and _is_openpyxl_workbook(path):
+                if len(content) > XLSX_MAX_INDEX_BYTES:
+                    oversized.add(path)
+                    continue
+                table_lines = _xlsx_lines(content, path=path)
+                if table_lines is not None:
+                    lines_by_path[path] = table_lines
+                    _index_lines(table_lines, position, token_lines)
+                    continue
+            # 二进制**先判**：一份 50 MB 的生成物既超上限也不是文本，而「不是文本（没搜）」
+            # 比「太大（没索引）」对模型更有用 —— 它知道该换 `file_content` 那条路。
             if is_binary(content):
                 binary.add(path)
                 continue
@@ -244,9 +401,7 @@ class SnapshotReferenceIndex:
                 continue
             lines = tuple(text.splitlines())
             lines_by_path[path] = lines
-            for number, line in enumerate(lines, start=1):
-                for token in {match.group(0).lower() for match in _TOKEN_RE.finditer(line)}:
-                    token_lines.setdefault(token, []).append((position, number))
+            _index_lines(lines, position, token_lines)
         return cls(
             entries=pairs,
             indexed_files=limit,
@@ -360,6 +515,11 @@ __all__ = [
     "INDEX_ENCODINGS",
     "MAX_INDEX_FILES",
     "MAX_INDEX_FILE_BYTES",
+    "XLSX_MAX_CELL_CHARS",
+    "XLSX_MAX_INDEX_BYTES",
+    "XLSX_MAX_INDEX_ROWS",
+    "XLSX_MAX_INDEX_SHEETS",
+    "XLSX_MAX_ROW_CHARS",
     "IndexedSearchResult",
     "SnapshotReferenceIndex",
     "snapshot_digest",

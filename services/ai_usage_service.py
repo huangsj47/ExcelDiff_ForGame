@@ -41,7 +41,6 @@
 """
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -51,29 +50,30 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from models import Project, WeeklyVersionConfig, db
 from models.ai_analysis import AiAnalysisRun, AiAnalysisTrace, AiWeeklyAnalysisState
 from services.ai import round_diagnostics, run_progress
-from services.ai.auto_sizing import (
-    MODE_FAMILY,
-    AnalysisPlan,
-    derive_family_sizing,  # noqa: F401 —— 与运行侧同源（`test_ai_auto_sizing` 钉着）
-)
-from services.ai.analysis_plan import (
-    FALLBACK_PLAN_NOTE,
-    fallback_weekly_plan,
-)
 from services.ai.analysis_budget import (
     PERIOD_ALL_TIME,
     PERIOD_CHOICES,
     PERIOD_LABELS,
     PERIOD_MONTHLY,
     PERIOD_WEEKLY,
-    SCOPE_PROJECT,    as_utc,
+    SCOPE_PROJECT,
+    as_utc,
     budget_rows_for_overview,
     budget_status,
     platform_budget_status,
     redact_platform_scope,
 )
+from services.ai.analysis_plan import (
+    FALLBACK_PLAN_NOTE,
+    fallback_weekly_plan,
+)
+from services.ai.analysis_scope_filter import filter_configs_for_profile
+from services.ai.auto_sizing import (
+    MODE_FAMILY,
+    AnalysisPlan,
+    derive_family_sizing,  # noqa: F401 —— 与运行侧同源（`test_ai_auto_sizing` 钉着）
+)
 from services.ai.budget import (
-    COMPACT_AT_RATIO,
     context_reserved_chars,
     context_watermark_chars,
     effective_prompt_budget,
@@ -81,10 +81,26 @@ from services.ai.budget import (
 )
 from services.ai.budget_plan import build_budget_plan, derive_tool_limits
 from services.ai.engine import EngineLimits
-from services.ai.job_service import UPGRADE_REASON_FIRST_RUN
+from services.ai.job_service import UPGRADE_REASON_NO_CONCLUSION_BASELINE
+from services.ai.mode_decision import (  # noqa: F401 —— 同名回导：既有调用点按旧名取用
+    _estimate_window_note,
+    _first_arg,
+    _mode_decision,
+    _parse_int,
+    _platform_prompt_chars_for,
+    _real_upgrade_reason,
+    _reuse_sentence,
+    _same_snapshot_reused_run,
+    _weekly_payload_facts,
+    parse_estimate_args,
+)
 from services.ai.platform_budget import platform_budget_public
 from services.ai.pricing import amount_exact, amount_of, money
-from services.ai.project_config_source import build_weekly_group_key, get_project_analysis_config
+from services.ai.project_config_source import (
+    build_weekly_group_key,
+    get_project_analysis_config,
+    weekly_batch_configs,
+)
 from services.ai.subagent import MIN_MEMBER_ROUNDS, MIN_MEMBER_TOOL_REQUESTS, verify_reserve_for
 from services.ai.trace_evidence import decode_evidence
 from services.ai.usage import (
@@ -104,7 +120,6 @@ from services.ai.usage_statistics import (
     usage_baseline,
 )
 from services.ai_analysis_service import project_price_table
-from services.app_routing_bootstrap_service import MAX_INTEGER_ID
 from utils.timezone_utils import BEIJING_TZ
 
 # 单次运行明细里最多回多少轮。轮次上限由配置决定（默认 8，最大 30），这个数字只是
@@ -217,34 +232,6 @@ class UsageFilters:
             "active": self.active,
             "notes": list(self.notes),
         }
-
-
-def _first_arg(args: Mapping[str, Any], *names: str) -> str:
-    for name in names:
-        if name in args:
-            value = args.get(name)
-            if value is None:
-                continue
-            return str(value).strip()
-    return ""
-
-
-def _parse_int(raw: str) -> Optional[int]:
-    """把查询参数里的整数读出来。**任何非法值都回落 `None`（= 不筛），绝不抛异常。**
-
-    上界不是洁癖：工具把值直接绑给 pysqlite 时，超过 64 位有符号数的整数会抛
-    `OverflowError: Python int too large to convert to SQLite INTEGER`，而那不是
-    `SQLAlchemyError`、仓库里也没有兜它的处理器 —— 管理员把地址栏里的项目号改错一位
-    就白屏。超出这个范围的 id 不可能存在，按「不筛」处理与按「筛不到」处理在这里等价，
-    都能给出一个正常页面。
-    """
-    if not raw or raw.lower() in {"all", "none", "0"}:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if 0 < value <= MAX_INTEGER_ID else None
 
 
 def _parse_date(raw: str) -> Optional[date]:
@@ -1085,51 +1072,6 @@ def filter_options() -> dict[str, Any]:
     }
 
 
-def parse_estimate_args(args: Mapping[str, Any]) -> tuple[Optional[int], dict[str, Any]]:
-    """URL query → 估算参数 `(project_id, {mode, planned_files, baseline_reusable, notes})`。
-
-    与 `parse_usage_filters` 同一条口径：**任何非法值都回落，绝不抛**。这些参数从地址栏
-    来，让它们变成 500 的话，页面直接白屏而用户没有任何办法回到正常状态。
-
-    `project_id` 是唯一一个「回落不了」的：估算必须知道是哪个项目（历史运行、价格表、
-    分片数都是按项目取的），所以它缺失时返回 `None`，由路由回 400 —— 那不是一次非法
-    访问，是一个缺少必填参数的请求。
-    """
-    notes: list[str] = []
-    raw_project = _first_arg(args, "project", "project_id")
-    project_id = _parse_int(raw_project)
-    if raw_project and project_id is None:
-        notes.append("项目编号不是有效数字。")
-
-    raw_mode = _first_arg(args, "mode").lower()
-    mode = raw_mode if raw_mode in (MODE_FULL, MODE_INCREMENTAL) else MODE_FULL
-    if raw_mode and raw_mode not in (MODE_FULL, MODE_INCREMENTAL):
-        notes.append(f"模式「{raw_mode}」认不出来，已按全量估算。")
-
-    raw_files = _first_arg(args, "files", "planned_files")
-    planned_files = _parse_int(raw_files)
-    if raw_files and planned_files is None:
-        notes.append(f"目标文件数「{raw_files}」不是有效数字，已按「不知道」处理。")
-
-    raw_baseline = _first_arg(args, "baseline", "reusable").lower()
-    baseline: Optional[bool] = None
-    if raw_baseline:
-        baseline = raw_baseline not in ("0", "false", "no", "off")
-
-    raw_config = _first_arg(args, "config", "config_id")
-    config_id = _parse_int(raw_config)
-    if raw_config and config_id is None:
-        notes.append("周版本配置编号不是有效数字，已按未指定分组处理。")
-
-    return project_id, {
-        "mode": mode,
-        "planned_files": planned_files,
-        "baseline_reusable": baseline,
-        "config_id": config_id,
-        "notes": notes,
-    }
-
-
 #: 「生效预算是怎么来的」的一个取值：**运行前不探测模型**。
 #:
 #: 预估端点是只读的（`test_it_is_get_only_and_produces_no_model_call`），所以它算出来的
@@ -1138,116 +1080,62 @@ def parse_estimate_args(args: Mapping[str, Any]) -> tuple[Optional[int], dict[st
 WINDOW_SOURCE_NOT_PROBED = "not_probed_default"
 
 
-def _platform_prompt_chars_for(project_id: int) -> tuple[int, str]:
-    """平台内置提示词一共多少字（`prompt.platform_prompt_chars`，与运行侧**同一个**函数）。
+def _mode_decision_with(decision: dict[str, Any], profile_fallback: str) -> dict[str, Any]:
+    """模式裁决 + 「分析范围回退成 `all`」那一档（`policy.decision.profile_fallback`）。
 
-    返回 `(字数, 拿不到时的说明)`。拿不到时回 0 并且**明说**：悄悄回 0 等于告诉用户
-    「平台一段内置提示词都不占」，那是一个假事实（而界面那一行正是拿它解释「生效值里
-    为什么有一部分不属于你」）。加载失败本身不阻断估算 —— 估算只是几行数字。
+    **空串不写**：没有回退时 `mode_decision` 的形状与加这个键之前逐字一致 —— 前端读的是
+    `decision.profile_fallback !== 'no_table_repository'`（缺键就是「没回退」），多一个
+    `""` 只会让「没回退」与「回退原因认不出来」长得一样。
     """
-    from services.ai.prompt import platform_prompt_chars
+    if not profile_fallback:
+        return decision
+    return {**decision, "profile_fallback": profile_fallback}
 
+
+def _profile_fallback_of(config: Optional[WeeklyVersionConfig]) -> str:
+    """预检这一次会不会把 `analysis_profile` 从 `tables` 回退成 `all`。
+
+    ## 为什么这里重算一次（而不是读某一份 payload）
+
+    `policy.decision.profile_fallback` 写在**运行侧**组装的那份 payload 里，而预检这一层
+    只拿得到 `_weekly_payload_facts` 摘出来的几个计数（它不把 payload 交出来）。所以这里用
+    **同一个纯函数**（`analysis_scope_filter.filter_configs_for_profile`）与同一个入口
+    （`weekly_batch_configs`）再判一次 —— 复用的是判据本身，不是另写一份「哪个仓库算配表」。
+    两处若各写一份，项目把配表仓库误标成 `code` 时，预检会说「会按配表跑」而实际回退 `all`，
+    用户看到的那句范围说明与真正跑的那次相反。
+
+    读不到（没给 config / 渲染期出错）就回空串：`mode_decision` 里空串不写（见
+    `_mode_decision_with`），预检也不该因为读不到这一档就整体算不出来。
+    """
+    if config is None:
+        return ""
     try:
-        from services.ai_analysis_service import _load_project_skills
-
-        loaded, failure = _load_project_skills(project_id)
-    except Exception as exc:  # noqa: BLE001 —— 读不到内置提示词不该让估算变成 500
-        return 0, f"平台内置提示词的字符数没有读出来（{exc}），下面的生效值里**不含**它。"
-    if loaded is None:
-        return 0, (
-            "平台内置提示词的字符数没有读出来（"
-            + str(failure or "分析协议未加载")
-            + "），下面的生效值里**不含**它。"
-        )
-    return platform_prompt_chars(loaded), ""
-
-
-def _estimate_window_note(
-    *, clamp_note: str, window_tokens: int, watermark: int, platform_note: str
-) -> str:
-    """预估端点那一行「模型窗口来源」的原文（界面直接渲染它）。
-
-    三件事按这个顺序说：**先说这次没问端点**（这是前提）、再说被压到哪里（如果有压）、
-    最后说内置提示词那一份有没有算进来。顺序不能反 —— 先说「未声明窗口」会让读者以为
-    平台问过了，而事实是这一条路径**没有探测**。
-    """
-    parts = [
-        f"运行前不探测模型：这里的生效预算是按平台默认窗口 {window_tokens:,} token 的 "
-        f"{int(COMPACT_AT_RATIO * 100)}% 水位（{watermark:,} 字）算的；"
-        "任务真正启动前会向端点问一次真实窗口，届时以那一个为准（可能更小）。"
-    ]
-    if clamp_note:
-        parts.append(clamp_note)
-    if platform_note:
-        parts.append(platform_note)
-    return "".join(parts)
-
-
-def _weekly_payload_facts(config_id: int, *, force_full: bool = False) -> dict[str, Any]:
-    """这一轮会进输入的账，以及运行侧已经能确定的范围裁决。
-
-    ## 为什么敢在**只读**端点上读它
-
-    `build_weekly_payload` 是**平台自己的账**：读快照缓存行、按基线做差、把上轮没取到
-    证据的文件按风险补回来（`scope_sampling`）。它不发任何模型请求，也没有副作用
-    （不建 run、不写状态行）—— 与报告 §5.5 要求的「调用模型之前先看清要做什么」是同一件事。
-
-    「不另立血缘」在这里是硬要求：补偿集与增量集的算法只有这一份实现（`_compensation_entries`
-    / `_select_delta_entries`）。在这里重算一遍，两处迟早会在「风险排序」「焦点筛选」
-    这些细节上分叉 —— 用户看到的预检数字与真正跑的内容对不上，比不给数字更坏。
-
-    拿不到时回 `(None, None, 说明)`：界面如实写「没有算出来」并把原因转述出来。
-    """
-    from services.ai_analysis_service import build_weekly_payload
-
-    try:
-        payload, _state, skip_reason = build_weekly_payload(
-            config_id, force_full=force_full
-        )
-    # 目录里那三处 `{"delta": None, ...}` 的失败返回也必须带上这个键，否则调用方读
-    # `facts["plan"]` 会 KeyError（失败路径的字段集与成功路径不一致是最难查的一类）。
-    except Exception as exc:  # noqa: BLE001 —— 预检读不到账不该让整个估算变成 500
-        return {"delta": None, "compensation": None, "planned": None,
-                "scope": "", "reason": "", "plan": None,
-                "note": f"本次的输入账没有算出来（{exc}）。"}
-    if payload is None:
-        return {"delta": None, "compensation": None, "planned": None,
-                "scope": "", "reason": "", "plan": None,
-                "note": "本次的输入账没有算出来（平台裁决："
-                + str(skip_reason or "未知") + "）。"}
-    summary = payload.get("summary") or {}
-    delta = summary.get("delta_files")
-    compensation = summary.get("compensation_files")
-    policy = payload.get("policy") or {}
-    return {
-        "delta": int(delta) if isinstance(delta, int) else None,
-        "compensation": int(compensation) if isinstance(compensation, int) else None,
-        # 估算缩放必须用**真正会交给引擎的文件数**。它通常等于 delta，但全量预检
-        # 会以 force_full 重建 payload，此时这里就是整窗文件数。由服务端算这一项，
-        # 避免页面把上一次增量预检缓存的 files= 带进全量预检。
-        "planned": len(payload.get("delta_files") or []),
-        "scope": str(payload.get("scope") or ""),
-        "reason": str(policy.get("reason") or ""),
-        # **同一份计划**（工作包 B）：`build_weekly_payload` 已经算好并挂上去了，
-        # 预估这一侧只读不推 —— 再推一次就会出现「确认框说 5 片、实际跑 3 片」。
-        "plan": payload.get("plan") if isinstance(payload.get("plan"), dict) else None,
-        "note": "",
-    }
+        profile = get_project_analysis_config(config.project_id).get("analysis_profile")
+        _kept, fallback = filter_configs_for_profile(weekly_batch_configs(config), profile)
+    except Exception:  # noqa: BLE001 —— 读不到这一档不是「估计算不出来」的理由
+        return ""
+    return fallback
 
 
 def _weekly_action_facts(
     project_id: int, *, mode: str, target_type: str, config_id: Optional[int] = None
 ) -> dict[str, Any]:
-    """本次动作的**事实**：增量文件数 / 补偿文件数 / 基线 run / 升级原因（E8）。
+    """本次动作的**事实**：增量文件数 / 补偿文件数 / 基线 run / 模式裁决（E8）。
 
     **只查库、不探测模型**（这就是这个端点存在的护栏）：
 
     * **基线 run** 取自 `AiWeeklyAnalysisState.last_concluded_run_id` —— 与
       `job_service.create_or_attach_job` 的 `base_run_id` **同一个指针**（不另立血缘：
       预检说「基线是 Run 22」而建出来的 job 指向 Run 19，是最坏的一种不一致）；
-    * **升级原因**用 `job_service._decide_effective_mode` **同一套判据**（同一份状态行的
-      同一个指针），所以界面上的「这次会被升级为全量」就是建 job 时真的会发生的事；
-    * **增量/补偿文件数**读平台的输入账（见 `_weekly_payload_facts`）。
+    * **模式裁决**（`mode_decision`）用 `job_service._decide_effective_mode` **同一套判据**
+      （同一份状态行的同一个指针），所以界面上的「平台会怎么跑」就是建 job 时真的会发生
+      的事 —— 包括「没有结论基线时仍然是增量」这一条（契约 1.5 / 1.6）；
+    * **平台建议整窗重跑**（变化多 / 比例高 / 命中关键路径）来自 payload 的 `policy`，
+      它是**建议**：`effective` 仍是增量，`upgrade_reason` 里不再出现它；
+    * **同一快照已有结论**（`reused_run_id`）：委托 `job_service.reusable_conclusion_for`
+      判，与「再点一次会不会新建运行」是同一个判据；
+    * **增量/补偿文件数**读平台的输入账（见 `_weekly_payload_facts`）。`planned_files`
+      **用真实 delta 数**，不因为「平台建议整窗」就换成整窗 —— 除非用户自己选了全量。
 
     一个分组都没有 / 不是周版本 / 全量模式时，四个字段各自回它们的「不适用」值
     （`None` 或空串）—— **不是 0**：0 是「一个文件都不变」这个确定的结论。
@@ -1268,6 +1156,11 @@ def _weekly_action_facts(
         "compensation_files": None,
         "baseline_run": None,
         "upgrade_reason": "",
+        # 模式裁决（契约 1.6）：**每个分支都要带**。`**blank` 的四处返回都从这里取，
+        # 少带一个分支的症状是界面悄悄退回「按旧口径显示」，而接口看起来是成功的。
+        "mode_decision": _mode_decision(mode),
+        # 同一份快照已经有一份可复用的结论时的那条运行号（零消耗的凭据）。
+        "reused_run_id": None,
         # 计划（工作包 B）：**读不到就是 None**，调用方据此现算一份兜底计划并说明。
         # 四处 `**blank` 的返回都要带上它 —— 「有的分支带、有的分支不带」正是这种键
         # 最容易丢的地方（丢了的症状是预估悄悄换成兜底计划，而界面上看不出来）。
@@ -1280,6 +1173,23 @@ def _weekly_action_facts(
     exact_config = db.session.get(WeeklyVersionConfig, config_id) if config_id else None
     if exact_config is not None and exact_config.project_id != project_id:
         exact_config = None
+
+    # 「分析范围回退成 all」这一档（`profile_fallback`）：项目没有配表仓库时，写侧会把
+    # `tables` 静默退回 `all`（见 `analysis_scope_filter`），页面上没有任何提示 ——
+    # 这里把它挂进模式裁决，界面据此说清「这次看的是全部仓库」。
+    profile_fallback = _profile_fallback_of(exact_config)
+
+    def decision(mode_value: str, **kwargs: Any) -> dict[str, Any]:
+        """这一支的模式裁决，顺带带上 `profile_fallback`（空串不写，见 `_mode_decision_with`）。"""
+        return _mode_decision_with(_mode_decision(mode_value, **kwargs), profile_fallback)
+
+    # 「同一份快照已经有结论」只在**增量**这一档有意义（全量是用户要的重判，不复用）。
+    # 判据委托给建 job 用的同一个函数，读不到就是 None（这里只是提示，不是事实来源）。
+    reused_run_id: Optional[int] = (
+        _same_snapshot_reused_run(exact_config)
+        if mode == MODE_INCREMENTAL and exact_config is not None
+        else None
+    )
 
     if mode != MODE_INCREMENTAL:
         # **全量这一支放在状态行之前**：全量不看基线，所以「这个分组有没有状态行」
@@ -1294,6 +1204,8 @@ def _weekly_action_facts(
             **blank,
             "planned_files": payload_facts["planned"] if payload_facts else None,
             "plan": (payload_facts or {}).get("plan"),
+            # 用户显式要全量：`effective` 就是 full，也不存在「继续增量」这个默认项。
+            "mode_decision": decision(MODE_FULL),
             # **「全量不使用基线」不是「还没有可复用基线」**（工作包 B 的验收）。
             # 两者原先在界面上都是 `baseline_run: null`。这里给一个显式的、能被渲染的判据。
             "baseline_run": {
@@ -1331,19 +1243,26 @@ def _weekly_action_facts(
         # 少了它，确认框会退回「只知文件数」的兜底计划，而兜底版本的每片额度是按上限配的
         # （`plan_analysis` 的 `unknown_volume`），摆给用户看就是一串虚高的数。
         #
-        # 无状态行的增量**一定是首次全量**（运行侧同一条判据：`job_service` 见
-        # `run_id is None` 即 `UPGRADE_REASON_FIRST_RUN`），所以这里按全量取证。
+        # 无状态行的增量**没有可复用的结论基线**：按整窗取证（`force_full`），模式仍是
+        # 增量，原因记 `no_conclusion_baseline`（契约 1.5：不再把它说成「升成全量」）。
         if mode == MODE_INCREMENTAL and exact_config is not None:
             payload_facts = _weekly_payload_facts(exact_config.id, force_full=True)
             return {
                 **blank,
                 "planned_files": payload_facts["planned"],
                 "plan": payload_facts.get("plan"),
-                "upgrade_reason": UPGRADE_REASON_FIRST_RUN,
+                "upgrade_reason": UPGRADE_REASON_NO_CONCLUSION_BASELINE,
+                "mode_decision": decision(
+                    MODE_INCREMENTAL,
+                    upgrade_reason=UPGRADE_REASON_NO_CONCLUSION_BASELINE,
+                ),
+                "reused_run_id": reused_run_id,
                 "note": (
                     "这个分组还没有跑过，没有可复用的结论基线，"
-                    "所以没有「本次增量文件数」可言（平台会把这次增量升级为全量）。"
+                    "所以没有「本次增量文件数」可言"
+                    "（模式仍是增量，原因记为「无结论基线」；输入按整窗读）。"
                     + (payload_facts.get("note") or "")
+                    + _reuse_sentence(reused_run_id)
                 ),
             }
         return blank
@@ -1360,12 +1279,13 @@ def _weekly_action_facts(
         )
 
     run_id = _int_or_zero(getattr(state, "last_concluded_run_id", None)) or None
-    # 升级原因：用户要的就是全量时**没有**升级可言（那是他自己点的），
-    # 只有「要增量但一个可复用基线都没有」才是平台替他改的那一种。
-    if mode == MODE_INCREMENTAL and run_id is None:
-        upgrade_reason = UPGRADE_REASON_FIRST_RUN
-    else:
-        upgrade_reason = ""
+    # 升级原因：用户要的就是全量时**没有**升级可言（那是他自己点的）。要增量却没有
+    # 可复用基线时记 `no_conclusion_baseline`，但**模式仍是增量**（契约 1.5）。
+    upgrade_reason = (
+        UPGRADE_REASON_NO_CONCLUSION_BASELINE
+        if mode == MODE_INCREMENTAL and run_id is None
+        else ""
+    )
 
     if run_id is None:
         payload_facts = (
@@ -1377,10 +1297,15 @@ def _weekly_action_facts(
             "planned_files": payload_facts["planned"] if payload_facts else None,
             "plan": (payload_facts or {}).get("plan"),
             "upgrade_reason": upgrade_reason,
+            "mode_decision": decision(
+                MODE_INCREMENTAL, upgrade_reason=upgrade_reason
+            ),
+            "reused_run_id": reused_run_id,
             "note": (
                 "还没有可复用的结论基线，所以没有「本次增量文件数」可言"
-                "（平台会把这次增量升级为全量）。"
+                "（模式仍是增量，原因记为「无结论基线」；输入按整窗读）。"
                 + ((payload_facts or {}).get("note") or "")
+                + _reuse_sentence(reused_run_id)
             ),
         }
 
@@ -1389,7 +1314,14 @@ def _weekly_action_facts(
         return {
             **blank,
             "upgrade_reason": upgrade_reason,
-            "note": f"结论基线指针指向的运行 #{run_id} 已经不在了，这个分组的基线要重新建立。",
+            "mode_decision": decision(
+                MODE_INCREMENTAL, upgrade_reason=upgrade_reason
+            ),
+            "reused_run_id": reused_run_id,
+            "note": (
+                f"结论基线指针指向的运行 #{run_id} 已经不在了，这个分组的基线要重新建立。"
+                + _reuse_sentence(reused_run_id)
+            ),
         }
 
     baseline_run = {
@@ -1399,19 +1331,18 @@ def _weekly_action_facts(
     }
     facts_config_id = exact_config.id if exact_config is not None else _int_or_zero(run.target_id)
     payload_facts = _weekly_payload_facts(facts_config_id)
-    if mode == MODE_INCREMENTAL and payload_facts["scope"] == MODE_FULL:
-        upgrade_reason = payload_facts["reason"] or "runtime_scope_upgrade"
-    planned_for_effective_mode = payload_facts["planned"]
-    if upgrade_reason and exact_config is not None:
-        # 页面在看到 upgrade_reason 后会把确认结果明确转成 mode=full 再建任务；运行侧
-        # 因而会 `force_full=True`，输入是整窗，而不是上面那份增量账。预检仍要展示真实
-        # delta/补偿数，但 token 与耗时区间必须按**将要执行的全量输入**缩放。
-        # 否则就会出现「弹窗写 221 个，点继续后实际跑 1196 个」这种数量级错误。
-        full_facts = _weekly_payload_facts(exact_config.id, force_full=True)
-        if full_facts["planned"] is not None:
-            planned_for_effective_mode = full_facts["planned"]
+    suggested_full = bool(payload_facts.get("suggested_full"))
+    suggestion_reason = payload_facts.get("reason") if suggested_full else ""
+    if payload_facts.get("scope") == MODE_FULL:
+        # 有结论指针、但这份 payload 自己判成整窗（没有可做差的快照/水位线）：这确实是
+        # 一次「输入整窗」的运行，把原因折成**真实升级原因**记下来（建议原因不算）。
+        upgrade_reason = _real_upgrade_reason(
+            payload_facts.get("reason") or "runtime_scope_upgrade"
+        )
+    # `planned` 用**真实 delta**（`payload["delta_files"]` 的条数），不因为平台建议整窗
+    # 就换成整窗数：换掉的后果是弹窗写「1,620 个」而实际只跑 11 个（数量级谎话）。
     return {
-        "planned_files": planned_for_effective_mode,
+        "planned_files": payload_facts["planned"],
         "delta_files": payload_facts["delta"],
         "compensation_files": payload_facts["compensation"],
         "baseline_run": baseline_run,
@@ -1419,7 +1350,18 @@ def _weekly_action_facts(
         # 而它恰恰是最常跑的那一支）。
         "plan": payload_facts.get("plan"),
         "upgrade_reason": upgrade_reason,
-        "note": (payload_facts["note"] or "") + ambiguity_note,
+        "mode_decision": decision(
+            MODE_INCREMENTAL,
+            suggested_full=suggested_full,
+            suggestion_reason=str(suggestion_reason or ""),
+            upgrade_reason=upgrade_reason,
+        ),
+        "reused_run_id": reused_run_id,
+        "note": (
+            (payload_facts["note"] or "")
+            + ambiguity_note
+            + _reuse_sentence(reused_run_id)
+        ),
     }
 
 
@@ -1509,9 +1451,10 @@ def analysis_estimate(
         if facts.get("planned_files") is not None
         else planned_files
     )
-    # 预检已判定会升级时，页面确认后发送的是 mode=full。样本也必须选 full；继续拿
-    # incremental 的 7～47 文件运行算单文件强度，再乘 1196，会把固定提示词/汇总开销
-    # 重复放大上百次（实测约 4M 会被报成 90M）。
+    # 预检判定这次是**整窗输入**时（`upgrade_reason` = 无结论基线 / 平台重建，见契约
+    # 1.6），样本必须选 full：继续拿 incremental 的 7～47 文件运行算单文件强度，再乘
+    # 1196，会把固定提示词/汇总开销重复放大上百次（实测约 4M 会被报成 90M）。
+    # **建议整窗**（`suggested_full`）不在此列：平台真的会按增量跑，区间也按增量算。
     estimation_mode = (
         MODE_FULL
         if mode == MODE_INCREMENTAL and facts.get("upgrade_reason")
@@ -1683,8 +1626,19 @@ def analysis_estimate(
     estimate["pricing"] = _price_block(table, errors)
     # 升级原因（E8 的预检要摆的第四样）：与 `job_service._decide_effective_mode` **同一个
     # 判据**（同一份状态行的同一个指针），所以界面看到的「这次会被升级为全量」与建 job
-    # 时真正发生的事不可能分叉。全量不问这件事（用户自己要的，没有「升级」可言）。
+    # 时真正发生的事不可能分叉。**只留真实升级原因**（建议原因在 `mode_decision` 里）。
     estimate["upgrade_reason"] = facts["upgrade_reason"]
+    # 模式裁决（契约 1.6）：预检的**唯一**模式事实来源 —— 用户要什么、平台会跑什么、
+    # 平台只是建议整窗还是真的升全量、以及能不能继续增量，全在这一个对象里。
+    # 界面不必再拿 `scope` 反推（从前那正是「平台升格被读成用户要的全量」的入口）。
+    #
+    # **`profile_fallback`（分析范围回退成 all）也在里面**：预检与预估读的是
+    # `_weekly_action_facts` 拼的**同一个对象**（`_mode_decision_with` 加的那一档，
+    # 空串不写），界面读一处就够 —— 不再把「回退」当成预估里的另一个字段各摆一遍。
+    estimate["mode_decision"] = facts.get("mode_decision") or _mode_decision(mode)
+    # 同一份快照已经有可复用结论时的那条运行号（零消耗的凭据，界面据此可以直接说
+    # 「再点一次是复用」）。它同时也让「同一快照不重复付费」在**建 job 之前**可见。
+    estimate["reused_run_id"] = facts.get("reused_run_id")
     estimate["generated_at"] = _iso(datetime.now(timezone.utc))
     return estimate
 

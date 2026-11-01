@@ -800,3 +800,265 @@ def test_a_response_that_really_reports_zero_is_zero(monkeypatch):
     _patch(monkeypatch, lambda *_: FakeResponse(payload=payload))
     result = _client().complete([{"role": "user", "content": "hi"}])
     assert (result.prompt_tokens, result.completion_tokens, result.total_tokens) == (0, 0, 0)
+
+
+# --------------------------------------------------------------------------
+# 输出上限字段（max_tokens）：端点不支持时**只回退一次**
+# --------------------------------------------------------------------------
+#
+# 与提示词缓存标记那层兜底同一条纪律：省钱的优化绝不能把一次分析换没。但也不能无条件
+# 重试 —— 端点既然**点名**拒绝这个字段，去掉它重发一次就够；再重排只会拖长延迟。
+
+_REJECT_MAX_TOKENS_BODY = '{"error": {"message": "Unsupported parameter: max_tokens"}}'
+
+
+@pytest.fixture()
+def _clean_max_tokens_state():
+    """黑名单是**进程级**状态：每个用例从干净的一份开始，免得互相影响。"""
+    llm.reset_max_tokens_rejections()
+    yield
+    llm.reset_max_tokens_rejections()
+
+
+def _rejecting_handler(_method, _url, kwargs, _n):
+    if "max_tokens" in (kwargs.get("json") or {}):
+        return FakeResponse(status_code=400, body_text=_REJECT_MAX_TOKENS_BODY)
+    return FakeResponse(payload=_completion_payload("回退之后照常"))
+
+
+def test_max_tokens_is_sent_when_the_caller_passes_it(monkeypatch):
+    calls = _patch(monkeypatch, lambda *_: FakeResponse(payload=_completion_payload("x")))
+
+    _client().complete([{"role": "user", "content": "hi"}], max_tokens=4096)
+
+    assert calls[0]["json"]["max_tokens"] == 4096
+
+
+def test_a_max_tokens_rejection_is_retried_once_without_the_field(monkeypatch, _clean_max_tokens_state):
+    calls = _patch(monkeypatch, _rejecting_handler)
+
+    result = _client().complete([{"role": "user", "content": "hi"}], max_tokens=4096)
+
+    assert result.text == "回退之后照常"
+    assert len(calls) == 2, "只许回退一次：既不能直接失败，也不能反复重排"
+    assert calls[0]["json"]["max_tokens"] == 4096
+    assert "max_tokens" not in calls[1]["json"]
+    assert llm.max_tokens_rejection_reason("https://gateway.internal/v1", "gpt-4o-mini") is not None
+
+
+def test_the_rejection_is_remembered_so_the_next_call_does_not_retry(monkeypatch, _clean_max_tokens_state):
+    calls = _patch(monkeypatch, _rejecting_handler)
+    client = _client()
+
+    client.complete([{"role": "user", "content": "hi"}], max_tokens=4096)
+    client.complete([{"role": "user", "content": "hi"}], max_tokens=4096)
+
+    assert len(calls) == 3, "第二次调用又先吃了一个 400 —— 黑名单没生效"
+    assert "max_tokens" not in calls[-1]["json"]
+
+
+def test_a_400_that_does_not_mention_max_tokens_is_not_retried(monkeypatch, _clean_max_tokens_state):
+    calls = _patch(
+        monkeypatch,
+        lambda *_: FakeResponse(
+            status_code=400, body_text='{"error": {"message": "invalid model"}}'
+        ),
+    )
+
+    with pytest.raises(LLMConfigError):
+        _client().complete([{"role": "user", "content": "hi"}], max_tokens=4096)
+
+    assert len(calls) == 1, "与 max_tokens 无关的 400 重试一次也不会变好"
+    assert llm.max_tokens_rejection_reason("https://gateway.internal/v1", "gpt-4o-mini") is None
+
+
+def test_a_rejected_fallback_does_not_loop(monkeypatch, _clean_max_tokens_state):
+    """回退那一次也失败时：**不许再回退**（否则每轮都重排，延迟翻倍）。"""
+    calls = _patch(
+        monkeypatch,
+        lambda *_: FakeResponse(status_code=400, body_text=_REJECT_MAX_TOKENS_BODY),
+    )
+
+    with pytest.raises(LLMConfigError):
+        _client().complete([{"role": "user", "content": "hi"}], max_tokens=4096)
+
+    assert len(calls) == 2
+
+
+# --------------------------------------------------------------------------
+# 数值上限 vs 不认字段：`max_tokens must be <= 4096` 不该把上限永久撤掉（P2）
+# --------------------------------------------------------------------------
+#
+# 同上：400 点名 `max_tokens` 有两种含义，处置**相反** ——
+# * `Unsupported parameter: max_tokens`（不认字段）→ 去掉字段 + 拉黑；
+# * `max_tokens must be <= 4096`（认字段、嫌值大）→ 把**数值**改小，绝不拉黑。
+# 审查报告 P2 就是两者混为一类：一次数值超限让后续调用永久失去单次输出上限。
+
+_NUMERIC_LIMIT_BODY = '{"error": {"message": "max_tokens must be <= 4096"}}'
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "max_tokens must be <= 4096",
+        "max_tokens must be less than or equal to 4096",
+        "max_tokens: maximum is 4096",
+        "max_tokens at most 4096",
+        "max_tokens ... max 4096",
+        "MAX_TOKENS MUST BE <= 4,096",
+        "Invalid 'max_tokens': expected a value <= 4096, but got 8192 instead",
+        # WP30：这些是「封顶词 + 数字」的另外几种写法，WP26 漏掉后会被误判成「不认字段」。
+        "max_tokens must not exceed 4096",
+        "max_tokens cannot exceed 4096",
+        "max_tokens should not be greater than 4096",
+        "max_tokens: no more than 4096",
+        "max_tokens no greater than 4096",
+        "max_tokens: up to 4096",
+        "max_tokens is limited to 4096",
+        "max_tokens not exceeding 4096",
+        # 区间形态：必须取**上界**（4096），不能取第一个数（下界 1）。
+        "valid range of max_tokens is [1, 4096]",
+        "max_tokens range is 1..4096",
+        "max_tokens must be between 1 and 4096",
+    ],
+)
+def test_a_numeric_max_tokens_limit_is_parsed_out_of_the_error_body(detail):
+    assert llm._max_tokens_limit(detail) == 4096, detail
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "",
+        None,
+        "Unsupported parameter: max_tokens",
+        "Unknown parameter: max_tokens",
+        "max_tokens must be <= 0",
+        "max_tokens must be <= 10000000",
+        "max_tokens: 8192 > 4096, which is the maximum allowed number of output tokens",
+        "max_tokens is not supported",
+        # WP30：无封顶词、只有字段名 +「invalid」/ 只有一个数字 —— 一律不猜。
+        "max_tokens: invalid",
+        "max_tokens must not exceed the limit",
+        "valid range for max_tokens is 4096",
+        "max_tokens: [8192]",
+    ],
+)
+def test_a_body_without_a_usable_limit_is_not_mistaken_for_one(detail):
+    assert llm._max_tokens_limit(detail) is None, detail
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Unsupported parameter: max_tokens",
+        "Unknown parameter: max_tokens",
+        "unsupported parameter max_tokens",
+        "Unrecognized request argument supplied: max_tokens",
+        "Invalid parameter: max_tokens",
+        "max_tokens is not supported",
+        '{"error": {"message": "extra fields not permitted", "param": "max_tokens"}}',
+    ],
+)
+def test_field_level_wording_is_recognized_as_unsupported(detail):
+    """只有「字段级：不认识/不支持」才允许撤字段；见 `_max_tokens_unsupported`。"""
+    assert llm._max_tokens_unsupported(detail) is True, detail
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "",
+        None,
+        "max_tokens: invalid",
+        "max_tokens must not exceed 4096",
+        "max_tokens must be <= 0",
+        "Unsupported parameter: top_p",
+        "invalid model",
+        "Invalid 'max_tokens': expected a value <= 4096, but got 8192 instead",
+        "max_tokens: 8192 > 4096, which is the maximum allowed number of output tokens",
+    ],
+)
+def test_a_value_level_or_unrelated_400_is_not_field_level_unsupported(detail):
+    """`max_tokens: invalid` 这类抱怨不是「字段不存在」—— 当成后者会永久撤掉封顶。"""
+    assert llm._max_tokens_unsupported(detail) is False, detail
+
+
+def test_a_numeric_limit_400_raises_the_value_limit_error():
+    # 异常本身携带上限：`_complete_with_max_tokens` 据此算 `min(请求值, limit)`，
+    # 不必再从错误文本里二次解析（文本已被脱敏，重新解析容易失配）。
+    with pytest.raises(llm.LLMValueLimitError) as excinfo:
+        _client()._raise_for_status(
+            FakeResponse(status_code=400, body_text=_NUMERIC_LIMIT_BODY),
+            purpose="模型调用",
+        )
+
+    assert excinfo.value.parameter == "max_tokens"
+    assert excinfo.value.limit == 4096
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "max_tokens must not exceed 4096",
+        "valid range of max_tokens is [1, 4096]",
+    ],
+)
+def test_a_not_exceed_or_range_limit_400_also_raises_the_value_limit_error(detail):
+    """WP30：这两类措辞以前解析不出上限 → 被误判成「不认字段」→ 去字段 + 拉黑。"""
+    with pytest.raises(llm.LLMValueLimitError) as excinfo:
+        _client()._raise_for_status(
+            FakeResponse(status_code=400, body_text=detail), purpose="模型调用"
+        )
+
+    assert excinfo.value.parameter == "max_tokens"
+    assert excinfo.value.limit == 4096
+
+
+@pytest.mark.parametrize(
+    "detail",
+    ["Unknown parameter: max_tokens", "unsupported parameter max_tokens"],
+)
+def test_only_field_level_wording_raises_the_unsupported_parameter_error(detail):
+    with pytest.raises(llm.LLMUnsupportedParameterError) as excinfo:
+        _client()._raise_for_status(
+            FakeResponse(status_code=400, body_text=detail), purpose="模型调用"
+        )
+
+    assert excinfo.value.parameter == "max_tokens"
+
+
+def test_a_max_tokens_400_without_limit_or_field_word_stays_a_plain_config_error():
+    """`max_tokens: invalid`：**不**去字段、**不**拉黑 —— 原样抛配置错误即可。
+
+    撤字段是永久动作（端点进黑名单），只配给端点明确说「不认识这个字段」的响应；
+    把「值/格式不对」也塞进去会掩盖真正原因，还顺带永久撤掉单次输出上限（P2）。
+    """
+    with pytest.raises(LLMConfigError) as excinfo:
+        _client()._raise_for_status(
+            FakeResponse(status_code=400, body_text="max_tokens: invalid"),
+            purpose="模型调用",
+        )
+
+    assert not isinstance(
+        excinfo.value, (llm.LLMUnsupportedParameterError, llm.LLMValueLimitError)
+    ), "既没上限也没字段级措辞：不许归到两条回退路径里的任何一条"
+    assert "max_tokens: invalid" in str(excinfo.value), "端点原话要留给用户看"
+
+
+def test_a_numeric_limit_is_retried_with_the_clamped_value(monkeypatch, _clean_max_tokens_state):
+    def handler(_method, _url, kwargs, _n):
+        if (kwargs.get("json") or {}).get("max_tokens", 0) > 4096:
+            return FakeResponse(status_code=400, body_text=_NUMERIC_LIMIT_BODY)
+        return FakeResponse(payload=_completion_payload("降级之后照常"))
+
+    calls = _patch(monkeypatch, handler)
+
+    result = _client().complete([{"role": "user", "content": "hi"}], max_tokens=8192)
+
+    assert result.text == "降级之后照常"
+    assert [call["json"].get("max_tokens") for call in calls] == [8192, 4096]
+    assert (
+        llm.max_tokens_rejection_reason("https://gateway.internal/v1", "gpt-4o-mini")
+        is None
+    ), "数值超限拉黑 = 后续调用永久失去输出上限（P2）"

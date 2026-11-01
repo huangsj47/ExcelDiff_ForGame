@@ -13,8 +13,11 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models.ai_analysis import (
@@ -29,7 +32,10 @@ from models.ai_analysis import (
     AiAnalysisTrace,
     AiProjectAnalysisConfig,
 )
+from models.ai_analysis.anomaly import AiAnalysisIgnoredFingerprint
 from models.ai_analysis.project_config import (
+    ANALYSIS_PROFILE_CHOICES,
+    DEFAULT_ANALYSIS_PROFILE,
     DEFAULT_BUDGET_PERIOD,
     DEFAULT_MAX_ANALYSIS_ROUNDS,
     DEFAULT_MAX_ANOMALIES_PER_RUN,
@@ -187,6 +193,8 @@ CONFIG_NEW_COLUMNS = (
     "budget_period",
     "budget_token_limit",
     "budget_cost_limit",
+    # 分析 profile（2026-11）。老行 NULL → `resolved()` 读成 `tables`（只分析配表）。
+    "analysis_profile",
 )
 
 RUN_NEW_COLUMNS = (
@@ -306,7 +314,7 @@ def test_the_startup_check_sees_the_columns_the_migration_had_not_written(old_db
         "ai_analysis_job": AiAnalysisJob.__table__,
     }
     assert missing_columns(old_db, tables=tables) == {
-        "ai_analysis_anomaly": ["claims"],
+        "ai_analysis_anomaly": ["claims", "suppressed_previous"],
         "ai_analysis_job": ["planned_estimate_note", "progress_json", "progress_updated_at"],
     }
     _migrate_ai_analysis_columns(old_db, lambda *a, **k: None)
@@ -380,6 +388,42 @@ def test_migration_keeps_existing_rows_and_leaves_new_columns_null(old_db):
     assert row.max_analysis_rounds is None
 
 
+def test_the_profile_column_migration_is_idempotent_on_an_old_db(old_db):
+    """老库补 `analysis_profile` 一列：加列后老行 NULL → `tables`，第二遍不报失败。
+
+    启动时每次都会跑一遍迁移（`apply_schema_migrations`），所以「第一遍成功、之后每次
+    ALTER 都因列已存在而告警」这种半坏状态必须在这里拦住 —— 它不会让任何请求失败，
+    只是日志里永远躺着一条迁移失败，而下一次真正出问题时没人会去读那一行。
+    """
+    from services.db_migration_service import _migrate_ai_analysis_columns
+
+    with old_db.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO ai_project_analysis_config (id, project_id) VALUES (3, 9)"
+        )
+
+    messages: list[str] = []
+
+    def _log(*args, **_kwargs):
+        messages.append(" ".join(str(arg) for arg in args))
+
+    _migrate_ai_analysis_columns(old_db, _log)
+    assert "analysis_profile" in _columns(old_db, "ai_project_analysis_config")
+    messages.clear()
+
+    _migrate_ai_analysis_columns(old_db, _log)
+
+    assert "analysis_profile" in _columns(old_db, "ai_project_analysis_config")
+    failures = [message for message in messages if "失败" in message]
+    assert not failures, f"第二遍迁移报了失败：{failures}"
+
+    # 老行拿到的就是 NULL（迁移不带 DEFAULT 子句），而 `resolved()` 把它读成 `tables`。
+    row = old_db.session.query(AiProjectAnalysisConfig).filter_by(id=3).first()
+    assert row is not None
+    assert row.analysis_profile is None, "老行不该被回填 —— 回填会把「NULL = 默认」的口径改掉"
+    assert row.resolved()["analysis_profile"] == "tables"
+
+
 def test_migration_skips_a_missing_table(tmp_path):
     """库更老、表还没建出来时不能抛异常（`create_all` 会先建表，但顺序不该被依赖）。"""
     from services.db_migration_service import _migrate_ai_analysis_columns
@@ -425,6 +469,155 @@ def test_the_migration_is_wired_into_startup():
 
     source = pyinspect.getsource(db_migration_service.apply_schema_migrations)
     assert "_migrate_ai_analysis_columns" in source
+
+
+# ==========================================================================
+# 人工忽略台账（P0 处置闭环）
+#
+# 这张表是**新表**，按理 `create_all()` 会建出来；但「保留数据的老库」上，加列/加索引
+# 还得走迁移，而读基线那一步就按 `target_key` 查它 —— 表不存在不是「查不到」，是
+# `no such table`，而它发生在**一轮分析跑到一半**（整轮结论作废）。
+# ==========================================================================
+
+_IGNORED_LEDGER_TABLE = AiAnalysisIgnoredFingerprint.__table__.name
+
+
+def _table_names(stub) -> set:
+    return set(inspect(stub.engine).get_table_names())
+
+
+def test_the_ignored_ledger_migration_creates_the_table_and_its_columns(old_db):
+    """建表 + 列与模型**完全相等**（漏一列的表现是读基线时 `no such column`）。"""
+    from services.db_migration_service import _migrate_ai_ignored_fingerprint_table
+
+    _migrate_ai_ignored_fingerprint_table(old_db, lambda *a, **k: None)
+
+    assert _IGNORED_LEDGER_TABLE in _table_names(old_db)
+    assert _columns(old_db, _IGNORED_LEDGER_TABLE) == set(
+        AiAnalysisIgnoredFingerprint.__table__.columns.keys()
+    )
+
+
+def test_the_ignored_ledger_migration_creates_the_unique_key_and_indexes(old_db):
+    """唯一键 `(target_key, fingerprint)` 与两个普通索引都必须真的在库里。
+
+    唯一键是台账身份的地基：同一个分组里同一条指纹只能有一行，否则「忽略」这件事
+    会有两份互相矛盾的时间戳，而读侧取哪一行都像是对的。
+
+    这里断言的是**索引**而不是 `UniqueConstraint`：老库上补唯一性只能走
+    `CREATE UNIQUE INDEX`（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`），
+    模型层也用同名唯一索引，两条路才落成同一个对象。
+    """
+    from services.db_migration_service import _migrate_ai_ignored_fingerprint_table
+
+    _migrate_ai_ignored_fingerprint_table(old_db, lambda *a, **k: None)
+
+    indexes = {
+        item["name"]: item
+        for item in inspect(old_db.engine).get_indexes(_IGNORED_LEDGER_TABLE)
+    }
+    unique = indexes.get("uq_ai_ignored_fingerprint_target")
+    assert unique is not None, f"唯一键不在：{sorted(indexes)}"
+    assert bool(unique.get("unique")) is True
+    assert list(unique.get("column_names") or ()) == ["target_key", "fingerprint"]
+    assert {
+        "ix_ai_analysis_ignored_fingerprint_project_id",
+        "ix_ai_analysis_ignored_fingerprint_last_run_id",
+    }.issubset(indexes), f"索引不在：{sorted(indexes)}"
+
+
+def test_the_ignored_ledger_migration_is_idempotent(old_db):
+    """启动时每次都会跑：第二遍必须无害、且**不报失败**。
+
+    半坏状态（第一遍成功、之后每次启动都 ALTER 一次并失败）不会让任何请求红，
+    只在日志里留一条永远躺着的迁移失败 —— 下一次真正出问题时没人会去读它。
+    """
+    from services.db_migration_service import _migrate_ai_ignored_fingerprint_table
+
+    messages: list[str] = []
+
+    def _log(*args, **_kwargs):
+        messages.append(" ".join(str(arg) for arg in args))
+
+    _migrate_ai_ignored_fingerprint_table(old_db, _log)
+    before = _columns(old_db, _IGNORED_LEDGER_TABLE)
+    messages.clear()
+
+    _migrate_ai_ignored_fingerprint_table(old_db, _log)
+
+    assert _columns(old_db, _IGNORED_LEDGER_TABLE) == before
+    failures = [message for message in messages if "失败" in message]
+    assert not failures, f"第二遍迁移报了失败：{failures}"
+
+
+def test_the_ignored_ledger_migration_is_wired_into_startup():
+    """挂了才算数 —— 没挂的话表再对，老库上也永远不会有它。"""
+    import inspect as pyinspect
+
+    from services import db_migration_service
+
+    source = pyinspect.getsource(db_migration_service.apply_schema_migrations)
+    assert "_migrate_ai_ignored_fingerprint_table" in source
+
+
+def test_the_ledger_follows_its_run_and_rejects_a_duplicate_identity():
+    """真实库上两条性质：**唯一键真的拦重复**、**删运行真的带走台账行**。
+
+    后者靠数据库级的 `ON DELETE CASCADE`（删运行的三条路径都不在本工作包的所有权内，
+    应用层补不上 DELETE；它们又都是批量 DELETE，ORM 事件不触发）。这里用一个只引用
+    本用例自己造的行来验，不去碰别的用例的数据。
+    """
+    from app import app, create_tables, db
+
+    with app.app_context():
+        create_tables()
+        from models import Project
+
+        owner = Project(code=f"P{uuid.uuid4().hex[:8]}", name="台账")
+        db.session.add(owner)
+        db.session.flush()
+        run = AiAnalysisRun(
+            project_id=owner.id,
+            target_type="weekly",
+            target_key=f"grp-{uuid.uuid4().hex[:8]}",
+            status="succeeded",
+            conclusion_structured=True,
+        )
+        db.session.add(run)
+        db.session.flush()
+        db.session.add(
+            AiAnalysisIgnoredFingerprint(
+                project_id=owner.id,
+                target_key=run.target_key,
+                fingerprint="a" * 16,
+                title="一条被忽略的误报",
+                file_path="config/道具表.xlsx",
+                last_run_id=run.id,
+            )
+        )
+        db.session.commit()
+        run_id = run.id
+        target_key = run.target_key
+
+        duplicate = AiAnalysisIgnoredFingerprint(
+            project_id=owner.id,
+            target_key=target_key,
+            fingerprint="a" * 16,
+            last_run_id=run_id,
+        )
+        db.session.add(duplicate)
+        with pytest.raises(IntegrityError):
+            db.session.commit()
+        db.session.rollback()
+
+        assert AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).count() == 1
+        # 删运行 → 台账跟着走（DB 级级联；SQLite 的 PRAGMA 在测试库里是开着的）。
+        db.session.query(AiAnalysisRun).filter_by(id=run_id).delete()
+        db.session.commit()
+        assert AiAnalysisIgnoredFingerprint.query.filter_by(target_key=target_key).count() == 0, (
+            "运行删了、台账还留着 —— 那条被忽略的结论已经没有原始行可以解释了，"
+            "它却还会在下一轮继续挡着同一条误报"
+        )
 
 
 # ==========================================================================
@@ -658,6 +851,9 @@ def test_resolved_fills_every_null_with_a_default():
     assert resolved["api_model"] == ""
     assert resolved["project_knowledge"] == ""
     assert resolved["model_price_table"] == ""
+    # 分析 profile 的默认值是 `tables`（只回答本批配表改动的风险）。这里同样写死字面量：
+    # 「默认值被改动时要有人看见」正是这行断言的意义。
+    assert resolved["analysis_profile"] == "tables"
 
 
 def test_resolved_never_returns_none_for_any_key():
@@ -782,6 +978,36 @@ def test_resolved_survives_a_string_in_an_integer_column():
     assert config.resolved()["max_tool_requests"] == 7
 
 
+def test_resolved_reads_a_missing_or_dirty_profile_as_tables():
+    """**老库上的新列是 NULL，必须读成 `tables`**（契约 §1.7）。
+
+    三种输入都会走到这里，而它们的共同点是**没有值域内的取值**：老行的 NULL、
+    手工改库改出来的怪值、以及将来可能被删掉的一档。全都落到保守那一侧 ——
+    认不出来的值若按 `all` 跑，等于悄悄多过 4 个配表项目里拿不到证据的维度。
+    """
+    assert AiProjectAnalysisConfig(project_id=1).resolved()["analysis_profile"] == "tables"
+
+    for raw in (None, "", "   ", "everything", "tables_v2", 1):
+        config = AiProjectAnalysisConfig(project_id=1, analysis_profile=raw)
+        assert config.resolved()["analysis_profile"] == "tables", f"analysis_profile={raw!r}"
+
+
+def test_resolved_keeps_a_declared_profile():
+    """反向自检：存过的档不能被默认值吃掉 —— 那 `all` 这个档就永远打不开。
+
+    大小写与首尾空格按既有枚举列的口径归一（值与 `prompt_cache` 那两栏同一套处理）。
+    """
+    assert (
+        AiProjectAnalysisConfig(project_id=1, analysis_profile="all").resolved()["analysis_profile"]
+        == "all"
+    )
+    assert (
+        AiProjectAnalysisConfig(project_id=1, analysis_profile=" ALL ")
+        .resolved()["analysis_profile"]
+        == "all"
+    )
+
+
 # ==========================================================================
 # 默认值的唯一事实源
 # ==========================================================================
@@ -827,6 +1053,33 @@ def test_the_prompt_cache_value_domains_do_not_drift():
     assert prompt_cache.resolve_cache_marker(
         DEFAULT_PROMPT_CACHE_MODE, DEFAULT_PROMPT_CACHE_FORMAT
     ) is None
+
+
+def test_the_profile_value_domain_does_not_drift():
+    """**防漂移**：`analysis_profile` 的值域有三份，必须一致。
+
+    三处分别是模型层（`resolved()` 的兜底）、配置规则表（保存时的校验与界面选项）、
+    以及 `skill_contract`（取值 → 生效的维度清单）。前两份在同一个进程里，第三份
+    **刻意独立**：`skill_contract` 要被 skill 校验器直接 import，不能拖进模型层。
+
+    不一致的后果是静默的：校验允许存 `all`，而维度层认不出来 → 按 `tables` 跑，
+    一整个 profile 静默失效，报告里看不出来（少的那 4 个维度本来就是「没证据」）。
+    """
+    from services.ai import skill_contract
+    from services.ai.endpoint_service import FIELD_DEFAULTS, FIELD_RULES
+
+    assert tuple(ANALYSIS_PROFILE_CHOICES) == ("tables", "all")
+    assert DEFAULT_ANALYSIS_PROFILE == "tables"
+    assert tuple(skill_contract.ANALYSIS_PROFILES) == tuple(ANALYSIS_PROFILE_CHOICES)
+    assert skill_contract.DEFAULT_ANALYSIS_PROFILE == DEFAULT_ANALYSIS_PROFILE
+    assert FIELD_RULES["analysis_profile"].choices == ANALYSIS_PROFILE_CHOICES
+    assert FIELD_DEFAULTS["analysis_profile"] == DEFAULT_ANALYSIS_PROFILE
+    # 模型层的 `resolved()` 也要落在同一档（这条同时被
+    # `test_field_defaults_agree_with_the_model_layer` 从另一侧守着）。
+    assert (
+        AiProjectAnalysisConfig(project_id=1).resolved()["analysis_profile"]
+        == DEFAULT_ANALYSIS_PROFILE
+    )
 
 
 def test_resolved_reads_an_unknown_prompt_cache_value_as_the_conservative_default():

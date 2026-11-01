@@ -100,6 +100,23 @@ PROMPT_CACHE_FORMAT_CHOICES = ("none", "anthropic")
 DEFAULT_PROMPT_CACHE_MODE = "auto"
 DEFAULT_PROMPT_CACHE_FORMAT = "none"
 
+# --- 分析 profile（2026-11，见 docs/AI风险分析改造-执行契约-2026-11-01.md §1.7）---
+# 「本次分析回答哪个问题」：`tables` = 只回答本批配表改动的风险（默认），
+# `all` = 出厂那 9 个维度全过（含代码 / 流程）。
+#
+# 默认收窄到 `tables` 的理由**不是省钱**：同快照的全量与增量实测只差 2%（方案 §4.9），
+# 贵的是输出。真问题是 9 个维度里有 4 个（`module_coupling` / `code_logic` /
+# `version_branch` / `process`）在配表项目里**拿不到证据**，却照样占着同一份结论条数
+# 上限与同一批取证额度 —— 报告里那些「本维度无证据」的段落，读的人分不清它是
+# 「看过、没风险」还是「根本没数据」。
+#
+# 值域在这里、`services/ai/endpoint_service.FIELD_RULES`（校验）与
+# `services/ai/skill_contract`（维度清单）各有一份：模型层不 import 服务层，
+# `skill_contract` 也不 import 模型层（它要被独立的 skill 校验器直接用）。
+# 漂移由 `tests/test_ai_models_and_migration.py` 的一条防漂移用例钉住。
+ANALYSIS_PROFILE_CHOICES = ("tables", "all")
+DEFAULT_ANALYSIS_PROFILE = "tables"
+
 # 取值范围。前后端共用同一组边界：界面上的 min/max 与服务端的校验必须一致，否则会出现
 # 「前端允许填、后端悄悄改掉」这种用户看不懂的行为。
 MAX_ANALYSIS_ROUNDS_RANGE = (1, 30)
@@ -280,6 +297,16 @@ def _budget_period_or_default(value) -> str:
     return text if text in BUDGET_PERIOD_CHOICES else DEFAULT_BUDGET_PERIOD
 
 
+def _choice_or_default(value, choices: tuple[str, ...], fallback: str) -> str:
+    """读一个值域固定的枚举列：NULL / 脏值 / 大小写与空格不对 → 默认值。
+
+    与 `_int_or` 同一条纪律：**读不动就用默认，不抛**。这里的调用方是配置读取，
+    抛出去会让整个项目读不出配置（连「哪一栏不认识」都说不出来）。
+    """
+    text = str(value or "").strip().lower()
+    return text if text in choices else fallback
+
+
 def _cache_choice_or_default(value, choices: tuple[str, ...], fallback: str) -> str:
     """读一个缓存标记相关的取值：不在值域里就用默认。
 
@@ -287,8 +314,7 @@ def _cache_choice_or_default(value, choices: tuple[str, ...], fallback: str) -> 
     手工改库改出来的怪值、将来被删掉的一个选项，全都退化成「不发标记」——
     而不会退化成「发一个谁也不认识的标记」。
     """
-    text = str(value or "").strip().lower()
-    return text if text in choices else fallback
+    return _choice_or_default(value, choices, fallback)
 
 
 class AiProjectAnalysisConfig(db.Model):
@@ -309,6 +335,11 @@ class AiProjectAnalysisConfig(db.Model):
     api_model = db.Column(db.String(200))
 
     # --- 分析策略 ---
+    # 本次分析要过哪一份维度清单（`tables` / `all`，见文件上方常量）。
+    # 加列迁移不带 DEFAULT 子句，老行是 NULL —— 而 NULL 经 `resolved()` 读出来正是
+    # `tables` 那个保守默认值，所以**不需要回填**（回填反而会把这句「NULL = 默认」
+    # 的口径在某次迁移里悄悄改掉）。
+    analysis_profile = db.Column(db.String(20), nullable=True, default=DEFAULT_ANALYSIS_PROFILE)
     max_analysis_rounds = db.Column(db.Integer, default=DEFAULT_MAX_ANALYSIS_ROUNDS)
     max_tool_requests = db.Column(db.Integer, default=DEFAULT_MAX_TOOL_REQUESTS)
     prompt_char_budget = db.Column(db.Integer, default=DEFAULT_PROMPT_CHAR_BUDGET)
@@ -386,6 +417,11 @@ class AiProjectAnalysisConfig(db.Model):
                 self.weekly_interval_minutes, DEFAULT_WEEKLY_INTERVAL_MINUTES
             ),
             "max_files_per_run": _int_or(self.max_files_per_run, DEFAULT_MAX_FILES_PER_RUN),
+            # 分析 profile：NULL（老行）/ 手工改库的怪值一律读成 `tables`（只分析配表）——
+            # 认不出来的档按 `all` 跑等于悄悄多过 4 个拿不到证据的维度，见上方常量注释。
+            "analysis_profile": _choice_or_default(
+                self.analysis_profile, ANALYSIS_PROFILE_CHOICES, DEFAULT_ANALYSIS_PROFILE
+            ),
             "prompt_template": self.prompt_template or "",
             "api_base_url": (self.api_base_url or "").strip(),
             "api_model": (self.api_model or "").strip(),

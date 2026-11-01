@@ -1105,6 +1105,42 @@ def ai_run_report_md(run_id):
         for row in anomalies_of_run(run.id)
         if row.fingerprint
     }
+    # 「模式裁决」那一行：解释元信息里「分析范围」是谁定的 —— 用户选的全量 / 没有可用
+    # 基线 / 平台建议整窗重跑而这次仍是增量。资料全取**已有的账**，不重跑判定：
+    # `run.scope`（输入口径）+ `request_payload` 里冻结的 `policy` / `baseline`
+    # （契约 1.2 / 1.4）+ job 行上的 `requested_mode` / `upgrade_reason`。
+    # 措辞在 `report_document.mode_decision_text`（给人看的字只有一份）；这里只取数与接线。
+    # 取不到时传 `None`：报告与以前**逐字相同**（契约 1.9 要求这个参数可选）。
+    #
+    # **只有周版本才有「模式裁决」**：提交分析是「把这个提交的改动看一遍」，scope 天然是
+    # full（`analyze_commit` 建 run 时写死），没有增量/基线这回事 —— 给它印一句
+    # 「全量（无可用基线）」是在解释一个不存在的问题。
+    #
+    # `request_payload` 在下面两处都要用（模式裁决 + 输入范围），解析一次即可。
+    request_payload = _payload_of(run.request_payload)
+    mode_decision = None
+    if run.target_type == "weekly":
+        job = (
+            job_model.AiAnalysisJob.query
+            .filter(job_model.AiAnalysisJob.run_id == run.id)
+            .order_by(job_model.AiAnalysisJob.id.desc())
+            .first()
+        )
+        mode_decision = report_document.mode_decision_text(
+            scope=run.scope,
+            policy=request_payload.get("policy"),
+            baseline=request_payload.get("baseline"),
+            requested_mode=getattr(job, "requested_mode", ""),
+            upgrade_reason=getattr(job, "upgrade_reason", ""),
+        ) or None
+    # 本次输入的**范围口径**（审查报告 P2）：默认 `profile=tables` 时「分析范围：全量」
+    # 只是「整个窗口比一遍」的口径，输入里却只有配置表仓库 —— 这一句必须由程序写进
+    # 元信息，不靠模型在正文里提一句「这次只看配表仓库」（它会漏、会改口）。
+    # 只读这条运行**自己冻结的** `request_payload`：现查项目当前仓库清单既多一次库，
+    # 又会与这份报告当时的输入对不上。取不到时两格都是空串 → 文档与以前逐字相同。
+    analysis_profile_label, repository_scope = report_document.input_scope_labels(
+        request_payload
+    )
     markdown = report_document.build_report_markdown(
         project_label=str(getattr(project, "name", "") or ""),
         target_label=target_label,
@@ -1128,6 +1164,12 @@ def ai_run_report_md(run_id):
         suppressed_count=int(payload.get("suppressed_count") or 0),
         dimension_labels=dimension_labels,
         dispositions=dispositions,
+        # 「模式裁决」那一行（见上面那段）：空 → 不出现这一行。
+        mode_decision=mode_decision,
+        # 「分析范围口径」「纳入仓库」两行（见上面那段）：空 → 不出现这两行。
+        # 它们是**程序写死的**输入范围，与「分析范围」和覆盖数字连起来读才不会被误解。
+        analysis_profile_label=analysis_profile_label,
+        repository_scope=repository_scope,
         # 覆盖账本（哪些文件进了本次输入、哪些真的取到过证据、还缺什么）。**这一行是必需的**：
         # 不传就没有「覆盖与缺口」那几行，而「分析范围：全量」会被读成「整个版本都看过了」
         # （实测一次周版本分析只取到过 60/996 个文件的证据，见 services/ai/coverage_ledger.py）。
@@ -1335,14 +1377,72 @@ def ai_run_delete(run_id):
 # 实际传播靠的是下一轮读上一轮的行，不是这一次的写入。
 
 
-def _anomaly_payload(rows):
-    """一次运行的全部结论行 + 处置口径。中文标签在服务端给，界面不自己映射。"""
+def _anomaly_row_flags(run) -> dict:
+    """这条运行的结论行上**只在载荷里**的那两个标记：`out_of_scope` / `suppressed_previous`。
+
+    ## 为什么从 `response_payload` 合并，而不是给表加列
+
+    `out_of_scope` 是 `result_payload` 按本批次 `allowed_paths` 算出来的**这一次运行**
+    的判定，已经随结论载荷原样落库；`suppressed_previous` 虽然有列（P0 处置闭环加的），
+    但它是「落库之后才补写」的那一半 —— 写入侧接上之前、以及本次改动之前的运行，
+    只有载荷里才有它。两处都要读，面板的「范围外」与「曾被忽略」两个分组才不会长期
+    空着（空着看起来像这两类条目根本不存在）。
+
+    优先级：**列上的值优先**（它是这一列的权威来源），载荷只补 `True`。payload 取不到
+    （老运行没有载荷 / 存坏了）时一律 False —— 老响应形状只多这一个字段，分组不会把
+    普通条目误分进去。
+
+    ## 为什么按指纹而不是按下标
+
+    这一层读的是**库里的行**，顺序来自 `anomalies_of_run` 的严重度排序；载荷里那份是
+    `result_payload` 当时的顺序。按下标对会在任何一次排序差异上把标记串到别的条目上
+    （而且串得很安静）。指纹是两边唯一天然一致的身份。
+    """
+    if run is None or not run.response_payload:
+        return {}
+    try:
+        payload = json.loads(run.response_payload)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    flags = {}
+    for item in payload.get("anomalies") or ():
+        if not isinstance(item, dict):
+            continue
+        fingerprint = str(item.get("fingerprint") or "")
+        if not fingerprint:
+            continue
+        flags[fingerprint] = {
+            "out_of_scope": bool(item.get("out_of_scope")),
+            "suppressed_previous": item.get("suppressed_previous") is True,
+        }
+    return flags
+
+
+def _anomaly_payload(rows, *, run=None):
+    """一次运行的全部结论行 + 处置口径。中文标签在服务端给，界面不自己映射。
+
+    `run` 用来把**只在载荷里**的那两个标记（范围外 / 曾被忽略）合并进每一行，见
+    `_anomaly_row_flags`。不传时行为不变（老调用方不需要知道这件事）。
+    """
     counts = {item: 0 for item in DISPOSITIONS}
     for row in rows:
         key = row.disposition or DEFAULT_DISPOSITION
         counts[key] = counts.get(key, 0) + 1
+    flags_by_fingerprint = _anomaly_row_flags(run)
+    anomalies = []
+    for row in rows:
+        item = row.to_dict()
+        flags = flags_by_fingerprint.get(str(row.fingerprint or ""), {})
+        # 列上的值优先；载荷只负责把 `True` 补上（理由见 `_anomaly_row_flags`）。
+        item["out_of_scope"] = bool(item.get("out_of_scope") or flags.get("out_of_scope"))
+        item["suppressed_previous"] = bool(
+            item.get("suppressed_previous") or flags.get("suppressed_previous")
+        )
+        anomalies.append(item)
     return {
-        "anomalies": [row.to_dict() for row in rows],
+        "anomalies": anomalies,
         "counts": counts,
         "total": len(rows),
         "dispositions": [{"value": item, "label": DISPOSITION_LABELS[item]} for item in DISPOSITIONS],
@@ -1380,7 +1480,7 @@ def ai_run_anomalies(run_id):
     if error is not None:
         return error
     rows = anomalies_of_run(run_id, disposition=wanted)
-    return jsonify({"success": True, "run_id": run_id, **_anomaly_payload(rows)}), 200
+    return jsonify({"success": True, "run_id": run_id, **_anomaly_payload(rows, run=run)}), 200
 
 
 @ai_analysis_bp.route("/ai-analysis/anomalies/<int:anomaly_id>/disposition", methods=["POST"])
@@ -1470,7 +1570,7 @@ def ai_run_anomalies_disposition(run_id):
             "success": True,
             "changed": changed,
             "note_truncated": note_was_truncated(payload.get("note", "")),
-            **_anomaly_payload(anomalies_of_run(run_id)),
+            **_anomaly_payload(anomalies_of_run(run_id), run=run),
         }
     ), 200
 

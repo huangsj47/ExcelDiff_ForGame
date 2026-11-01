@@ -282,8 +282,10 @@ def _collect_project_sub_skills(pack_dir: Path) -> tuple[SkillDocument, ...]:
     return tuple(documents)
 
 
-def _project_dimensions(project_code: str, repo_root: Path):
-    """读项目声明的检查维度清单（失败时回落到平台默认那一份）。
+def _project_dimensions(
+    project_code: str, repo_root: Path, project_id: int | None = None, *, profile: str | None = None
+):
+    """读项目生效的检查维度清单（失败时回落到平台默认那一份）。
 
     **函数内导入**：`project_facts` 在模块级 import 了本模块（`project_pack_slug`、
     `resolve_projects_root`、`safe_join`——它要按同一套规则定位知识包），顶层互相导入
@@ -292,10 +294,35 @@ def _project_dimensions(project_code: str, repo_root: Path):
 
     `repo_root` 走的是 `resolve_projects_root` 那条既有通道（含 `SKILL_PROJECTS_ROOT`
     环境变量），所以测试用临时目录当项目根时读到的也是那一份。
+
+    `profile` 是**调用方手上生效的档位**（周版本回退 `all` / 单提交 `all`），非 `None`
+    时优先用它：配置里的档位与 payload 实际生效的档位可能已经不是同一档（P2-1）。
+    `project_id` 只在没有 `profile` 时用来回头读配置。
     """
     from services.ai import project_facts
 
-    return project_facts.dimensions(project_code, repo_root=repo_root)
+    return project_facts.dimensions(
+        project_code, repo_root=repo_root, project_id=project_id, profile=profile
+    )
+
+
+def _project_id_for_code(project_code: str) -> int | None:
+    """按项目代号查项目 id（查不到 / 没有库会话时返回 `None`）。
+
+    **为什么在 skill 加载这一层读库**：`analysis_profile` 是项目配置里的一行，而
+    `load_skills` 的入参只有项目代号 —— 不查这一下，「默认 profile=tables」就永远
+    落不到 `LoadedSkills.dimensions` 上（它是提示词、分工、报告未归类判定的唯一来源）。
+    查不到返回 `None`、由 `project_facts.dimensions` 沿用旧行为（出厂 9 个维度）：
+    `skill_revision`、知识包校验、离线脚本都会在没有 app context 的情况下加载 skill，
+    那些路径不该因为「读不到配置」而失败。
+    """
+    try:
+        from models import Project
+
+        row = Project.query.filter_by(code=project_code).first()
+        return int(row.id) if row is not None else None
+    except Exception:  # noqa: BLE001 —— 读不到项目行不是「skill 加载失败」
+        return None
 
 
 def describe_load_error(exc: Exception, repo_root: Path) -> str:
@@ -336,6 +363,7 @@ def load_skills(
     *,
     project_code: str | None = None,
     projects_root: Path | None = None,
+    profile: str | None = None,
 ) -> LoadedSkills:
     """加载平台 skill，以及（若给了项目）该项目的专属知识。
 
@@ -346,8 +374,12 @@ def load_skills(
     `project_code` 为空时只加载平台 skill —— 这是「项目还没配 skill」的正常情形，
     不是错误。
 
-    检查维度清单（`LoadedSkills.dimensions`）来自项目声明；项目没声明时是平台出厂的那
-    九个，且**提示词里一个字节都不多**（见 `is_platform_default_dimensions`）。
+    检查维度清单（`LoadedSkills.dimensions`）来自项目声明；项目没声明时按 `profile`
+    （不给时读项目配置的 `analysis_profile`）选：`tables`（默认）= 5 个配表维度，
+    `all` = 平台出厂的那九个。
+    `all` 时**提示词里一个字节都不多**（见 `is_platform_default_dimensions`）；而
+    `tables` 那一份与出厂不同，会追加一节「本项目适用的维度清单」—— 这正是本次改造的
+    目的：只过配表维度，而不是让 4 个拿不到证据的代码/流程维度继续抢同一份额度。
     """
     # 承载契约的那一份缺失 = 坏掉的部署，不是「没配」。它同时也是提示词里报告格式的
     # 唯一来源，少了它模型会自由发挥出一份服务端认不出的报告，所以照旧硬失败。
@@ -412,7 +444,12 @@ def load_skills(
                 project_references = _collect_references(pack_dir / "references")
                 project_skills = _collect_project_sub_skills(pack_dir)
             # 目录不存在不是错误：项目可能还没维护过自己的 skill。
-        declaration = _project_dimensions(project_code, repo_root)
+        declaration = _project_dimensions(
+            project_code,
+            repo_root,
+            None if profile is not None else _project_id_for_code(project_code),
+            profile=profile,
+        )
         dimensions = declaration.dimensions
         dimension_warning = declaration.warning
         if dimension_warning:
