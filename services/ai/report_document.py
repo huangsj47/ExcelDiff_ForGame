@@ -162,7 +162,8 @@ def render_structured_report(
     for item in ordered:
         identifier = item["id"]
         lines.extend([
-            f"## {identifier} · {severity_label(item['severity'])} · {_business_text(item['business_area'])}", "",
+            f"## {identifier} · {severity_label(item['severity'])} · {_business_text(item['business_area'])}"
+            f"：{_business_text(item['change_fact'])}", "",
             f"变化：{_business_text(item['change_fact'])}", "",
             f"影响假设：{_business_text(item['impact_hypothesis'])}", "",
             f"依据状态：{states[item['evidence_status']]}", "",
@@ -177,6 +178,10 @@ def render_structured_report(
                 "evidence_id", "repository_id", "repository", "commit", "path", "lines",
             ) if reference.get(key)))
         lines.extend(["证据：" + ("；".join(references) or "尚无可定位证据，须补取证。"), ""])
+        if item.get("evidence_notes"):
+            lines.extend(["原异常依据（未重新核验）：", ""])
+            lines.extend(f"- {_business_text(value)}" for value in item["evidence_notes"])
+            lines.append("")
         if item.get("evidence_gaps"):
             lines.extend(["证据缺口：" + "；".join(map(_business_text, item["evidence_gaps"])), ""])
     lines.extend(["# 测试建议", ""])

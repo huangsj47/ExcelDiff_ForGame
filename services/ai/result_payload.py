@@ -486,6 +486,12 @@ def result_payload(
     ]
     # 逐条裁决按**指纹**与结论对起来（不按下标：撤销之后的清单已经短了，按下标会整体错位）。
     rows = {str(row.get("fingerprint") or ""): row for row in ruling_rows(ruling)}
+    if outcome.report_sections is not None:
+        from services.ai.report_completeness import ensure_anomaly_cards
+        business_items = ensure_anomaly_cards(
+            business_items, kept,
+            dimension_labels={spec.id: spec.label for spec in outcome.dimension_specs},
+        )
     business_markdown = outcome.report_markdown
     if outcome.report_sections is not None and business_items != outcome.report_items:
         from services.ai.business_baseline import replace_business_body
