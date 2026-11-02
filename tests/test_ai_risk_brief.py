@@ -7,14 +7,15 @@ def overview(report):
     return report.split("**风险速览**", 1)[1].split("## R1", 1)[0]
 
 
-def test_brief_explains_fact_consequence_and_causal_preconditions_instead_of_title():
+def test_legacy_brief_explains_change_and_effect_and_keeps_conditions_in_details():
     item = report_item(title="列表格式不一致", change_fact="字段由两个元素变为三个，新增元素为0",
                        impact_hypothesis="容器可能无产出", impact_conditions=["第三元素是数量", "0表示不生成"],
                        decision_question="第三元素实际是什么含义？")
     report = parse(structured(report_items=[item])).report_markdown
     brief = overview(report)
-    for text in ("字段由两个元素变为三个", "第三元素是数量", "0表示不生成", "容器可能无产出", "待确认"):
+    for text in ("字段由两个元素变为三个", "容器可能无产出"):
         assert text in brief
+    assert "第三元素是数量" in report and "0表示不生成" in report
     assert "关注标题" not in brief and "列表格式不一致" not in brief
 
 
@@ -29,8 +30,9 @@ def test_mixed_direction_values_survive_in_brief_even_when_title_is_inaccurate()
 def test_unknown_preconditions_are_visible_in_the_brief():
     item = report_item(change_fact="列被删除", impact_hypothesis="旧读取方可能取空", impact_conditions=[])
     brief = overview(parse(structured(report_items=[item])).report_markdown)
-    assert "前提未核实" in brief and "旧读取方可能取空" in brief
-    assert "正式人数是什么？" in brief
+    assert "旧读取方可能取空" in brief
+    report = parse(structured(report_items=[item])).report_markdown
+    assert "尚未确认触发条件" in report and "正式人数是什么？" in report
 
 
 def test_brief_is_bounded_but_complete_original_facts_remain_in_details():
@@ -41,7 +43,8 @@ def test_brief_is_bounded_but_complete_original_facts_remain_in_details():
     report = parse(structured(report_items=[item])).report_markdown
     brief = overview(report)
     assert len(brief) < 500
-    assert "升至1000000" in brief and "…" in brief
+    assert "…" not in brief
+    assert "升至1000000" in report
     assert "变化（待核实描述）：" + fact in report
     assert impact in report
 
@@ -65,7 +68,8 @@ def test_brief_does_not_turn_a_missing_fact_into_a_true_runtime_trigger():
                        impact_conditions=["仓库未提供产出概率"], decision_question="概率是多少？")
     brief = overview(parse(structured(report_items=[item])).report_markdown)
     assert "若仓库未提供" not in brief
-    assert "待确认" in brief and "仓库未提供产出概率" in brief
+    assert "仓库未提供产出概率" not in brief
+    assert "仓库未提供产出概率" in parse(structured(report_items=[item])).report_markdown
 
 
 def test_brief_joins_sentences_without_conflicting_terminal_punctuation():

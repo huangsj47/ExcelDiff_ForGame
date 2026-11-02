@@ -40,7 +40,8 @@ def test_legacy_title_fallback_does_not_cut_the_key_value_at_the_end():
     fact = "较长的业务对象说明" * 10 + "；入局消耗由10改为空"
     report = parse(structured(report_items=[report_item(change_fact=fact)])).report_markdown
     summary = report.split("风险速览", 1)[1].split("## R1", 1)[0]
-    assert "入局消耗由10改为空" in summary
+    assert "…" not in summary
+    assert "入局消耗由10改为空" in report
 
 
 def test_next_step_does_not_skip_the_unknown_business_precondition():

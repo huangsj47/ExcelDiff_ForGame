@@ -24,30 +24,29 @@ def evidence_label(item):
 
 
 def risk_brief(item):
-    """Reuse canonical facts/causal fields, never a second model-written title.
+    """One authored sentence, never a head/tail splice of technical columns."""
+    if item.get("reader_summary"):
+        return item["reader_summary"]
+    # Legacy cards have no reader prose. Keep a complete short sentence if it
+    # fits; otherwise direct readers to the intact detail rather than cut words.
+    title = str(item.get("change_fact") or "配置发生变化").strip().rstrip("。；; ")
+    impact = str(item.get("impact_hypothesis") or "具体影响需核实").strip().rstrip("。；; ")
+    brief = f"{title}，可能影响：{impact}。"
+    if len(brief) <= 100 and "\n" not in brief:
+        return brief
+    area = str(item.get("business_area") or "相关功能")
+    if len(area) > 30:
+        area = "相关玩法"
+    return f"{area}有待核查的配置变化，可能影响玩家正常使用，具体表现见下方说明。"
 
-    These are display excerpts only. Keep the tail (often a counterexample or
-    exceptional value) and mark omissions; full statements remain in the card.
-    """
-    def excerpt(value, limit):
-        value = " ".join(str(value or "").split()).rstrip("。；; ")
-        if len(value) <= limit:
-            return value
-        head = (limit - 1) * 2 // 3
-        return value[:head] + "…" + value[-(limit - head - 1):]
 
-    fact = excerpt(item.get("change_fact"), 80)
-    impact = excerpt(item.get("impact_hypothesis"), 80)
-    conditions = excerpt("；".join(item.get("impact_conditions") or ()), 60)
-    question = excerpt(item.get("decision_question"), 60)
-    brief = f"变化：{fact}；风险假设：{impact}"
-    if conditions:
-        brief += f"；触发前提（待确认）：{conditions}"
-    else:
-        brief += "；前提未核实"
-        if question:
-            brief += f"，待确认：{question}"
-    return brief
+def _reader_card(lines, item, text):
+    lines.extend([f"变化：{text(item['reader_change'])}", "",
+                  f"可能影响：{text(item['reader_impact'])}", ""])
+    if item.get("decision_question"):
+        lines.extend([f"需确认：{text(item['decision_question'])}", ""])
+    steps = item["test_actions"][0]["steps"]
+    lines.extend(["建议验证：" + " → ".join(map(text, steps)), ""])
 
 
 def render(items, sections, *, confirmed_blocker_ids=()):
@@ -56,9 +55,11 @@ def render(items, sections, *, confirmed_blocker_ids=()):
 
     ordered = sort_report_items(items, confirmed_blocker_ids=confirmed_blocker_ids)
     labelled = [(f"R{index}", item) for index, item in enumerate(ordered, 1)]
-    lines = ["# 变更理解", "",
-             "本节为模型归纳，含待核实推断，不构成发布裁决；阻断与放行由负责人确认。", "",
-             text(sections.get("overview")), ""]
+    readable = any(item.get("reader_change") for item in ordered)
+    lines = ["# 变更理解", ""]
+    if not readable:
+        lines.extend(["本节为模型归纳，含待核实推断，不构成发布裁决；阻断与放行由负责人确认。", ""])
+    lines.extend([text(sections.get("overview")), ""])
 
     def chapter(title, key, empty, qualifier=""):
         lines.extend([f"# {title}", ""])
@@ -69,6 +70,7 @@ def render(items, sections, *, confirmed_blocker_ids=()):
 
     chapter("变更内容摘要", "changes", "未提供额外变更摘要。")
     chapter("影响面分析", "impacts", "影响面尚待结合条目逐项验证。",
+            "重点核对以下玩法与玩家表现。" if readable else
             "以下列出影响路径与验证对象；实际后果须满足对应条目的推断前提并经验证。")
     lines.extend(["# 风险评估", ""])
     if not labelled:
@@ -80,6 +82,13 @@ def render(items, sections, *, confirmed_blocker_ids=()):
                          f"{text(risk_brief(item))}")
         lines.append("")
     for label, item in labelled:
+        if item.get("reader_change") and item.get("reader_impact"):
+            lines.extend([f"## {label} · {severity_label(item['severity'])} · {text(item['business_area'])}"
+                          f"：{text(item.get('title') or item['reader_summary'])}", ""])
+            _reader_card(lines, item, text)
+            if item.get("evidence_gaps"):
+                lines.extend(["尚缺资料：" + "；".join(map(text, item["evidence_gaps"])), ""])
+            continue
         lines.extend([f"## {label} · {severity_label(item['severity'])} · {text(item['business_area'])}"
                       f"：关注标题：{text(item.get('title') or item['change_fact'])}", "",
                       f"变化（待核实描述）：{text(item['change_fact'])}", "",
@@ -107,12 +116,13 @@ def render(items, sections, *, confirmed_blocker_ids=()):
             lines.extend([f"条件：{text(action['conditions'])}", "",
                           "步骤：" + " → ".join(map(text, action["steps"])), "",
                           f"预期：{text(expected)}", ""])
-            if known:
+            if known and not item.get("reader_change"):
                 lines.extend(["预期口径：模型已提供规则依据；来源取回不等于业务需求已获人工确认。", ""])
     if not labelled:
         lines.extend(["没有关联风险条目的专项动作；仍需完成发布基础验证。", ""])
     chapter("回归建议", "regressions", "未提供额外跨功能回归建议。")
     lines.extend(["# 上线与回滚关注点", "",
+                  "先完成相关验证。尚未确认的玩法规则和修复方案，由策划与程序负责人确认后再决定是否发布。" if readable else
                   "先核实各项前提与需求规则，执行对应验证，再由负责人决定修复与放行；"
                   "上线顺序、观测与回滚措施按已确认规则落实。", ""])
     if sections.get("gaps"):
@@ -126,6 +136,11 @@ def render(items, sections, *, confirmed_blocker_ids=()):
         identifier = str(item["id"])
         safe_id = identifier if re.fullmatch(r"R-[0-9a-f]{12}", identifier) else text(identifier)
         lines.extend([f"### {label} · 稳定标识 {safe_id}", ""])
+        if item.get("reader_change"):
+            lines.extend([f"原始变更事实：{text(item['change_fact'])}", "",
+                          f"影响假设原文：{text(item['impact_hypothesis'])}", "",
+                          "推断前提：" + "；".join(map(text, item.get("impact_conditions") or ("尚未核实",))), "",
+                          f"依据状态：{evidence_label(item)}。", ""])
         if item.get("change_fact_refs"):
             lines.extend(["事实坐标：" + "；".join(map(text, item["change_fact_refs"])), ""])
         for index, action in enumerate(item["test_actions"], 1):

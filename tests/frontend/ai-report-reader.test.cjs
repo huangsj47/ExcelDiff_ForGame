@@ -349,3 +349,30 @@ test('history preview loads the same reader with native chapter controls', async
     nav.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
     assert.equal(output.querySelector(nav.getAttribute('href')).hasAttribute('open'), true);
 });
+
+
+test('reader prose gives one short risk sentence and keeps reward tuples in folded evidence', () => {
+    const summary = '榜单奖励由货币改为装扮，可能发出与档位方案不符的奖励。';
+    const script = [
+        'import sys',
+        'from services.ai.report_document import render_structured_report',
+        'from services.ai.report_items import normalize_report_items',
+        'item = {"severity":"medium","business_area":"周榜奖励","title":"奖励内容调整",',
+        '"reader_summary":"榜单奖励由货币改为装扮，可能发出与档位方案不符的奖励。",',
+        '"reader_change":"周榜奖励改为荧火徽章。","reader_impact":"玩家可能领错奖励，需核对档位方案。",',
+        '"change_fact":"7,200001,20000 -> 12,901,1","impact_hypothesis":"奖励内容可能与预期不符",',
+        '"evidence_status":"unverified","decision_question":"奖励方案是否已确认？",',
+        '"test_actions":[{"conditions":"触发结算","steps":["领取并查看背包"],"expected":""}],"evidence_refs":[]}',
+        'sys.stdout.buffer.write(render_structured_report(normalize_report_items([item]), {"overview":"调整周榜奖励"}).encode("utf-8"))'
+    ].join('\n');
+    const markdown = execFileSync('python', ['-c', script], { cwd: root, encoding: 'utf8' });
+    const { output } = setup(markdown);
+    const risk = output.querySelector('.ai-reader-risk');
+    assert.ok(risk.textContent.includes(summary));
+    assert.ok(risk.textContent.includes('周榜奖励改为荧火徽章'));
+    assert.equal(risk.textContent.includes('7,200001,20000'), false);
+    assert.equal(risk.textContent.includes('触发前提（待确认）'), false);
+    const archive = output.querySelector('.ai-reader-archive');
+    assert.ok(archive.textContent.includes('7,200001,20000'));
+    assert.ok(archive.querySelector('details') || archive.matches('details'));
+});

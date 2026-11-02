@@ -17,6 +17,7 @@ SECTION_KEYS = ("overview", "changes", "impacts", "regressions", "release_action
 ITEM_KEYS = frozenset((
     "id", "title", "finding_ref", "finding_fingerprint", "severity", "business_area", "change_fact", "change_fact_refs",
     "impact_hypothesis", "impact_basis", "impact_conditions", "impact_refs",
+    "reader_summary", "reader_change", "reader_impact",
     "evidence_status", "decision_question", "test_actions", "evidence_refs",
 ))
 REFERENCE_KEYS = frozenset(("evidence_id", "repository_id", "repository", "commit", "path", "lines"))
@@ -24,6 +25,19 @@ REFERENCE_KEYS = frozenset(("evidence_id", "repository_id", "repository", "commi
 
 class ReportValidationError(ValueError):
     """A correctable schema error, rather than an item to silently discard."""
+
+
+READER_KEYS = ("reader_summary", "reader_change", "reader_impact")
+
+
+def _reader_fields(raw, location):
+    if not any(key in raw for key in READER_KEYS):
+        return {}
+    fields = {key: _text(raw.get(key), f"{location}.{key}", required=True) for key in READER_KEYS}
+    summary = fields["reader_summary"]
+    if len(summary) > 100 or any(mark in summary for mark in ("\n", "\r", "…", "...")):
+        raise ReportValidationError(f"{location}.reader_summary 须为100字以内完整单行说明，不得省略截断")
+    return fields
 
 
 def _text(value: Any, location: str, *, required: bool = False) -> str:
@@ -132,6 +146,7 @@ def normalize_report_items(value: Any) -> tuple[dict, ...]:
             raise ReportValidationError(f"{label}.severity 必须是 {REPORT_SEVERITIES} 之一")
         if item["evidence_status"] not in EVIDENCE_STATUSES:
             raise ReportValidationError(f"{label}.evidence_status 必须是 {EVIDENCE_STATUSES} 之一")
+        item.update(_reader_fields(raw, label))
         item.update(
             title=_text(raw.get("title", ""), f"{label}.title"),
             finding_ref=_text(raw.get("finding_ref", ""), f"{label}.finding_ref"),

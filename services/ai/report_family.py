@@ -7,7 +7,7 @@ from typing import Mapping, Sequence
 
 from services.ai.degradation import DEGRADE_SUBAGENT
 from services.ai.report_document import render_structured_report
-from services.ai.report_items import ITEM_KEYS, REFERENCE_KEYS, REPORT_SEVERITIES, sort_report_items
+from services.ai.report_items import ITEM_KEYS, READER_KEYS, REFERENCE_KEYS, REPORT_SEVERITIES, sort_report_items
 
 
 def report_candidate_id(label: str, item: Mapping) -> str:
@@ -112,6 +112,10 @@ def reconcile_business_reports(synthesis, steps: Sequence):
             gaps.append(f"{identifier} 待合并：{reason}；发现、验证动作与证据已保全")
             pending = True
         else:
+            # Presentation is a coherent group. Do not silently lose the child's
+            # plain-language explanation when synthesis only rewrites technical fields.
+            if not any(current.get(key) for key in READER_KEYS):
+                current.update({key: original[key] for key in READER_KEYS if key in original})
             current["test_actions"] = _union(current.get("test_actions", ()), original.get("test_actions", ()))
             current["evidence_refs"] = _union(current.get("evidence_refs", ()), original.get("evidence_refs", ()))
             for key in ("evidence_gaps", "evidence_notes"):
