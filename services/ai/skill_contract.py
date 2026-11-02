@@ -471,6 +471,12 @@ def _line_count(text: str) -> int:
 
 def _check_reference_file(path: Path, problems: list[str]) -> None:
     text = path.read_text(encoding="utf-8")
+    from services.ai.document_metadata import document_description
+
+    try:
+        document_description(text)
+    except SkillContractError as exc:
+        problems.append(f"{path.name} 的文档简介不合法：{exc}")
     if _line_count(text) > REFERENCE_TOC_THRESHOLD_LINES and "目录" not in text:
         problems.append(
             f"{path.name} 超过 {REFERENCE_TOC_THRESHOLD_LINES} 行却没有目录"

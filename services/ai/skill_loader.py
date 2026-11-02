@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from services.ai.document_metadata import document_description
 from services.ai.skill_contract import (
     DEFAULT_DIMENSION_SPECS,
     PLATFORM_SKILL_RELATIVE_PATH,
@@ -231,6 +232,11 @@ def _read_document(path: Path, *, require_frontmatter: bool, name: str | None = 
         except SkillContractError as exc:
             raise SkillLoadError(f"{path} 的 frontmatter 不合法：{exc}") from exc
         description = fields.get("description", "")
+    else:
+        try:
+            description = document_description(text)
+        except SkillContractError as exc:
+            raise SkillLoadError(f"{path} 的文档简介不合法：{exc}") from exc
     return SkillDocument(
         name=name or path.name,
         description=description,
@@ -547,7 +553,7 @@ def build_skill_index(loaded: LoadedSkills) -> str:
     lines.append("")
     if project_documents:
         lines.append(f"## 项目专属知识（项目代号 {loaded.project_slug}）")
-        lines.append("这些文档描述**这个项目**的事实，判断「属于哪个系统」「按什么规则编号」时先读它们：")
+        lines.append("这些文档描述**这个项目**的事实与背景，按简介选择与本次变化相关的文档：")
         for document in project_documents:
             if document.description:
                 lines.append(f"- `{document.name}` —— {document.description}")

@@ -753,6 +753,22 @@ def test_the_listing_reports_each_kind_with_its_usage(client, project_id, projec
 # ==========================================================================
 
 
+def test_reference_description_round_trip_over_http(client, project_id, projects_root, monkeypatch):
+    _allow(monkeypatch)
+    _seed_pack(projects_root, _code_of(project_id))
+    url = f"/ai-analysis/projects/{project_id}/knowledge/references/reward-info"
+    response = client.put(url, json={"content": "# 奖励用途\n", "description": "榜单奖励与物品名称"})
+    assert response.status_code == 200, response.get_json()
+    content = client.get(url).get_json()["content"]
+    # Omitting the field is a raw-body save, not a request to erase the intro.
+    assert client.put(url, json={"content": content}).status_code == 200
+    readback = client.get(url).get_json()
+    assert readback["description"] == "榜单奖励与物品名称"
+    assert client.put(url, json={"content": content, "description": "新版奖励说明"}).status_code == 200
+    entries = client.get(f"/ai-analysis/projects/{project_id}/knowledge").get_json()["entries"]
+    assert next(e for e in entries if e["name"] == "reward-info.md")["description"] == "新版奖励说明"
+
+
 def test_a_new_skill_gets_server_composed_frontmatter(client, project_id, projects_root, monkeypatch):
     """frontmatter 由服务端拼 —— 用户只给目录名与一句话说明。"""
     _allow(monkeypatch)

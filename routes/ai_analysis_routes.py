@@ -1778,7 +1778,7 @@ def ai_project_knowledge_reference_save(project_id, name):
     return _knowledge_write(
         project_id,
         lambda code: project_pack_service.write_reference(
-            code, name, payload.get("content", ""), description=payload.get("description", "")
+            code, name, payload.get("content", ""), description=payload.get("description")
         ),
     )
 

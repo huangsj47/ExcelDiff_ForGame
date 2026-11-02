@@ -301,8 +301,8 @@ def test_skill_index_lists_names_without_bodies():
 
     assert "incident-checklist.md" in index
     assert "gameplay-semantics.md" in index
-    # 正文里的标志性内容不得出现在索引里。
-    assert "吸灵器" not in index
+    # 名词可以出现在简介；完整动作链正文不能被无条件注入。
+    assert "靠近或朝向 → 持续吸取 → 完成或奖励 → 恢复行动" not in index
     assert "事故计数" not in index
     # 索引必须远小于正文总量。
     body_total = sum(document.char_count for document in loaded.project_documents)

@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from services.ai.document_metadata import document_description, with_description
 from services.ai.endpoint_service import ConfigValidationError, FieldError
 from services.ai.skill_contract import (
     DESCRIPTION_MAX_CHARS,
@@ -52,6 +53,7 @@ from services.ai.skill_contract import (
     SKILL_NAME_MAX_CHARS,
     SKILL_NAME_RE,
     _mentioned_markdown_files,
+    SkillContractError,
     validate_project_pack,
 )
 from services.ai.skill_loader import (
@@ -696,6 +698,7 @@ class KnowledgeEntry:
     removable: bool
     # 子 skill 的目录名（kind == skill 时才有意义，删除时用它）。
     dir_name: str = ""
+    description: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -707,6 +710,7 @@ class KnowledgeEntry:
             "usage": self.usage,
             "removable": self.removable,
             "dir_name": self.dir_name,
+            "description": self.description,
         }
 
 
@@ -714,6 +718,15 @@ def _describe_file(path: Path) -> tuple[int, str]:
     stat = path.stat()
     modified = datetime.fromtimestamp(stat.st_mtime, tz=BEIJING_TZ)
     return stat.st_size, modified.strftime("%Y-%m-%d %H:%M")
+
+
+def _editable_description(text: str) -> str:
+    # A malformed file must still be readable in the repair editor. Analysis
+    # and the write gate remain strict; only management's presentation degrades.
+    try:
+        return document_description(text)
+    except SkillContractError:
+        return "简介格式有误，请编辑文档修正。"
 
 
 def describe_pack(project_code: str, *, repo_root: Path | None = None) -> dict:
@@ -737,6 +750,7 @@ def describe_pack(project_code: str, *, repo_root: Path | None = None) -> dict:
                     size=size,
                     modified_at=modified,
                     usage="知识包的入口。模型先看到它的一句话说明，正文里列出的文档才会被按需读取。",
+                    description=_editable_description(manifest_path.read_text(encoding="utf-8")),
                     removable=False,
                 )
             )
@@ -753,6 +767,7 @@ def describe_pack(project_code: str, *, repo_root: Path | None = None) -> dict:
                         size=size,
                         modified_at=modified,
                         usage="按需读取：模型判断「属于哪个系统」「按什么规则编号」时会来读这一份。",
+                        description=_editable_description(path.read_text(encoding="utf-8")),
                         removable=True,
                     )
                 )
@@ -772,6 +787,7 @@ def describe_pack(project_code: str, *, repo_root: Path | None = None) -> dict:
                     size=size,
                     modified_at=modified,
                     usage="项目自建的子 skill：它的说明会进提示词索引，正文由模型按需读取。",
+                    description=_editable_description(skill_md.read_text(encoding="utf-8")),
                     removable=True,
                     dir_name=child.name,
                 )
@@ -818,6 +834,7 @@ def read_entry(project_code: str, kind: str, name: str, *, repo_root: Path | Non
         "name": target.name if kind != KIND_SKILL else name,
         "rel_path": rel_path,
         "content": text,
+        "description": _editable_description(text),
         "size": size,
         "modified_at": modified,
     }
@@ -907,7 +924,7 @@ def write_reference(
     name: str,
     content: str,
     *,
-    description: str = "",
+    description: str | None = None,
     repo_root: Path | None = None,
 ) -> dict:
     """新建 / 覆盖一份知识文档 `references/<name>.md`。
@@ -930,6 +947,10 @@ def write_reference(
     file_name = Path(rel_path).name
     _require_manifest_first(location)
     text = _normalize_text(content)
+    try:
+        text = with_description(text, description)
+    except SkillContractError as exc:
+        raise _reject("description", "文档简介", str(exc)) from exc
     _check_content_size(text, label=file_name)
     _check_pack_size(location.pack_dir, extra_bytes=len(text.encode("utf-8")))
 
@@ -940,7 +961,7 @@ def write_reference(
     def mutate(root: Path) -> None:
         current_manifest = (root / PROJECT_PACK_MANIFEST).read_text(encoding="utf-8")
         updated_manifest = _append_reference_mention(
-            current_manifest, file_name, _normalize_text(description)
+            current_manifest, file_name, document_description(text)
         )
         seen["mention_added"] = updated_manifest != current_manifest
         _atomic_write(safe_join(root, REFERENCES_DIR_NAME, file_name), text)

@@ -1,3 +1,7 @@
+---
+description: 历史README配表规范摘录，编号和分类已被旧实测证伪，不作为现行依据；使用system-map和config-pipelines并核实本次实表。
+---
+
 > ⚠️ **本文件已被 `system-map.md` 取代，仅作历史参考。**
 > 本文照抄的是 `qz_config/README.md` 的口径，而该 README 已被实测证伪：
 > 「ID 必须是 6 位」实际是少数派（6 位 17.4%、8 位 19.0%）、README 自己的分类表

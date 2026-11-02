@@ -18,8 +18,8 @@ critical_path_patterns: (?:^|/)ExportExcelTool/, (?:^|/)EditorCfgTool/, (?:^|/)l
 | 键 | 本项目当前 | 作用 |
 |---|---|---|
 | `generated_prefixes` | `Cfg` | 导表产物的模块名前缀。平台据此把「同一记号出现在表与产物两侧」的文件配成一组，在变更清单里提示「疑似同一次改动」。 |
-| `critical_path_patterns` | `ExportExcelTool/`、`EditorCfgTool/`、`lua/code/` | 关键路径的路径模式（命中就把本次分析升级为全量）。**声明了就以这里为准**，不再叠加平台默认清单。 |
-| `dimensions` | **没声明**（用平台默认那九个） | 本项目生效的**检查维度清单**（`id=中文名`，逗号分隔，顺序有意义）。声明了就**取代**平台出厂那一份：平台把它拼进提示词（模型据此写 `category`）、按它分工、按它把报告里的维度翻成中文名。写法见下一节。 |
+| `critical_path_patterns` | `ExportExcelTool/`、`EditorCfgTool/`、`lua/code/` | 关键路径的路径模式（用于提示影响面与建议复核；不应仅因此把增量强制改为全量）。**声明了就以这里为准**，不再叠加平台默认清单。 |
+| `dimensions` | **没声明**（按本次analysis_profile使用平台维度） | 本项目生效的**检查维度清单**（`id=中文名`，逗号分隔，顺序有意义）。声明了就**取代**平台出厂那一份：平台把它拼进提示词（模型据此写 `category`）、按它分工、按它把报告里的维度翻成中文名。写法见下一节。 |
 
 写法上的四条要点：
 
@@ -37,7 +37,7 @@ critical_path_patterns: (?:^|/)ExportExcelTool/, (?:^|/)EditorCfgTool/, (?:^|/)l
 本项目**刻意不声明**这个键：G119 是配表驱动的项目，平台出厂那九个维度（`config_id`、
 `config_value`、`config_data`、`value_sanity`、`config_linkage`、`module_coupling`、
 `code_logic`、`version_branch`、`process`）本来就是照着这类项目写的，声明一遍等于把
-同一份清单抄两处、抄错了反而要命。**不声明 = 用平台默认，行为与以前逐字一致。**
+同一份清单抄两处容易漂移。**不声明 = 按本次analysis_profile使用平台默认维度**；tables只过配表相关维度，all使用完整维度，不能据此宣称两种范围相同。
 
 换一个**不是**配表驱动的项目接入平台时，这个键才是要紧的：那种项目的真实问题是性能回归、
 协议不兼容、资源引用丢失之类，落不进上面那九个 id 里 —— 而平台不会因为它们「不在清单里」

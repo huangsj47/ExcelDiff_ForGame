@@ -3845,7 +3845,7 @@ function buildAiKnowledgeRow(entry) {
     main.appendChild(name);
     const usage = document.createElement('div');
     usage.className = 'ai-know-row__usage';
-    usage.textContent = entry.usage || AI_KNOW_KINDS[entry.kind].defaultUsage;
+    usage.textContent = entry.description || entry.usage || AI_KNOW_KINDS[entry.kind].defaultUsage;
     main.appendChild(usage);
     item.appendChild(main);
 
@@ -3979,9 +3979,8 @@ function openAiKnowledgeEditor(mode, kind, name) {
     aiKnowShow('aiKnowledgeNameField', isCreate && !isManifest);
     // 一句话说明：
     //   * 子 skill —— 一直可改（它就是 frontmatter 里的 description，保存会重写）；
-    //   * 知识文档 —— 只在新建时可填，而且它真正的去处是**清单里那一行引用**
-    //     （已有的引用行是用户自己的措辞，平台不覆盖，所以编辑时这一栏没有意义，不显示）。
-    aiKnowShow('aiKnowledgeDescriptionField', isSkill || (!isManifest && isCreate));
+    //   * 知识文档 —— 简介保存在文首 description，列表与模型索引共用。
+    aiKnowShow('aiKnowledgeDescriptionField', !isManifest);
     aiKnowShow('aiKnowledgeFrontmatter', isSkill);
     aiKnowShow('aiKnowledgeTemplateBtn', isSkill);
 
@@ -4018,7 +4017,7 @@ function openAiKnowledgeEditor(mode, kind, name) {
     if (descHelp) {
         descHelp.textContent = isSkill
             ? '这一栏进提示词索引，是 AI 决定「要不要读它」的唯一依据，必须写清楚它管什么。'
-            : '会写进 KNOWLEDGE.md 里这一行引用的说明，让 AI（和你的同事）知道这份文档管什么。';
+            : '保存在文档开头的 description；列表与 AI 可读目录使用同一份简介。正文里的其它元信息会保留。';
     }
 
     if (isCreate) {
@@ -4070,6 +4069,7 @@ async function startAiKnowledgeEdit(kind, name) {
         if (descInput) descInput.value = parsed.description;
     } else if (contentInput) {
         contentInput.value = data.content;
+        if (descInput && kind === 'reference') descInput.value = data.description || '';
     }
     refreshAiKnowledgeFrontmatter();
     refreshAiKnowledgeCount();
