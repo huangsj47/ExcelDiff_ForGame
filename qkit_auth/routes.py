@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from urllib.parse import urlencode, urlparse
 
 from flask import (
@@ -503,6 +504,18 @@ def project_name_hint_image():
     return send_from_directory(current_app.static_folder, "img/project_name_simple.png")
 
 
+def _pending_requests_for_template(items: list[dict]) -> list[dict]:
+    """Keep API ISO strings separate from the template's datetime contract."""
+    views = []
+    for item in items:
+        view = dict(item)
+        created_at = view.get("created_at")
+        if isinstance(created_at, str):
+            view["created_at"] = datetime.fromisoformat(created_at)
+        views.append(view)
+    return views
+
+
 @auth_bp.route("/users")
 def user_list():
     is_platform_admin, scope_project_ids, projects = _resolve_user_mgmt_scope()
@@ -622,8 +635,8 @@ def user_list():
             user_confirm_permission_map[user.id] = permission
 
     total_pages = max(1, (total_users + per_page - 1) // per_page)
-    pending_join_requests = list_pending_join_requests() if is_platform_admin else []
-    pending_create_requests = list_pending_create_requests() if is_platform_admin else []
+    pending_join_requests = _pending_requests_for_template(list_pending_join_requests()) if is_platform_admin else []
+    pending_create_requests = _pending_requests_for_template(list_pending_create_requests()) if is_platform_admin else []
     return render_template(
         "qkit_user_management.html",
         users=users,
